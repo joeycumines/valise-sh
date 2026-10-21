@@ -1,0 +1,9 @@
+name=e2e_generated_config
+requires=e2e_env_setup
+optional=
+shells=sh bash zsh ksh
+platforms=any
+side_effect=read-only
+exports=e2e_config_loaded
+updates=
+load=modules/e2e/generated_config.sh

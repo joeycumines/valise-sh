@@ -1,0 +1,6 @@
+# Copy to config.mk for machine-local Make defaults.
+# Command-line assignments still take precedence, for example:
+#   make VALISE_REQUIRE_TOOLING=0 check
+#
+# Uncomment to require every extended-runtime lane on this machine:
+# VALISE_REQUIRE_TOOLING ?= 1

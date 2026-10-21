@@ -1,0 +1,9 @@
+name=e2e_completions_bash
+requires=e2e_aliases
+optional=
+shells=bash
+platforms=any
+side_effect=read-only
+exports=e2e_bash_completions_loaded
+updates=
+load=modules/e2e/completions_bash.sh

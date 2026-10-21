@@ -1,0 +1,9 @@
+name=fish_only
+requires=
+optional=
+shells=fish
+platforms=any
+side_effect=read-only
+exports=fish_only_loaded
+updates=
+load=modules/fish_only.sh

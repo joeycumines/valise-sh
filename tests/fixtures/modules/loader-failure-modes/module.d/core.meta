@@ -1,0 +1,9 @@
+name=core
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=core_loaded
+updates=
+load=modules/core.sh

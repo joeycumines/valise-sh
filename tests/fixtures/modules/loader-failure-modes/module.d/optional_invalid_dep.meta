@@ -1,0 +1,9 @@
+name=optional_invalid_dep
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=generated-file
+exports=optional_invalid_dep_loaded
+updates=
+load=modules/optional_invalid_dep.sh

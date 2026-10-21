@@ -1,0 +1,1090 @@
+#!/bin/sh
+
+# Copyright (c) 2026 Joseph Cumines
+# SPDX-License-Identifier: MIT
+# POSIX shell-profile module loader.
+
+_sp_loader_path_is_physical() {
+  _spl_check_root=$1
+  _spl_check_path=$2
+  case $_spl_check_root in
+  /*) ;;
+  *) _spl_check_root=$(command pwd)/$_spl_check_root ;;
+  esac
+  case $_spl_check_path in
+  /*) ;;
+  *) _spl_check_path=$(command pwd)/$_spl_check_path ;;
+  esac
+  case $_spl_check_root in
+  /) ;;
+  */) _spl_check_root=${_spl_check_root%/} ;;
+  esac
+  case $_spl_check_path in
+  /) ;;
+  */) _spl_check_path=${_spl_check_path%/} ;;
+  esac
+  _spl_check_rest=${_spl_check_root#/}
+  _spl_check_prefix=/
+  while [ -n "$_spl_check_rest" ]; do
+    case $_spl_check_rest in
+    */*)
+      _spl_check_component=${_spl_check_rest%%/*}
+      _spl_check_rest=${_spl_check_rest#*/}
+      ;;
+    *)
+      _spl_check_component=$_spl_check_rest
+      _spl_check_rest=
+      ;;
+    esac
+    [ "$_spl_check_prefix" = / ] || _spl_check_prefix=$_spl_check_prefix/
+    _spl_check_prefix=$_spl_check_prefix$_spl_check_component
+    case $_spl_check_prefix in
+    /var | /tmp) ;;
+    *)
+      if [ -L "$_spl_check_prefix" ]; then
+        unset _spl_check_root _spl_check_path _spl_check_relative _spl_check_component _spl_check_prefix _spl_check_rest
+        return 1
+      fi
+      ;;
+    esac
+  done
+  unset _spl_check_rest
+  case $_spl_check_path in
+  "$_spl_check_root")
+    unset _spl_check_root _spl_check_path _spl_check_relative _spl_check_component _spl_check_prefix
+    return 0
+    ;;
+  "$_spl_check_root"/*)
+    _spl_check_relative=${_spl_check_path#"$_spl_check_root"/}
+    ;;
+  *)
+    unset _spl_check_root _spl_check_path _spl_check_relative _spl_check_component _spl_check_prefix
+    return 1
+    ;;
+  esac
+  _spl_check_prefix=$_spl_check_root
+  while :; do
+    case $_spl_check_relative in
+    */*)
+      _spl_check_component=${_spl_check_relative%%/*}
+      _spl_check_relative=${_spl_check_relative#*/}
+      ;;
+    *)
+      _spl_check_component=$_spl_check_relative
+      _spl_check_relative=
+      ;;
+    esac
+    _spl_check_prefix=$_spl_check_prefix/$_spl_check_component
+    if [ -L "$_spl_check_prefix" ]; then
+      unset _spl_check_root _spl_check_path _spl_check_relative _spl_check_component _spl_check_prefix
+      return 1
+    fi
+    [ -n "$_spl_check_relative" ] || break
+  done
+  unset _spl_check_root _spl_check_path _spl_check_relative _spl_check_component _spl_check_prefix
+  return 0
+}
+
+sp_loader_load_modules() {
+  if [ "$#" -ne 4 ]; then
+    command printf '%s\n' 'loader: usage: sp_loader_load_modules <root> <wanted-list> <mode> <phase>' >&2
+    unset -f _sp_loader_path_is_physical 2>/dev/null || :
+    return 1
+  fi
+
+  _spl_root=$1
+  _spl_wanted=$2
+  _spl_mode=$3
+  _spl_phase=$4
+  _spl_return=0
+  _spl_strict_error=0
+  # Multi-root layer search path (T07): the primary root is $1 and always has
+  # priority; VALISE_MODULE_PATH lists additional layer roots in priority
+  # order. A set-but-empty VALISE_MODULE_PATH deliberately selects
+  # single-root behavior (strict set-test: the variable wins whenever it is
+  # set). Unset means today's single-root behavior.
+  _spl_search_path=${VALISE_MODULE_PATH:-}
+  _spl_current_shell=sh
+  if [ -n "${BASH_VERSION:-}" ] && (command builtin shopt >/dev/null 2>&1); then
+    _spl_current_shell=bash
+  fi
+  [ -n "${ZSH_VERSION:-}" ] && _spl_current_shell=zsh
+  [ -n "${KSH_VERSION:-}" ] && _spl_current_shell=ksh
+  _spl_uname=$(command uname -s 2>/dev/null || command printf unknown)
+  case "$_spl_uname" in
+  Darwin) _spl_current_platform=darwin ;;
+  Linux) _spl_current_platform=linux ;;
+  FreeBSD) _spl_current_platform=freebsd ;;
+  OpenBSD) _spl_current_platform=openbsd ;;
+  NetBSD) _spl_current_platform=netbsd ;;
+  *BSD) _spl_current_platform=bsd ;;
+  *) _spl_current_platform=unknown ;;
+  esac
+
+  case "$_spl_mode" in
+  strict | permissive) ;;
+  *)
+    command printf 'loader: %s\n' "invalid mode: $_spl_mode" >&2
+    unset _spl_root _spl_wanted _spl_mode _spl_phase _spl_return _spl_strict_error _spl_current_shell _spl_uname _spl_current_platform _spl_search_path _spl_layer _spl_meta_file _spl_meta_root _spl_dep_exists _spl_existing_load _spl_layer_load _spl_conflict _spl_layer_ifs_was_set _spl_layer_old_ifs _spl_existing_version _spl_layer_version _spl_existing_version_display _spl_layer_version_display
+    unset -f _sp_loader_path_is_physical 2>/dev/null || :
+    return 1
+    ;;
+  esac
+
+  case "$_spl_phase" in
+  ordinary) ;;
+  *)
+    command printf 'loader: %s\n' "invalid phase: $_spl_phase" >&2
+    unset _spl_root _spl_wanted _spl_mode _spl_phase _spl_return _spl_strict_error _spl_current_shell _spl_uname _spl_current_platform _spl_search_path _spl_layer _spl_meta_file _spl_meta_root _spl_dep_exists _spl_existing_load _spl_layer_load _spl_conflict _spl_layer_ifs_was_set _spl_layer_old_ifs _spl_existing_version _spl_layer_version _spl_existing_version_display _spl_layer_version_display
+    unset -f _sp_loader_path_is_physical 2>/dev/null || :
+    return 1
+    ;;
+  esac
+
+  if ! command -v sp_metadata_read >/dev/null 2>&1; then
+    command printf '%s\n' 'loader: sp_metadata_read is not available; source lib/metadata.sh first' >&2
+    unset _spl_root _spl_wanted _spl_mode _spl_phase _spl_return _spl_strict_error _spl_current_shell _spl_uname _spl_current_platform _spl_search_path _spl_layer _spl_meta_file _spl_meta_root _spl_dep_exists _spl_existing_load _spl_layer_load _spl_conflict _spl_layer_ifs_was_set _spl_layer_old_ifs _spl_existing_version _spl_layer_version _spl_existing_version_display _spl_layer_version_display
+    unset -f _sp_loader_path_is_physical 2>/dev/null || :
+    return 1
+  fi
+
+  _spl_tmp_parent=${TMPDIR:-/tmp}
+  _spl_tmp=$(umask 077 && command mktemp -d \
+    "$_spl_tmp_parent/shell-profile-loader.XXXXXX") || {
+    unset _spl_root _spl_wanted _spl_mode _spl_phase _spl_return _spl_strict_error _spl_current_shell _spl_uname _spl_current_platform _spl_tmp_parent _spl_tmp _spl_search_path _spl_layer _spl_meta_file _spl_meta_root _spl_dep_exists _spl_existing_load _spl_layer_load _spl_conflict _spl_layer_ifs_was_set _spl_layer_old_ifs _spl_existing_version _spl_layer_version _spl_existing_version_display _spl_layer_version_display
+    unset -f _sp_loader_path_is_physical 2>/dev/null || :
+    return 1
+  }
+  _spl_cleanup_tmp=$_spl_tmp
+  _spl_tmp_sentinel=$_spl_tmp/.shell-profile-loader-owned
+  : >"$_spl_tmp_sentinel" || _spl_return=1
+  command mkdir -p "$_spl_tmp/meta" "$_spl_tmp/deps" "$_spl_tmp/optional" "$_spl_tmp/roots" || _spl_return=1
+  : >"$_spl_tmp/queue"
+  : >"$_spl_tmp/seen"
+  : >"$_spl_tmp/modules"
+  : >"$_spl_tmp/blocked"
+  : >"$_spl_tmp/order"
+  : >"$_spl_tmp/failed"
+  : >"$_spl_tmp/strict_required"
+  : >"$_spl_tmp/layers"
+
+  # Validate the layer search path fail-closed: every colon-separated element
+  # must be a non-empty readable, executable directory. Empty elements,
+  # missing, unreadable, or unsearchable directories are data errors, not
+  # skips. Identical duplicate elements are
+  # deduplicated (priority is first occurrence).
+  if [ "$_spl_return" -eq 0 ] && [ -n "$_spl_search_path" ]; then
+    if [ "${IFS+x}" = x ]; then
+      _spl_layer_ifs_was_set=1
+      _spl_layer_old_ifs=${IFS-}
+    else
+      _spl_layer_ifs_was_set=0
+      _spl_layer_old_ifs=
+    fi
+    case $- in
+    *f*) _spl_layer_glob_was_set=1 ;;
+    *)
+      _spl_layer_glob_was_set=0
+      set -f
+      ;;
+    esac
+    # Shell field splitting discards leading/trailing empty fields, so reject
+    # empty colon elements before iterating (including a path consisting only
+    # of colons). Newlines cannot be represented by the line-oriented
+    # temporary file used below.
+    case $_spl_search_path in
+    *'
+'*)
+      command printf 'loader: %s\n' \
+        'invalid VALISE_MODULE_PATH element: newlines are forbidden' >&2
+      _spl_return=1
+      _spl_strict_error=1
+      ;;
+    esac
+    case $_spl_search_path in
+    *'['* | *'?'* | *'*'*)
+      command printf 'loader: %s\n' \
+        'invalid VALISE_MODULE_PATH element: glob metacharacters are forbidden' >&2
+      _spl_return=1
+      _spl_strict_error=1
+      ;;
+    esac
+    case $_spl_search_path in
+    :* | *: | *::* )
+      # Preserve empty-element rejection despite POSIX field splitting eliding
+      # null fields at the boundaries and between adjacent delimiters.
+      _spl_layer=
+      command printf 'loader: %s\n' \
+        'invalid VALISE_MODULE_PATH element: empty path element is forbidden' >&2
+      _spl_return=1
+      _spl_strict_error=1
+      ;;
+    esac
+    IFS=:
+    for _spl_layer in $_spl_search_path; do
+        if [ -z "$_spl_layer" ] || ! _sp_loader_path_is_physical "$_spl_layer" "$_spl_layer" || [ ! -d "$_spl_layer" ] || [ ! -r "$_spl_layer" ] || [ ! -x "$_spl_layer" ]; then
+        command printf 'loader: %s\n' \
+          "invalid VALISE_MODULE_PATH element: $_spl_layer (must be a non-empty readable, executable directory)" >&2
+        _spl_return=1
+        _spl_strict_error=1
+        break
+      fi
+      if [ -n "$(command grep -Fx -- "$_spl_layer" "$_spl_tmp/layers" 2>/dev/null)" ]; then
+        continue
+      fi
+      command printf '%s\n' "$_spl_layer" >>"$_spl_tmp/layers"
+    done
+    [ "$_spl_layer_glob_was_set" -eq 1 ] || set +f
+    if [ "$_spl_layer_ifs_was_set" -eq 1 ]; then
+      IFS=$_spl_layer_old_ifs
+    else
+      unset IFS
+    fi
+    unset _spl_layer_ifs_was_set _spl_layer_old_ifs _spl_layer_glob_was_set _spl_newline
+  fi
+
+  if [ "$_spl_return" -eq 0 ]; then
+    if ! sp_metadata_validate_identifier_list "$_spl_wanted" 'wanted module'; then
+      _spl_return=1
+      _spl_strict_error=1
+    fi
+  fi
+
+  if [ "$_spl_return" -eq 0 ]; then
+    if [ "${IFS+x}" = x ]; then
+      _spl_ifs_was_set=1
+      _spl_old_ifs=${IFS-}
+    else
+      _spl_ifs_was_set=0
+      _spl_old_ifs=
+    fi
+    case $- in
+    *f*) _spl_glob_was_set=1 ;;
+    *)
+      _spl_glob_was_set=0
+      set -f
+      ;;
+    esac
+    IFS=' '
+    for _spl_word in $_spl_wanted; do
+      if sp_metadata_validate_identifier "$_spl_word"; then
+        command printf '%s\n' "$_spl_word" >>"$_spl_tmp/queue"
+        command printf '%s\n' "$_spl_word" >>"$_spl_tmp/strict_required"
+      else
+        command printf 'loader: %s\n' "invalid wanted module: $_spl_word" >&2
+        _spl_return=1
+        _spl_strict_error=1
+      fi
+    done
+    [ "$_spl_glob_was_set" -eq 1 ] || set +f
+    if [ "$_spl_ifs_was_set" -eq 1 ]; then
+      IFS=$_spl_old_ifs
+    else
+      unset IFS
+    fi
+  fi
+
+  while [ "$_spl_return" -eq 0 ] && [ -s "$_spl_tmp/queue" ]; do
+    command sort -u "$_spl_tmp/queue" >"$_spl_tmp/queue.next"
+    command mv "$_spl_tmp/queue.next" "$_spl_tmp/queue"
+    : >"$_spl_tmp/newqueue"
+    while IFS= read -r _spl_mod || [ -n "$_spl_mod" ]; do
+      [ -n "$_spl_mod" ] || continue
+      if command grep -qx "$_spl_mod" "$_spl_tmp/seen" 2>/dev/null; then
+        continue
+      fi
+      command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/seen"
+      # Multi-root resolution (T07): search the primary root then each layer
+      # root in priority order. First hit wins; a second hit whose metadata
+      # or body differs by even one byte is a hard error naming both paths
+      # (never shadowing). When both records carry valid versions and the
+      # versions differ, the error names the versions so the consumer knows
+      # to vendor a single version; equal versions (including two
+      # unversioned records) keep the byte rule. A byte-identical meta+body
+      # copy in a lower layer is redundant but harmless and resolves to the
+      # higher-priority root. A same-name layer module must carry the
+      # contrib_ prefix.
+      _spl_meta_file=
+      _spl_meta_root=
+      if [ -L "$_spl_root/module.d/$_spl_mod.meta" ] || { [ -e "$_spl_root/module.d/$_spl_mod.meta" ] && ! _sp_loader_path_is_physical "$_spl_root" "$_spl_root/module.d/$_spl_mod.meta"; }; then
+        command printf 'loader: %s\n' "$_spl_mod: metadata path contains a symlink"
+        _spl_return=1
+        _spl_strict_error=1
+      elif [ -f "$_spl_root/module.d/$_spl_mod.meta" ]; then
+        _spl_meta_file=$_spl_root/module.d/$_spl_mod.meta
+        _spl_meta_root=$_spl_root
+      fi
+      if [ -s "$_spl_tmp/layers" ]; then
+        while IFS= read -r _spl_layer || [ -n "$_spl_layer" ]; do
+          [ -n "$_spl_layer" ] || continue
+          if [ -L "$_spl_layer/module.d/$_spl_mod.meta" ] || { [ -e "$_spl_layer/module.d/$_spl_mod.meta" ] && ! _sp_loader_path_is_physical "$_spl_layer" "$_spl_layer/module.d/$_spl_mod.meta"; }; then
+            command printf 'loader: %s\n' "$_spl_mod: metadata path contains a symlink: $_spl_layer/module.d/$_spl_mod.meta" >&2
+            _spl_return=1
+            _spl_strict_error=1
+            break
+          elif [ -f "$_spl_layer/module.d/$_spl_mod.meta" ]; then
+            if [ -n "$_spl_meta_file" ]; then
+              _spl_conflict=0
+              if ! command cmp -s "$_spl_meta_file" "$_spl_layer/module.d/$_spl_mod.meta"; then
+                _spl_existing_version=$(command sed -n 's/^version=//p' "$_spl_meta_file")
+                _spl_layer_version=$(command sed -n 's/^version=//p' "$_spl_layer/module.d/$_spl_mod.meta")
+                if sp_metadata_validate_version "$_spl_existing_version" 2>/dev/null &&
+                  sp_metadata_validate_version "$_spl_layer_version" 2>/dev/null &&
+                  [ "$_spl_existing_version" != "$_spl_layer_version" ]; then
+                  if [ -z "$_spl_existing_version" ]; then
+                    _spl_existing_version_display=unversioned
+                  else
+                    _spl_existing_version_display=$_spl_existing_version
+                  fi
+                  if [ -z "$_spl_layer_version" ]; then
+                    _spl_layer_version_display=unversioned
+                  else
+                    _spl_layer_version_display=$_spl_layer_version
+                  fi
+                  command printf 'loader: %s\n' \
+                    "$_spl_mod: conflicting versions are forbidden: version $_spl_existing_version_display at $_spl_meta_file vs version $_spl_layer_version_display at $_spl_layer/module.d/$_spl_mod.meta (vendor a single version)" >&2
+                  _spl_return=1
+                  _spl_strict_error=1
+                  break
+                fi
+                _spl_conflict=1
+              else
+                _spl_existing_load=$(command sed -n 's/^load=//p' "$_spl_meta_file")
+                _spl_layer_load=$(command sed -n 's/^load=//p' "$_spl_layer/module.d/$_spl_mod.meta")
+                if [ -n "$_spl_existing_load" ] && [ -n "$_spl_layer_load" ]; then
+                  if ! _sp_loader_path_is_physical "$_spl_meta_root" "$_spl_meta_root/$_spl_existing_load" ||
+                     ! _sp_loader_path_is_physical "$_spl_layer" "$_spl_layer/$_spl_layer_load"; then
+                    command printf 'loader: %s\n' "$_spl_mod: load path contains a symlink" >&2
+                    _spl_return=1
+                    _spl_strict_error=1
+                    break
+                  elif ! command cmp -s "$_spl_meta_root/$_spl_existing_load" \
+                    "$_spl_layer/$_spl_layer_load"; then
+                    _spl_conflict=1
+                  fi
+                elif [ -n "$_spl_existing_load" ] || [ -n "$_spl_layer_load" ]; then
+                  _spl_conflict=1
+                fi
+              fi
+              if [ "$_spl_conflict" -ne 0 ]; then
+                command printf 'loader: %s\n' \
+                  "$_spl_mod: same-name module with different bytes is forbidden: $_spl_meta_file and $_spl_layer/module.d/$_spl_mod.meta (never shadowing; one must be renamed)" >&2
+                _spl_return=1
+                _spl_strict_error=1
+                break
+              fi
+              continue
+            fi
+            case $_spl_mod in
+            contrib_*) ;;
+            *)
+              command printf 'loader: %s\n' \
+                "$_spl_mod: layer modules outside the primary root must use the contrib_ name prefix (found in layer $_spl_layer)" >&2
+              _spl_return=1
+              _spl_strict_error=1
+              break
+              ;;
+            esac
+            _spl_meta_file=$_spl_layer/module.d/$_spl_mod.meta
+            _spl_meta_root=$_spl_layer
+          fi
+        done <"$_spl_tmp/layers"
+        if [ "$_spl_return" -ne 0 ]; then
+          command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/blocked"
+          continue
+        fi
+      fi
+      if [ -z "$_spl_meta_file" ]; then
+        command printf 'loader: %s\n' "$_spl_mod: metadata file missing" >&2
+        command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/blocked"
+        [ "$_spl_mode" = strict ] && command grep -qx "$_spl_mod" "$_spl_tmp/strict_required" 2>/dev/null && _spl_strict_error=1
+        continue
+      fi
+      command printf '%s\n' "$_spl_meta_root" >>"$_spl_tmp/roots/$_spl_mod"
+      _spl_record=$_spl_tmp/meta/$_spl_mod
+      if ! sp_metadata_read "$_spl_meta_file" >"$_spl_record"; then
+        command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/blocked"
+        [ "$_spl_mode" = strict ] && command grep -qx "$_spl_mod" "$_spl_tmp/strict_required" 2>/dev/null && _spl_strict_error=1
+        continue
+      fi
+      _spl_record_name=$(command sed -n 's/^name=//p' "$_spl_record")
+      if [ "$_spl_record_name" != "$_spl_mod" ]; then
+        command printf 'loader: %s\n' "$_spl_mod: metadata name mismatch: $_spl_record_name" >&2
+        command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/blocked"
+        [ "$_spl_mode" = strict ] && command grep -qx "$_spl_mod" "$_spl_tmp/strict_required" 2>/dev/null && _spl_strict_error=1
+        continue
+      fi
+      _spl_side_effect=$(command sed -n 's/^side_effect=//p' "$_spl_record")
+      if [ "$_spl_phase" = ordinary ] && ! sp_metadata_validate_source_side_effect "$_spl_side_effect"; then
+        command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/blocked"
+        [ "$_spl_mode" = strict ] && command grep -qx "$_spl_mod" "$_spl_tmp/strict_required" 2>/dev/null && _spl_strict_error=1
+        continue
+      fi
+      _spl_shells=$(command sed -n 's/^shells=//p' "$_spl_record")
+      _spl_platforms=$(command sed -n 's/^platforms=//p' "$_spl_record")
+      _spl_shell_match=0
+      _spl_platform_match=0
+      if [ "${IFS+x}" = x ]; then
+        _spl_match_ifs_was_set=1
+        _spl_match_old_ifs=${IFS-}
+      else
+        _spl_match_ifs_was_set=0
+        _spl_match_old_ifs=
+      fi
+      IFS=' '
+      for _spl_value in $_spl_shells; do
+        [ "$_spl_value" = sh ] && _spl_shell_match=1
+        [ "$_spl_value" = "$_spl_current_shell" ] && _spl_shell_match=1
+      done
+      for _spl_value in $_spl_platforms; do
+        [ "$_spl_value" = any ] && _spl_platform_match=1
+        [ "$_spl_value" = "$_spl_current_platform" ] && _spl_platform_match=1
+        [ "$_spl_value" = bsd ] && case "$_spl_current_platform" in bsd | freebsd | openbsd | netbsd) _spl_platform_match=1 ;; esac
+      done
+      if [ "$_spl_match_ifs_was_set" -eq 1 ]; then
+        IFS=$_spl_match_old_ifs
+      else
+        unset IFS
+      fi
+      if [ "$_spl_shell_match" -ne 1 ]; then
+        command printf 'loader: %s\n' "$_spl_mod: unsupported shell for $_spl_current_shell" >&2
+        command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/blocked"
+        [ "$_spl_mode" = strict ] && command grep -qx "$_spl_mod" "$_spl_tmp/strict_required" 2>/dev/null && _spl_strict_error=1
+        continue
+      fi
+      if [ "$_spl_platform_match" -ne 1 ]; then
+        command printf 'loader: %s\n' "$_spl_mod: unsupported platform for $_spl_current_platform" >&2
+        command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/blocked"
+        [ "$_spl_mode" = strict ] && command grep -qx "$_spl_mod" "$_spl_tmp/strict_required" 2>/dev/null && _spl_strict_error=1
+        continue
+      fi
+      command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/modules"
+      _spl_requires=$(command sed -n 's/^requires=//p' "$_spl_record")
+      _spl_optional=$(command sed -n 's/^optional=//p' "$_spl_record")
+      command printf '%s\n' "$_spl_requires" >"$_spl_tmp/deps/$_spl_mod"
+      command printf '%s\n' "$_spl_optional" >"$_spl_tmp/optional/$_spl_mod"
+
+      if [ "${IFS+x}" = x ]; then
+        _spl_dep_ifs_was_set=1
+        _spl_dep_old_ifs=${IFS-}
+      else
+        _spl_dep_ifs_was_set=0
+        _spl_dep_old_ifs=
+      fi
+      IFS=' '
+      for _spl_dep in $_spl_requires; do
+        if command grep -qx "$_spl_mod" "$_spl_tmp/strict_required" 2>/dev/null; then
+          command printf '%s\n' "$_spl_dep" >>"$_spl_tmp/strict_required"
+        fi
+        _spl_dep_exists=0
+        if [ -f "$_spl_root/module.d/$_spl_dep.meta" ]; then
+          _spl_dep_exists=1
+        else
+          if [ -s "$_spl_tmp/layers" ]; then
+            while IFS= read -r _spl_layer || [ -n "$_spl_layer" ]; do
+              [ -n "$_spl_layer" ] || continue
+              if [ -f "$_spl_layer/module.d/$_spl_dep.meta" ]; then
+                _spl_dep_exists=1
+                break
+              fi
+            done <"$_spl_tmp/layers"
+          fi
+        fi
+        if [ "$_spl_dep_exists" -eq 1 ]; then
+          if ! command grep -qx "$_spl_dep" "$_spl_tmp/seen" 2>/dev/null; then
+            command printf '%s\n' "$_spl_dep" >>"$_spl_tmp/newqueue"
+          fi
+        else
+          command printf 'loader: %s\n' "$_spl_mod: missing required dependency $_spl_dep" >&2
+          command printf '%s\n' "$_spl_dep" >>"$_spl_tmp/blocked"
+          [ "$_spl_mode" = strict ] && command grep -qx "$_spl_mod" "$_spl_tmp/strict_required" 2>/dev/null && _spl_strict_error=1
+        fi
+      done
+      for _spl_dep in $_spl_optional; do
+        _spl_dep_exists=0
+        if [ -f "$_spl_root/module.d/$_spl_dep.meta" ]; then
+          _spl_dep_exists=1
+        else
+          if [ -s "$_spl_tmp/layers" ]; then
+            while IFS= read -r _spl_layer || [ -n "$_spl_layer" ]; do
+              [ -n "$_spl_layer" ] || continue
+              if [ -f "$_spl_layer/module.d/$_spl_dep.meta" ]; then
+                _spl_dep_exists=1
+                break
+              fi
+            done <"$_spl_tmp/layers"
+          fi
+        fi
+        if [ "$_spl_dep_exists" -eq 1 ] && ! command grep -qx "$_spl_dep" "$_spl_tmp/seen" 2>/dev/null; then
+          command printf '%s\n' "$_spl_dep" >>"$_spl_tmp/newqueue"
+        fi
+      done
+      if [ "$_spl_dep_ifs_was_set" -eq 1 ]; then
+        IFS=$_spl_dep_old_ifs
+      else
+        unset IFS
+      fi
+    done <"$_spl_tmp/queue"
+    command mv "$_spl_tmp/newqueue" "$_spl_tmp/queue"
+  done
+
+  if [ "$_spl_return" -eq 0 ]; then
+    command sort -u "$_spl_tmp/modules" >"$_spl_tmp/remaining"
+    command sort -u "$_spl_tmp/blocked" >"$_spl_tmp/blocked.sorted"
+    command mv "$_spl_tmp/blocked.sorted" "$_spl_tmp/blocked"
+
+    while [ -s "$_spl_tmp/remaining" ]; do
+      _spl_progress=0
+      : >"$_spl_tmp/next_remaining"
+      while IFS= read -r _spl_mod || [ -n "$_spl_mod" ]; do
+        [ -n "$_spl_mod" ] || continue
+        if command grep -qx "$_spl_mod" "$_spl_tmp/blocked" 2>/dev/null; then
+          _spl_progress=1
+          continue
+        fi
+        _spl_ready=1
+        _spl_blocked_by=
+        _spl_requires=$(command cat "$_spl_tmp/deps/$_spl_mod" 2>/dev/null)
+        _spl_optional=$(command cat "$_spl_tmp/optional/$_spl_mod" 2>/dev/null)
+        if [ "${IFS+x}" = x ]; then
+          _spl_topo_ifs_was_set=1
+          _spl_topo_old_ifs=${IFS-}
+        else
+          _spl_topo_ifs_was_set=0
+          _spl_topo_old_ifs=
+        fi
+        IFS=' '
+        for _spl_dep in $_spl_requires; do
+          if command grep -qx "$_spl_dep" "$_spl_tmp/blocked" 2>/dev/null; then
+            _spl_ready=0
+            _spl_blocked_by=$_spl_dep
+          elif ! command grep -qx "$_spl_dep" "$_spl_tmp/order" 2>/dev/null; then
+            _spl_ready=0
+          fi
+        done
+        if [ "$_spl_ready" -eq 1 ]; then
+          for _spl_dep in $_spl_optional; do
+            if command grep -qx "$_spl_dep" "$_spl_tmp/modules" 2>/dev/null && ! command grep -qx "$_spl_dep" "$_spl_tmp/blocked" 2>/dev/null && ! command grep -qx "$_spl_dep" "$_spl_tmp/order" 2>/dev/null; then
+              _spl_ready=0
+            fi
+          done
+        fi
+        if [ "$_spl_topo_ifs_was_set" -eq 1 ]; then
+          IFS=$_spl_topo_old_ifs
+        else
+          unset IFS
+        fi
+        if [ -n "$_spl_blocked_by" ]; then
+          command printf 'loader: %s\n' "$_spl_mod: required dependency unavailable: $_spl_blocked_by" >&2
+          command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/blocked"
+          command sort -u "$_spl_tmp/blocked" >"$_spl_tmp/blocked.sorted"
+          command mv "$_spl_tmp/blocked.sorted" "$_spl_tmp/blocked"
+          _spl_progress=1
+          continue
+        fi
+        if [ "$_spl_ready" -eq 1 ]; then
+          command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/order"
+          _spl_progress=1
+        else
+          command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/next_remaining"
+        fi
+      done <"$_spl_tmp/remaining"
+      if [ "$_spl_progress" -eq 0 ]; then
+        : >"$_spl_tmp/next_remaining.optional"
+        while IFS= read -r _spl_mod || [ -n "$_spl_mod" ]; do
+          [ -n "$_spl_mod" ] || continue
+          if command grep -qx "$_spl_mod" "$_spl_tmp/blocked" 2>/dev/null; then
+            _spl_progress=1
+            continue
+          fi
+          _spl_ready=1
+          _spl_blocked_by=
+          _spl_requires=$(command cat "$_spl_tmp/deps/$_spl_mod" 2>/dev/null)
+          if [ "${IFS+x}" = x ]; then
+            _spl_topo_ifs_was_set=1
+            _spl_topo_old_ifs=${IFS-}
+          else
+            _spl_topo_ifs_was_set=0
+            _spl_topo_old_ifs=
+          fi
+          IFS=' '
+          for _spl_dep in $_spl_requires; do
+            if command grep -qx "$_spl_dep" "$_spl_tmp/blocked" 2>/dev/null; then
+              _spl_ready=0
+              _spl_blocked_by=$_spl_dep
+            elif ! command grep -qx "$_spl_dep" "$_spl_tmp/order" 2>/dev/null; then
+              _spl_ready=0
+            fi
+          done
+          if [ "$_spl_topo_ifs_was_set" -eq 1 ]; then
+            IFS=$_spl_topo_old_ifs
+          else
+            unset IFS
+          fi
+          if [ -n "$_spl_blocked_by" ]; then
+            command printf 'loader: %s\n' "$_spl_mod: required dependency unavailable: $_spl_blocked_by" >&2
+            command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/blocked"
+            command sort -u "$_spl_tmp/blocked" >"$_spl_tmp/blocked.sorted"
+            command mv "$_spl_tmp/blocked.sorted" "$_spl_tmp/blocked"
+            _spl_progress=1
+            continue
+          fi
+          if [ "$_spl_ready" -eq 1 ]; then
+            command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/order"
+            _spl_progress=1
+          else
+            command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/next_remaining.optional"
+          fi
+        done <"$_spl_tmp/remaining"
+        command mv "$_spl_tmp/next_remaining.optional" "$_spl_tmp/next_remaining"
+      fi
+      if [ "$_spl_progress" -eq 0 ]; then
+        command printf '%s\n' 'loader: cycle detected in module dependencies' >&2
+        command cat "$_spl_tmp/remaining" >>"$_spl_tmp/blocked"
+        command sort -u "$_spl_tmp/blocked" >"$_spl_tmp/blocked.sorted"
+        command mv "$_spl_tmp/blocked.sorted" "$_spl_tmp/blocked"
+        if [ "$_spl_mode" = strict ]; then
+          while IFS= read -r _spl_mod || [ -n "$_spl_mod" ]; do
+            if command grep -qx "$_spl_mod" "$_spl_tmp/strict_required" 2>/dev/null; then
+              _spl_strict_error=1
+            fi
+          done <"$_spl_tmp/remaining"
+        fi
+        : >"$_spl_tmp/remaining"
+      else
+        command sort -u "$_spl_tmp/next_remaining" >"$_spl_tmp/remaining"
+      fi
+    done
+  fi
+
+  if [ "$_spl_return" -eq 0 ] && [ "$_spl_mode" = strict ] && [ "$_spl_strict_error" -ne 0 ]; then
+    _spl_return=1
+  fi
+
+  if [ "$_spl_return" -eq 0 ]; then
+    while IFS= read -r _spl_mod || [ -n "$_spl_mod" ]; do
+      [ -n "$_spl_mod" ] || continue
+      if command grep -qx "$_spl_mod" "$_spl_tmp/blocked" 2>/dev/null; then
+        continue
+      fi
+      _spl_runtime_skip=0
+      _spl_requires=$(command cat "$_spl_tmp/deps/$_spl_mod" 2>/dev/null)
+      if [ "${IFS+x}" = x ]; then
+        _spl_run_ifs_was_set=1
+        _spl_run_old_ifs=${IFS-}
+      else
+        _spl_run_ifs_was_set=0
+        _spl_run_old_ifs=
+      fi
+      IFS=' '
+      for _spl_dep in $_spl_requires; do
+        if command grep -qx "$_spl_dep" "$_spl_tmp/failed" 2>/dev/null; then
+          command printf 'loader: %s\n' "$_spl_mod: required dependency failed: $_spl_dep" >&2
+          _spl_runtime_skip=1
+        fi
+      done
+      if [ "$_spl_run_ifs_was_set" -eq 1 ]; then
+        IFS=$_spl_run_old_ifs
+      else
+        unset IFS
+      fi
+      if [ "$_spl_runtime_skip" -ne 0 ]; then
+        command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/failed"
+        [ "$_spl_mode" = strict ] && command grep -qx "$_spl_mod" "$_spl_tmp/strict_required" 2>/dev/null && _spl_return=1 && break
+        continue
+      fi
+      _spl_record=$_spl_tmp/meta/$_spl_mod
+      _spl_load=$(command sed -n 's/^load=//p' "$_spl_record")
+      _spl_load_hook=$(command sed -n 's/^load_hook=//p' "$_spl_record")
+      _spl_exports=$(command sed -n 's/^exports=//p' "$_spl_record")
+      _spl_exports_to_cleanup=
+      _spl_load_status=0
+      if [ "${IFS+x}" = x ]; then
+        _spl_export_ifs_was_set=1
+        _spl_export_old_ifs=${IFS-}
+      else
+        _spl_export_ifs_was_set=0
+        _spl_export_old_ifs=
+      fi
+      IFS=' '
+      for _spl_export in $_spl_exports; do
+        if command -v "$_spl_export" >/dev/null 2>&1; then
+          command printf 'loader: %s\n' "$_spl_mod: declared export already exists before load: $_spl_export" >&2
+          _spl_load_status=1
+        else
+          _spl_exports_to_cleanup=${_spl_exports_to_cleanup:+$_spl_exports_to_cleanup }$_spl_export
+        fi
+      done
+      if [ "$_spl_export_ifs_was_set" -eq 1 ]; then
+        IFS=$_spl_export_old_ifs
+      else
+        unset IFS
+      fi
+      _spl_expected_tmp=$_spl_tmp
+      _spl_expected_cleanup_tmp=$_spl_cleanup_tmp
+      _spl_expected_tmp_parent=$_spl_tmp_parent
+      _spl_expected_tmp_sentinel=$_spl_tmp_sentinel
+      _spl_expected_root=$_spl_root
+      _spl_expected_search_path=${_spl_search_path-}
+      _spl_expected_meta_file=${_spl_meta_file-}
+      _spl_expected_meta_root=${_spl_meta_root-}
+      _spl_expected_layer=${_spl_layer-}
+      _spl_expected_dep_exists=${_spl_dep_exists-}
+      _spl_expected_wanted=$_spl_wanted
+      _spl_expected_mode=$_spl_mode
+      _spl_expected_phase=$_spl_phase
+      _spl_expected_return=$_spl_return
+      _spl_expected_strict_error=$_spl_strict_error
+      _spl_expected_current_shell=$_spl_current_shell
+      _spl_expected_current_platform=$_spl_current_platform
+      _spl_expected_mod=$_spl_mod
+      _spl_expected_record=$_spl_record
+      _spl_expected_load=$_spl_load
+      _spl_expected_load_hook=$_spl_load_hook
+      _spl_expected_exports=$_spl_exports
+      _spl_expected_exports_to_cleanup=$_spl_exports_to_cleanup
+      _spl_guard_tmp=$_spl_expected_tmp
+      _spl_guard_cleanup_tmp=$_spl_expected_cleanup_tmp
+      _spl_guard_tmp_parent=$_spl_expected_tmp_parent
+      _spl_guard_tmp_sentinel=$_spl_expected_tmp_sentinel
+      _spl_guard_root=$_spl_expected_root
+      _spl_guard_search_path=$_spl_expected_search_path
+      _spl_guard_meta_file=$_spl_expected_meta_file
+      _spl_guard_meta_root=$_spl_expected_meta_root
+      _spl_guard_layer=$_spl_expected_layer
+      _spl_guard_dep_exists=$_spl_expected_dep_exists
+      _spl_guard_wanted=$_spl_expected_wanted
+      _spl_guard_mode=$_spl_expected_mode
+      _spl_guard_phase=$_spl_expected_phase
+      _spl_guard_return=$_spl_expected_return
+      _spl_guard_strict_error=$_spl_expected_strict_error
+      _spl_guard_current_shell=$_spl_expected_current_shell
+      _spl_guard_current_platform=$_spl_expected_current_platform
+      _spl_guard_mod=$_spl_expected_mod
+      _spl_guard_record=$_spl_expected_record
+      _spl_guard_load=$_spl_expected_load
+      _spl_guard_load_hook=$_spl_expected_load_hook
+      _spl_guard_exports=$_spl_expected_exports
+      _spl_guard_exports_to_cleanup=$_spl_expected_exports_to_cleanup
+      _spl_expected_pwd=$(command pwd -P 2>/dev/null)
+      _spl_expected_pwd_status=$?
+      if [ "${IFS+x}" = x ]; then
+        _spl_expected_ifs_was_set=1
+        _spl_expected_ifs=${IFS-}
+      else
+        _spl_expected_ifs_was_set=0
+        _spl_expected_ifs=
+      fi
+      case $- in
+      *a*) _spl_expected_allexport_was_set=1 ;;
+      *) _spl_expected_allexport_was_set=0 ;;
+      esac
+      case $- in
+      *C*) _spl_expected_noclobber_was_set=1 ;;
+      *) _spl_expected_noclobber_was_set=0 ;;
+      esac
+      case $- in
+      *e*) _spl_expected_errexit_was_set=1 ;;
+      *) _spl_expected_errexit_was_set=0 ;;
+      esac
+      case $- in
+      *f*) _spl_expected_glob_was_set=1 ;;
+      *) _spl_expected_glob_was_set=0 ;;
+      esac
+      case $- in
+      *u*) _spl_expected_nounset_was_set=1 ;;
+      *) _spl_expected_nounset_was_set=0 ;;
+      esac
+      case $- in
+      *v*) _spl_expected_verbose_was_set=1 ;;
+      *) _spl_expected_verbose_was_set=0 ;;
+      esac
+      case $- in
+      *x*) _spl_expected_xtrace_was_set=1 ;;
+      *) _spl_expected_xtrace_was_set=0 ;;
+      esac
+      _spl_reserved_utility_pattern='^[[:space:]]*(((function[[:space:]]+)?(command|unset|readonly|return|eval)[[:space:]]*[(][)][[:space:]]*[{])|(function[[:space:]]+(command|unset|readonly|return|eval)([[:space:]]|$))|(readonly[[:space:]].*-f[[:space:]].*(command|unset|readonly|return|eval)([[:space:]]|$)))'
+      if [ "$_spl_load_status" -eq 0 ] && [ -n "$_spl_load_hook" ]; then
+        if command -v "$_spl_load_hook" >/dev/null 2>&1; then
+          _spl_hook_body=$_spl_tmp/hook-body
+          : >"$_spl_hook_body"
+          case $_spl_current_shell in
+          bash) command declare -f "$_spl_load_hook" >"$_spl_hook_body" 2>/dev/null || : ;;
+          zsh) functions "$_spl_load_hook" >"$_spl_hook_body" 2>/dev/null || : ;;
+          ksh) command typeset -f "$_spl_load_hook" >"$_spl_hook_body" 2>/dev/null || : ;;
+          esac
+          if [ -s "$_spl_hook_body" ] && command grep -Eq "$_spl_reserved_utility_pattern" "$_spl_hook_body" 2>/dev/null; then
+            command printf 'loader: %s\n' "$_spl_mod: load hook defines reserved shell utility" >&2
+            _spl_load_status=126
+          else
+            "$_spl_load_hook" || _spl_load_status=$?
+          fi
+        else
+          command printf 'loader: %s\n' "$_spl_mod: load hook not found: $_spl_load_hook" >&2
+          _spl_load_status=127
+        fi
+      elif [ "$_spl_load_status" -eq 0 ]; then
+        if [ ! -f "$_spl_tmp/roots/$_spl_mod" ]; then
+          command printf 'loader: %s\n' "$_spl_mod: providing module root was not recorded during discovery" >&2
+          _spl_load_status=126
+        else
+          _spl_load_path=$(command cat "$_spl_tmp/roots/$_spl_mod")/$_spl_load
+          if ! _sp_loader_path_is_physical "$(command cat "$_spl_tmp/roots/$_spl_mod")" "$_spl_load_path"; then
+            command printf 'loader: %s\n' "$_spl_mod: load path contains a symlink: $_spl_load" >&2
+            _spl_load_status=126
+          elif [ -r "$_spl_load_path" ]; then
+            if command grep -Eq "$_spl_reserved_utility_pattern" "$_spl_load_path" 2>/dev/null; then
+              command printf 'loader: %s\n' "$_spl_mod: load path defines reserved shell utility" >&2
+              _spl_load_status=126
+            else
+              . "$_spl_load_path" || _spl_load_status=$?
+            fi
+          else
+            command printf 'loader: %s\n' "$_spl_mod: load path is not readable: $_spl_load" >&2
+            _spl_load_status=126
+          fi
+        fi
+      fi
+      unset -f command 2>/dev/null || :
+      case $- in
+      *u*)
+        _spl_after_nounset_was_set=1
+        set +u
+        ;;
+      *) _spl_after_nounset_was_set=0 ;;
+      esac
+      _spl_private_modified=0
+      if [ "${_spl_expected_tmp-}" != "${_spl_guard_tmp-}" ] || [ "${_spl_expected_cleanup_tmp-}" != "${_spl_guard_cleanup_tmp-}" ] || [ "${_spl_expected_tmp_parent-}" != "${_spl_guard_tmp_parent-}" ] || [ "${_spl_expected_tmp_sentinel-}" != "${_spl_guard_tmp_sentinel-}" ] || [ "${_spl_expected_root-}" != "${_spl_guard_root-}" ] || [ "${_spl_expected_wanted-}" != "${_spl_guard_wanted-}" ] || [ "${_spl_expected_mode-}" != "${_spl_guard_mode-}" ] || [ "${_spl_expected_phase-}" != "${_spl_guard_phase-}" ] || [ "${_spl_expected_return-}" != "${_spl_guard_return-}" ] || [ "${_spl_expected_strict_error-}" != "${_spl_guard_strict_error-}" ] || [ "${_spl_expected_current_shell-}" != "${_spl_guard_current_shell-}" ] || [ "${_spl_expected_current_platform-}" != "${_spl_guard_current_platform-}" ] || [ "${_spl_expected_mod-}" != "${_spl_guard_mod-}" ] || [ "${_spl_expected_record-}" != "${_spl_guard_record-}" ] || [ "${_spl_expected_load-}" != "${_spl_guard_load-}" ] || [ "${_spl_expected_load_hook-}" != "${_spl_guard_load_hook-}" ] || [ "${_spl_expected_exports-}" != "${_spl_guard_exports-}" ] || [ "${_spl_expected_exports_to_cleanup-}" != "${_spl_guard_exports_to_cleanup-}" ] || [ "${_spl_expected_search_path-}" != "${_spl_guard_search_path-}" ] || [ "${_spl_expected_meta_file-}" != "${_spl_guard_meta_file-}" ] || [ "${_spl_expected_meta_root-}" != "${_spl_guard_meta_root-}" ] || [ "${_spl_expected_layer-}" != "${_spl_guard_layer-}" ] || [ "${_spl_expected_dep_exists-}" != "${_spl_guard_dep_exists-}" ]; then
+        _spl_private_modified=1
+        _spl_expected_tmp=$_spl_guard_tmp
+        _spl_expected_cleanup_tmp=$_spl_guard_cleanup_tmp
+        _spl_expected_tmp_parent=$_spl_guard_tmp_parent
+        _spl_expected_tmp_sentinel=$_spl_guard_tmp_sentinel
+        _spl_expected_root=$_spl_guard_root
+        _spl_expected_wanted=$_spl_guard_wanted
+        _spl_expected_search_path=$_spl_guard_search_path
+        _spl_expected_meta_file=$_spl_guard_meta_file
+        _spl_expected_meta_root=$_spl_guard_meta_root
+        _spl_expected_layer=$_spl_guard_layer
+        _spl_expected_dep_exists=$_spl_guard_dep_exists
+        _spl_expected_mode=$_spl_guard_mode
+        _spl_expected_phase=$_spl_guard_phase
+        _spl_expected_return=$_spl_guard_return
+        _spl_expected_strict_error=$_spl_guard_strict_error
+        _spl_expected_current_shell=$_spl_guard_current_shell
+        _spl_expected_current_platform=$_spl_guard_current_platform
+        _spl_expected_mod=$_spl_guard_mod
+        _spl_expected_record=$_spl_guard_record
+        _spl_expected_load=$_spl_guard_load
+        _spl_expected_load_hook=$_spl_guard_load_hook
+        _spl_expected_exports=$_spl_guard_exports
+        _spl_expected_exports_to_cleanup=$_spl_guard_exports_to_cleanup
+      fi
+      if [ "$_spl_tmp" != "$_spl_expected_tmp" ] || [ "$_spl_cleanup_tmp" != "$_spl_expected_cleanup_tmp" ] || [ "$_spl_tmp_parent" != "$_spl_expected_tmp_parent" ] || [ "$_spl_tmp_sentinel" != "$_spl_expected_tmp_sentinel" ] || [ "$_spl_root" != "$_spl_expected_root" ] || [ "$_spl_wanted" != "$_spl_expected_wanted" ] || [ "$_spl_mode" != "$_spl_expected_mode" ] || [ "$_spl_phase" != "$_spl_expected_phase" ] || [ "$_spl_return" != "$_spl_expected_return" ] || [ "$_spl_strict_error" != "$_spl_expected_strict_error" ] || [ "$_spl_current_shell" != "$_spl_expected_current_shell" ] || [ "$_spl_current_platform" != "$_spl_expected_current_platform" ] || [ "$_spl_mod" != "$_spl_expected_mod" ] || [ "$_spl_record" != "$_spl_expected_record" ] || [ "$_spl_load" != "$_spl_expected_load" ] || [ "$_spl_load_hook" != "$_spl_expected_load_hook" ] || [ "$_spl_exports" != "$_spl_expected_exports" ] || [ "$_spl_exports_to_cleanup" != "$_spl_expected_exports_to_cleanup" ] || [ "${_spl_search_path-}" != "${_spl_expected_search_path-}" ] || [ "${_spl_meta_file-}" != "${_spl_expected_meta_file-}" ] || [ "${_spl_meta_root-}" != "${_spl_expected_meta_root-}" ] || [ "${_spl_layer-}" != "${_spl_expected_layer-}" ] || [ "${_spl_dep_exists-}" != "${_spl_expected_dep_exists-}" ]; then
+        _spl_private_modified=1
+        _spl_tmp=$_spl_expected_tmp
+        _spl_cleanup_tmp=$_spl_expected_cleanup_tmp
+        _spl_tmp_parent=$_spl_expected_tmp_parent
+        _spl_tmp_sentinel=$_spl_expected_tmp_sentinel
+        _spl_root=$_spl_expected_root
+        _spl_search_path=$_spl_expected_search_path
+        _spl_meta_file=$_spl_expected_meta_file
+        _spl_meta_root=$_spl_expected_meta_root
+        _spl_layer=$_spl_expected_layer
+        _spl_dep_exists=$_spl_expected_dep_exists
+        _spl_wanted=$_spl_expected_wanted
+        _spl_mode=$_spl_expected_mode
+        _spl_phase=$_spl_expected_phase
+        _spl_return=$_spl_expected_return
+        _spl_strict_error=$_spl_expected_strict_error
+        _spl_current_shell=$_spl_expected_current_shell
+        _spl_current_platform=$_spl_expected_current_platform
+        _spl_mod=$_spl_expected_mod
+        _spl_record=$_spl_expected_record
+        _spl_load=$_spl_expected_load
+        _spl_load_hook=$_spl_expected_load_hook
+        _spl_exports=$_spl_expected_exports
+        _spl_exports_to_cleanup=$_spl_expected_exports_to_cleanup
+      fi
+      _spl_shell_state_modified=0
+      if [ "$_spl_expected_pwd_status" -eq 0 ]; then
+        _spl_after_pwd=$(command pwd -P 2>/dev/null)
+        if [ "$_spl_after_pwd" != "$_spl_expected_pwd" ]; then
+          _spl_shell_state_modified=1
+        fi
+        CDPATH= command cd "$_spl_expected_pwd" 2>/dev/null || _spl_shell_state_modified=1
+      fi
+      if [ "${IFS+x}" = x ]; then
+        _spl_after_ifs_was_set=1
+      else
+        _spl_after_ifs_was_set=0
+      fi
+      if [ "$_spl_after_ifs_was_set" -ne "$_spl_expected_ifs_was_set" ]; then
+        _spl_shell_state_modified=1
+      elif [ "$_spl_expected_ifs_was_set" -eq 1 ] && [ "${IFS-}" != "$_spl_expected_ifs" ]; then
+        _spl_shell_state_modified=1
+      fi
+      if [ "$_spl_expected_ifs_was_set" -eq 1 ]; then
+        IFS=$_spl_expected_ifs
+      else
+        unset IFS
+      fi
+      case $- in *a*) _spl_after_allexport_was_set=1 ;; *) _spl_after_allexport_was_set=0 ;; esac
+      case $- in *C*) _spl_after_noclobber_was_set=1 ;; *) _spl_after_noclobber_was_set=0 ;; esac
+      case $- in *e*) _spl_after_errexit_was_set=1 ;; *) _spl_after_errexit_was_set=0 ;; esac
+      case $- in *f*) _spl_after_glob_was_set=1 ;; *) _spl_after_glob_was_set=0 ;; esac
+      case $- in *v*) _spl_after_verbose_was_set=1 ;; *) _spl_after_verbose_was_set=0 ;; esac
+      case $- in *x*) _spl_after_xtrace_was_set=1 ;; *) _spl_after_xtrace_was_set=0 ;; esac
+      if [ "$_spl_after_allexport_was_set" -ne "$_spl_expected_allexport_was_set" ] || [ "$_spl_after_noclobber_was_set" -ne "$_spl_expected_noclobber_was_set" ] || [ "$_spl_after_errexit_was_set" -ne "$_spl_expected_errexit_was_set" ] || [ "$_spl_after_nounset_was_set" -ne "$_spl_expected_nounset_was_set" ] || [ "$_spl_after_verbose_was_set" -ne "$_spl_expected_verbose_was_set" ] || [ "$_spl_after_xtrace_was_set" -ne "$_spl_expected_xtrace_was_set" ]; then
+        _spl_shell_state_modified=1
+      fi
+      if [ "$_spl_after_glob_was_set" -ne "$_spl_expected_glob_was_set" ]; then
+        _spl_shell_state_modified=1
+      fi
+      if [ "$_spl_expected_allexport_was_set" -eq 1 ]; then set -a; else set +a; fi
+      if [ "$_spl_expected_noclobber_was_set" -eq 1 ]; then set -C; else set +C; fi
+      if [ "$_spl_expected_errexit_was_set" -eq 1 ]; then set -e; else set +e; fi
+      if [ "$_spl_expected_glob_was_set" -eq 1 ]; then
+        set -f
+      else
+        set +f
+      fi
+      if [ "$_spl_expected_nounset_was_set" -eq 1 ]; then set -u; else set +u; fi
+      if [ "$_spl_expected_verbose_was_set" -eq 1 ]; then set -v; else set +v; fi
+      if [ "$_spl_expected_xtrace_was_set" -eq 1 ]; then set -x; else set +x; fi
+      if [ "$_spl_private_modified" -ne 0 ]; then
+        command printf 'loader: %s\n' "$_spl_expected_mod: loader private namespace modified" >&2
+        _spl_load_status=1
+      fi
+      if [ "$_spl_shell_state_modified" -ne 0 ]; then
+        command printf 'loader: %s\n' "$_spl_expected_mod: caller shell state modified" >&2
+        _spl_load_status=1
+      fi
+      if [ "$_spl_load_status" -eq 0 ]; then
+        if [ "${IFS+x}" = x ]; then
+          _spl_export_ifs_was_set=1
+          _spl_export_old_ifs=${IFS-}
+        else
+          _spl_export_ifs_was_set=0
+          _spl_export_old_ifs=
+        fi
+        IFS=' '
+        for _spl_export in $_spl_exports; do
+          if ! command -v "$_spl_export" >/dev/null 2>&1; then
+            command printf 'loader: %s\n' "$_spl_mod: declared export missing: $_spl_export" >&2
+            _spl_load_status=1
+          fi
+        done
+        if [ "$_spl_export_ifs_was_set" -eq 1 ]; then
+          IFS=$_spl_export_old_ifs
+        else
+          unset IFS
+        fi
+      fi
+      if [ "$_spl_load_status" -ne 0 ]; then
+        if [ "${IFS+x}" = x ]; then
+          _spl_export_ifs_was_set=1
+          _spl_export_old_ifs=${IFS-}
+        else
+          _spl_export_ifs_was_set=0
+          _spl_export_old_ifs=
+        fi
+        IFS=' '
+        for _spl_export in $_spl_exports_to_cleanup; do
+          unset -f "$_spl_export" 2>/dev/null || :
+        done
+        if [ "$_spl_export_ifs_was_set" -eq 1 ]; then
+          IFS=$_spl_export_old_ifs
+        else
+          unset IFS
+        fi
+        command printf 'loader: %s\n' "$_spl_mod: load failed with status $_spl_load_status" >&2
+        command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/failed"
+        if [ "$_spl_mode" = strict ] && command grep -qx "$_spl_mod" "$_spl_tmp/strict_required" 2>/dev/null; then
+          _spl_return=1
+          break
+        fi
+      fi
+    done <"$_spl_tmp/order"
+  fi
+
+  if [ -n "${_spl_cleanup_tmp:-}" ]; then
+    case $_spl_cleanup_tmp in
+    "$_spl_tmp_parent"/shell-profile-loader.*)
+      if [ -f "$_spl_cleanup_tmp/.shell-profile-loader-owned" ]; then
+        command rm -rf "$_spl_cleanup_tmp" 2>/dev/null || :
+      fi
+      ;;
+    esac
+  fi
+  if [ "$_spl_return" -eq 0 ]; then
+    unset _spl_root _spl_wanted _spl_mode _spl_phase _spl_strict_error _spl_return \
+      _spl_current_shell _spl_uname _spl_current_platform \
+      _spl_tmp_parent _spl_tmp _spl_cleanup_tmp _spl_tmp_sentinel \
+      _spl_expected_tmp _spl_expected_cleanup_tmp _spl_expected_tmp_parent _spl_expected_tmp_sentinel \
+      _spl_expected_root _spl_expected_wanted _spl_expected_mode _spl_expected_phase \
+      _spl_expected_search_path _spl_expected_meta_file _spl_expected_meta_root _spl_expected_layer _spl_expected_dep_exists \
+      _spl_expected_return _spl_expected_strict_error _spl_expected_current_shell _spl_expected_current_platform \
+      _spl_expected_mod _spl_expected_record _spl_expected_load _spl_expected_load_hook \
+      _spl_expected_exports _spl_expected_exports_to_cleanup \
+      _spl_guard_tmp _spl_guard_cleanup_tmp _spl_guard_tmp_parent _spl_guard_tmp_sentinel \
+      _spl_guard_root _spl_guard_wanted _spl_guard_mode _spl_guard_phase \
+      _spl_guard_search_path _spl_guard_meta_file _spl_guard_meta_root _spl_guard_layer _spl_guard_dep_exists \
+      _spl_guard_return _spl_guard_strict_error _spl_guard_current_shell _spl_guard_current_platform \
+      _spl_guard_mod _spl_guard_record _spl_guard_load _spl_guard_load_hook \
+      _spl_guard_exports _spl_guard_exports_to_cleanup \
+      _spl_expected_pwd _spl_expected_pwd_status _spl_after_pwd \
+      _spl_expected_ifs_was_set _spl_expected_ifs _spl_after_ifs_was_set \
+      _spl_expected_allexport_was_set _spl_expected_noclobber_was_set _spl_expected_errexit_was_set \
+      _spl_expected_glob_was_set _spl_expected_nounset_was_set _spl_expected_verbose_was_set _spl_expected_xtrace_was_set \
+      _spl_after_allexport_was_set _spl_after_noclobber_was_set _spl_after_errexit_was_set \
+      _spl_after_glob_was_set _spl_after_nounset_was_set _spl_after_verbose_was_set _spl_after_xtrace_was_set \
+      _spl_private_modified _spl_shell_state_modified \
+      _spl_word _spl_ifs_was_set _spl_old_ifs _spl_glob_was_set _spl_mod _spl_meta_file \
+      _spl_record _spl_record_name _spl_side_effect _spl_shells _spl_platforms \
+      _spl_shell_match _spl_platform_match _spl_match_ifs_was_set _spl_match_old_ifs \
+      _spl_value _spl_requires _spl_optional \
+      _spl_dep_ifs_was_set _spl_dep_old_ifs _spl_dep _spl_progress _spl_ready \
+      _spl_blocked_by _spl_topo_ifs_was_set _spl_topo_old_ifs _spl_runtime_skip \
+      _spl_run_ifs_was_set _spl_run_old_ifs _spl_load _spl_load_hook \
+      _spl_exports _spl_exports_to_cleanup _spl_export_ifs_was_set _spl_export_old_ifs _spl_export \
+      _spl_load_status _spl_load_path _spl_hook_body _spl_reserved_utility_pattern \
+      _spl_search_path _spl_layer _spl_meta_file _spl_meta_root _spl_dep_exists _spl_existing_load _spl_layer_load _spl_conflict _spl_layer_ifs_was_set _spl_layer_old_ifs _spl_existing_version _spl_layer_version _spl_existing_version_display _spl_layer_version_display _spl_layer_glob_was_set
+    unset -f _sp_loader_path_is_physical 2>/dev/null || :
+    return 0
+  fi
+  unset _spl_root _spl_wanted _spl_mode _spl_phase _spl_strict_error _spl_return \
+    _spl_current_shell _spl_uname _spl_current_platform \
+    _spl_tmp_parent _spl_tmp _spl_cleanup_tmp _spl_tmp_sentinel \
+    _spl_expected_tmp _spl_expected_cleanup_tmp _spl_expected_tmp_parent _spl_expected_tmp_sentinel \
+    _spl_expected_root _spl_expected_wanted _spl_expected_mode _spl_expected_phase \
+      _spl_expected_search_path _spl_expected_meta_file _spl_expected_meta_root _spl_expected_layer _spl_expected_dep_exists \
+    _spl_expected_return _spl_expected_strict_error _spl_expected_current_shell _spl_expected_current_platform \
+    _spl_expected_mod _spl_expected_record _spl_expected_load _spl_expected_load_hook \
+    _spl_expected_exports _spl_expected_exports_to_cleanup \
+    _spl_guard_tmp _spl_guard_cleanup_tmp _spl_guard_tmp_parent _spl_guard_tmp_sentinel \
+    _spl_guard_root _spl_guard_wanted _spl_guard_mode _spl_guard_phase \
+      _spl_guard_search_path _spl_guard_meta_file _spl_guard_meta_root _spl_guard_layer _spl_guard_dep_exists \
+    _spl_guard_return _spl_guard_strict_error _spl_guard_current_shell _spl_guard_current_platform \
+    _spl_guard_mod _spl_guard_record _spl_guard_load _spl_guard_load_hook \
+    _spl_guard_exports _spl_guard_exports_to_cleanup \
+    _spl_expected_pwd _spl_expected_pwd_status _spl_after_pwd \
+    _spl_expected_ifs_was_set _spl_expected_ifs _spl_after_ifs_was_set \
+    _spl_expected_allexport_was_set _spl_expected_noclobber_was_set _spl_expected_errexit_was_set \
+    _spl_expected_glob_was_set _spl_expected_nounset_was_set _spl_expected_verbose_was_set _spl_expected_xtrace_was_set \
+    _spl_after_allexport_was_set _spl_after_noclobber_was_set _spl_after_errexit_was_set \
+    _spl_after_glob_was_set _spl_after_nounset_was_set _spl_after_verbose_was_set _spl_after_xtrace_was_set \
+    _spl_private_modified _spl_shell_state_modified \
+    _spl_word _spl_ifs_was_set _spl_old_ifs _spl_glob_was_set _spl_mod _spl_meta_file \
+    _spl_record _spl_record_name _spl_side_effect _spl_shells _spl_platforms \
+    _spl_shell_match _spl_platform_match _spl_match_ifs_was_set _spl_match_old_ifs \
+    _spl_value _spl_requires _spl_optional \
+    _spl_dep_ifs_was_set _spl_dep_old_ifs _spl_dep _spl_progress _spl_ready \
+    _spl_blocked_by _spl_topo_ifs_was_set _spl_topo_old_ifs _spl_runtime_skip \
+    _spl_run_ifs_was_set _spl_run_old_ifs _spl_load _spl_load_hook \
+    _spl_exports _spl_exports_to_cleanup _spl_export_ifs_was_set _spl_export_old_ifs _spl_export \
+    _spl_load_status _spl_load_path _spl_hook_body _spl_reserved_utility_pattern \
+      _spl_search_path _spl_layer _spl_meta_file _spl_meta_root _spl_dep_exists _spl_existing_load _spl_layer_load _spl_conflict _spl_layer_ifs_was_set _spl_layer_old_ifs _spl_existing_version _spl_layer_version _spl_existing_version_display _spl_layer_version_display _spl_layer_glob_was_set
+  unset -f _sp_loader_path_is_physical 2>/dev/null || :
+  return 1
+}

@@ -1,0 +1,9 @@
+name=export_missing
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=declared_missing
+updates=
+load=modules/export_missing.sh

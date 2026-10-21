@@ -1,0 +1,9 @@
+name=optional_required_runtime_user
+requires=
+optional=optional_required_runtime_dep
+shells=sh
+platforms=any
+side_effect=read-only
+exports=optional_required_runtime_user_loaded
+updates=
+load=modules/optional_required_runtime_user.sh

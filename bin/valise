@@ -1,0 +1,3307 @@
+#!/bin/sh
+
+# Copyright (c) 2026 Joseph Cumines
+# SPDX-License-Identifier: MIT
+# valise - user-facing CLI for the valise-sh shell profile engine.
+# Pure POSIX /bin/sh. Zero non-POSIX runtime dependencies.
+
+set -eu
+
+VALISE_VERSION="0.1.0"
+
+# XDG defaults per install-contracts.md
+VALISE_XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/valise"
+VALISE_XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/valise"
+VALISE_XDG_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/valise"
+VALISE_RELEASES_DIR="$VALISE_XDG_DATA/releases"
+VALISE_ACTIVE_LINK="$VALISE_XDG_CONFIG/active"
+VALISE_LOCK_DIR="$VALISE_XDG_STATE/lock"
+
+usage() {
+  printf '%s\n' \
+    "Usage: valise <command> [options]" \
+    "" \
+    "Commands:" \
+    "  init [bash|zsh|ksh|fish]   Output shell integration snippet" \
+    "  install                    Install or update the active release" \
+    "  verify-active [--print-root] Verify the sealed active release" \
+    "  doctor                     Run environment diagnostics" \
+    "  variant [list|use <sha>]   List installed releases / switch active release" \
+    "  make-manifest <tree> [--output <file>]  Write a release manifest for a tree" \
+    "  compile [--bundle=<name>] [--variant=<name>] <output-dir>  (consuming project)" \
+    "  explain-variant [name]     Show variant details and per-shell impact (consuming project)" \
+    "  explain-bundles            Explain installed bundle roots and closure (consuming project)" \
+    "  layer-lint <name>          Validate a contribution layer structure (consuming project)" \
+    "  version                    Print version" \
+    "" \
+    "Environment:" \
+    "  XDG_DATA_HOME    Release storage root (default: ~/.local/share)" \
+    "  XDG_CONFIG_HOME  Active pointer symlink (default: ~/.config)" \
+    "  XDG_STATE_HOME   Lock and journal state (default: ~/.local/state)"
+}
+
+die() {
+  printf 'valise: error: %s\n' "$*" >&2
+  exit 1
+}
+
+info() {
+  printf 'valise: %s\n' "$*"
+}
+
+# POSIX shell path parent extraction avoids ambient dirname resolution in
+# manifest discovery and every subsequent source/destination validation path.
+path_parent() {
+  _path_parent_value=$1
+  # Strip trailing slashes so "out/" and "out" share one parent (".").
+  # Without this, path_parent("out/") is "out" itself: parent-mkdir creates
+  # the destination, the emptiness check treats it as pre-created-empty, and
+  # staging lands inside the destination (publish then fails ENOTEMPTY).
+  while [ "$_path_parent_value" != "/" ] &&
+    [ "${_path_parent_value%/}" != "$_path_parent_value" ]; do
+    _path_parent_value=${_path_parent_value%/}
+  done
+  case "$_path_parent_value" in
+    */*)
+      _path_parent_value=${_path_parent_value%/*}
+      [ -n "$_path_parent_value" ] || _path_parent_value=/
+      ;;
+    *) _path_parent_value=. ;;
+  esac
+  printf '%s\n' "$_path_parent_value"
+}
+
+# Emit a single-quoted literal for generated POSIX shell code. The generated
+# snippets must not interpolate user-controlled XDG paths into double quotes:
+# `$()` and backticks would still execute there. POSIX single quotes preserve
+# every character except apostrophe, which is represented by the standard
+# '\'' sequence.
+shell_quote() {
+  _shell_quote_value=$1
+  printf "'"
+  while [ -n "$_shell_quote_value" ]; do
+    _shell_quote_char=${_shell_quote_value%"${_shell_quote_value#?}"}
+    _shell_quote_value=${_shell_quote_value#?}
+    case "$_shell_quote_char" in
+      "'") printf "%s" "'\\''" ;;
+      *) printf '%s' "$_shell_quote_char" ;;
+    esac
+  done
+  printf "'"
+}
+
+# Fish single-quoted literals use a backslash-escaped apostrophe. Encode each
+# source backslash as two backslashes so a backslash immediately before an
+# apostrophe cannot change the quote grammar. Dollar signs, semicolons, and
+# command-substitution markers remain literal, so arbitrary XDG paths cannot
+# inject Fish commands.
+fish_quote() {
+  _fish_quote_value=$1
+  printf "'"
+  while [ -n "$_fish_quote_value" ]; do
+    _fish_quote_char=${_fish_quote_value%"${_fish_quote_value#?}"}
+    _fish_quote_value=${_fish_quote_value#?}
+    case "$_fish_quote_char" in
+      \\) printf '%s' '\\' ;;
+      "'") printf '%s' "\\'" ;;
+      *) printf '%s' "$_fish_quote_char" ;;
+    esac
+  done
+  printf "'"
+}
+
+trusted_uname() {
+  if [ -x /usr/bin/uname ]; then
+    /usr/bin/uname "$@"
+  elif [ -x /bin/uname ]; then
+    /bin/uname "$@"
+  else
+    return 1
+  fi
+}
+
+# Resolve only platform-owned utility paths for integrity operations. These
+# checks must not be redirected by a caller-controlled PATH.
+trusted_utility_path() {
+  case "$1" in
+    awk) _trusted_candidates='/usr/bin/awk /bin/awk' ;;
+    cat) _trusted_candidates='/bin/cat /usr/bin/cat' ;;
+    cp) _trusted_candidates='/bin/cp /usr/bin/cp' ;;
+    chmod) _trusted_candidates='/bin/chmod /usr/bin/chmod' ;;
+    cmp) _trusted_candidates='/usr/bin/cmp /bin/cmp' ;;
+    ln) _trusted_candidates='/bin/ln /usr/bin/ln' ;;
+    mkdir) _trusted_candidates='/bin/mkdir /usr/bin/mkdir' ;;
+    kill) _trusted_candidates='/bin/kill /usr/bin/kill' ;;
+    mktemp) _trusted_candidates='/usr/bin/mktemp /bin/mktemp /opt/homebrew/bin/mktemp /usr/local/bin/mktemp' ;;
+    readlink) _trusted_candidates='/usr/bin/readlink /bin/readlink' ;;
+    rmdir) _trusted_candidates='/bin/rmdir /usr/bin/rmdir' ;;
+    find) _trusted_candidates='/usr/bin/find /bin/find' ;;
+    fish) _trusted_candidates='/opt/homebrew/bin/fish /usr/local/bin/fish /usr/bin/fish /bin/fish' ;;
+    mv) _trusted_candidates='/bin/mv /usr/bin/mv' ;;
+    rm) _trusted_candidates='/bin/rm /usr/bin/rm' ;;
+    stat) _trusted_candidates='/usr/bin/stat /bin/stat' ;;
+    tr) _trusted_candidates='/usr/bin/tr /bin/tr' ;;
+    wc) _trusted_candidates='/usr/bin/wc /bin/wc' ;;
+    sha256sum) _trusted_candidates='/usr/bin/sha256sum /bin/sha256sum /sbin/sha256sum /opt/homebrew/bin/sha256sum /usr/local/bin/sha256sum' ;;
+    sha256) _trusted_candidates='/usr/bin/sha256 /bin/sha256 /sbin/sha256 /opt/homebrew/bin/sha256 /usr/local/bin/sha256' ;;
+    shasum) _trusted_candidates='/usr/bin/shasum /bin/shasum /opt/homebrew/bin/shasum /usr/local/bin/shasum' ;;
+    sort) _trusted_candidates='/usr/bin/sort /bin/sort' ;;
+    *) return 1 ;;
+  esac
+  for _trusted_candidate in $_trusted_candidates; do
+    if [ -x "$_trusted_candidate" ]; then
+      printf '%s\n' "$_trusted_candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+readlink_target() {
+  _readlink_path=$(trusted_utility_path readlink) || return 1
+  "$_readlink_path" "$1"
+}
+
+# Return a file's three-digit permission mode in the manifest's octal form.
+# BSD stat and GNU stat use different option spellings, so probe both.
+file_mode() {
+  _stat_path=$(trusted_utility_path stat) || return 1
+  # BSD stat accepts -f; GNU stat accepts -c. GNU stat may nevertheless
+  # accept -f as a filesystem-stat format and exit successfully, so select a
+  # result by validating the output rather than relying on exit status alone.
+  _mode_value=$("$_stat_path" -f '%Lp' "$1" 2>/dev/null || :)
+  case "$_mode_value" in
+    [0-7][0-7][0-7]) printf '0%s\n' "$_mode_value"; return 0 ;;
+  esac
+  _mode_value=$("$_stat_path" -c '%a' "$1" 2>/dev/null || :) || return 1
+  case "$_mode_value" in
+    [0-7][0-7][0-7]) printf '0%s\n' "$_mode_value" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Return a regular file's exact byte count without locale-dependent padding.
+file_bytes() {
+  _wc_path=$(trusted_utility_path wc) || return 1
+  _tr_path=$(trusted_utility_path tr) || return 1
+  "$_wc_path" -c < "$1" | "$_tr_path" -d '[:space:]'
+}
+
+file_sha256() {
+  _sha_path=$(trusted_utility_path sha256sum 2>/dev/null || :)
+  if [ -n "$_sha_path" ]; then
+    _sha_output=$("$_sha_path" "$1") || return 1
+  else
+    _sha_path=$(trusted_utility_path shasum 2>/dev/null || :)
+    if [ -n "$_sha_path" ]; then
+      _sha_output=$("$_sha_path" -a 256 "$1") || return 1
+    else
+      _sha_path=$(trusted_utility_path sha256 2>/dev/null || :)
+      [ -n "$_sha_path" ] || return 1
+      _sha_output=$("$_sha_path" "$1") || return 1
+    fi
+  fi
+  # Supported utilities: sha256sum/shasum print "digest  filename";
+  # BSD sha256 prints "SHA256 (filename) = digest" or just the digest.
+  # The BSD format strip must be gated behind the SHA256 ( prefix: a
+  # blanket *=* match corrupts sha256sum/shasum output whenever the
+  # absolute file path contains "= " (equals followed by space).
+  case "$_sha_output" in
+    "SHA256 ("*) _sha_output=${_sha_output##* = } ;;
+  esac
+  _sha_output=${_sha_output%% *}
+  _sha_output=${_sha_output%%$(printf '\t')*}
+  printf '%s\n' "$_sha_output"
+}
+
+lower_hex() {
+  _tr_path=$(trusted_utility_path tr) || return 1
+  "$_tr_path" 'A-F' 'a-f'
+}
+
+# Acquire atomic lock via mkdir (POSIX atomic operation). Every utility that
+# participates in lock integrity is resolved by absolute path so PATH cannot
+# forge ownership or suppress stale-lock cleanup.
+_lock_owned=0
+_active_tmp=""
+_active_backup=""
+_publish_tmp=""
+_manifest_rows=""
+_manifest_parse=""
+_stage=""
+_hook_tmp=""
+_mm_tmp=""
+_posix_tmp=""
+_mv_path=""
+_cleanup_failed=0
+acquire_lock() {
+  _lock_cat_path=$(trusted_utility_path cat) || die "no trusted cat utility available"
+  _lock_mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  _lock_rm_path=$(trusted_utility_path rm) || die "no trusted rm utility available"
+  _lock_kill_path=$(trusted_utility_path kill) || die "no trusted kill utility available"
+
+  # Reentrant ownership is valid only for a real lock directory and a real,
+  # non-symlink pid file containing this process's exact PID.
+  if [ "$_lock_owned" -eq 1 ] && [ -d "$VALISE_LOCK_DIR" ] && [ ! -L "$VALISE_LOCK_DIR" ] &&
+     [ -f "$VALISE_LOCK_DIR/pid" ] && [ ! -L "$VALISE_LOCK_DIR/pid" ]; then
+    _existing_pid=$("$_lock_cat_path" "$VALISE_LOCK_DIR/pid" 2>/dev/null || :)
+    case "$_existing_pid" in
+      ''|*[!0-9]*) : ;;
+      "$$") _lock_owned=1; return 0 ;;
+    esac
+  fi
+
+  _lock_parent=${VALISE_LOCK_DIR%/*}
+  [ -n "$_lock_parent" ] || _lock_parent=/
+  if [ ! -d "$_lock_parent" ]; then
+    "$_lock_mkdir_path" -p "$_lock_parent" 2>/dev/null || die "cannot create lock parent: $_lock_parent"
+  fi
+  if ! "$_lock_mkdir_path" -m 700 "$VALISE_LOCK_DIR" 2>/dev/null; then
+    # Check for stale lock using only the trusted utility paths. An invalid or
+    # unreadable lock is fail-closed rather than treated as stale.
+    if [ -d "$VALISE_LOCK_DIR" ] && [ ! -L "$VALISE_LOCK_DIR" ] &&
+       [ -f "$VALISE_LOCK_DIR/pid" ] && [ ! -L "$VALISE_LOCK_DIR/pid" ]; then
+      _lock_pid=$("$_lock_cat_path" "$VALISE_LOCK_DIR/pid" 2>/dev/null || :)
+      case "$_lock_pid" in
+        ''|*[!0-9]*) die "another valise process is running (unreadable lock)" ;;
+      esac
+      if ! "$_lock_kill_path" -0 "$_lock_pid" 2>/dev/null; then
+        info "removing stale lock (pid $_lock_pid)"
+        "$_lock_rm_path" -rf "$VALISE_LOCK_DIR" 2>/dev/null || die "failed to remove stale lock"
+        if [ -e "$VALISE_LOCK_DIR" ] || [ -L "$VALISE_LOCK_DIR" ]; then
+          die "failed to remove stale lock"
+        fi
+        "$_lock_mkdir_path" -m 700 "$VALISE_LOCK_DIR" 2>/dev/null || die "failed to acquire lock after stale cleanup"
+      else
+        die "another valise process is running (pid $_lock_pid)"
+      fi
+    else
+      die "failed to acquire lock: $VALISE_LOCK_DIR"
+    fi
+  fi
+  [ -d "$VALISE_LOCK_DIR" ] && [ ! -L "$VALISE_LOCK_DIR" ] || die "lock directory is not safe"
+  printf '%s\n' "$$" > "$VALISE_LOCK_DIR/pid" || die "failed to write lock ownership"
+  [ -f "$VALISE_LOCK_DIR/pid" ] && [ ! -L "$VALISE_LOCK_DIR/pid" ] || die "lock ownership file is not safe"
+  _lock_pid=$("$_lock_cat_path" "$VALISE_LOCK_DIR/pid" 2>/dev/null || :)
+  [ "$_lock_pid" = "$$" ] || die "failed to verify lock ownership"
+  _lock_owned=1
+}
+
+remove_tree() {
+  _remove_tree_path=$1
+  _remove_chmod_path=$(trusted_utility_path chmod) || return 1
+  _remove_rm_path=$(trusted_utility_path rm) || return 1
+  if [ -d "$_remove_tree_path" ] && [ ! -L "$_remove_tree_path" ]; then
+    "$_remove_chmod_path" -R u+w "$_remove_tree_path" 2>/dev/null || return 1
+  fi
+  "$_remove_rm_path" -rf "$_remove_tree_path" 2>/dev/null || return 1
+  [ ! -e "$_remove_tree_path" ] && [ ! -L "$_remove_tree_path" ]
+}
+
+seal_tree() {
+  _seal_tree_root=$1
+  _find_path=$(trusted_utility_path find) || return 1
+  _seal_chmod_path=$(trusted_utility_path chmod) || return 1
+  "$_find_path" "$_seal_tree_root" -type d -exec "$_seal_chmod_path" 0555 {} + 2>/dev/null || return 1
+  _seal_tree_dirs=$("$_find_path" "$_seal_tree_root" -type d -print) || return 1
+  while IFS= read -r _seal_tree_dir; do
+    [ -n "$_seal_tree_dir" ] || continue
+    [ "$(file_mode "$_seal_tree_dir")" = "0555" ] || return 1
+  done <<EOF
+$_seal_tree_dirs
+EOF
+  return 0
+}
+
+release_lock() {
+  _release_rm_path=$(trusted_utility_path rm 2>/dev/null || :)
+  _release_rmdir_path=$(trusted_utility_path rmdir 2>/dev/null || :)
+  if [ -n "$_active_tmp" ]; then
+    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_active_tmp" 2>/dev/null || :
+    if [ -e "$_active_tmp" ] || [ -L "$_active_tmp" ]; then _cleanup_failed=1; fi
+    _active_tmp=""
+  fi
+  if [ -n "$_active_backup" ]; then
+    if [ -L "$_active_backup" ] && [ ! -e "$VALISE_ACTIVE_LINK" ] && [ ! -L "$VALISE_ACTIVE_LINK" ]; then
+      [ -n "$_mv_path" ] && "$_mv_path" "$_active_backup" "$VALISE_ACTIVE_LINK" 2>/dev/null || :
+    else
+      [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_active_backup" 2>/dev/null || :
+    fi
+    if [ -e "$_active_backup" ] || [ -L "$_active_backup" ]; then _cleanup_failed=1; fi
+    _active_backup=""
+  fi
+  if [ -n "$_publish_tmp" ]; then
+    remove_tree "$_publish_tmp" || _cleanup_failed=1
+    _publish_tmp=""
+  fi
+  if [ -n "$_manifest_rows" ]; then
+    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_manifest_rows" 2>/dev/null || :
+    if [ -e "$_manifest_rows" ] || [ -L "$_manifest_rows" ]; then _cleanup_failed=1; fi
+    _manifest_rows=""
+  fi
+  if [ -n "$_manifest_parse" ]; then
+    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_manifest_parse" 2>/dev/null || :
+    if [ -e "$_manifest_parse" ] || [ -L "$_manifest_parse" ]; then _cleanup_failed=1; fi
+    _manifest_parse=""
+  fi
+  if [ -n "$_stage" ]; then
+    remove_tree "$_stage" || _cleanup_failed=1
+    _stage=""
+  fi
+  if [ -n "$_hook_tmp" ]; then
+    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_hook_tmp" 2>/dev/null || :
+    if [ -e "$_hook_tmp" ] || [ -L "$_hook_tmp" ]; then _cleanup_failed=1; fi
+    _hook_tmp=""
+  fi
+  if [ -n "$_mm_tmp" ]; then
+    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_mm_tmp" 2>/dev/null || :
+    if [ -e "$_mm_tmp" ] || [ -L "$_mm_tmp" ]; then _cleanup_failed=1; fi
+    _mm_tmp=""
+  fi
+  if [ -n "$_posix_tmp" ]; then
+    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_posix_tmp" 2>/dev/null || :
+    if [ -e "$_posix_tmp" ] || [ -L "$_posix_tmp" ]; then _cleanup_failed=1; fi
+    _posix_tmp=""
+  fi
+  [ "$_lock_owned" -eq 1 ] || { [ "$_cleanup_failed" -eq 0 ]; return; }
+  [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$VALISE_LOCK_DIR/pid" 2>/dev/null || :
+  if [ -e "$VALISE_LOCK_DIR/pid" ] || [ -L "$VALISE_LOCK_DIR/pid" ]; then _cleanup_failed=1; fi
+  [ -n "$_release_rmdir_path" ] && "$_release_rmdir_path" "$VALISE_LOCK_DIR" 2>/dev/null || :
+  if [ -e "$VALISE_LOCK_DIR" ] || [ -L "$VALISE_LOCK_DIR" ]; then _cleanup_failed=1; fi
+  _lock_owned=0
+  [ "$_cleanup_failed" -eq 0 ]
+}
+
+_handle_int() {
+  trap - INT
+  release_lock
+  exit 130
+}
+
+_handle_term() {
+  trap - TERM
+  release_lock
+  exit 143
+}
+
+trap '_exit_status=$?; release_lock; if [ "$_exit_status" -eq 0 ] && [ "$_cleanup_failed" -ne 0 ]; then _exit_status=1; fi; exit "$_exit_status"' EXIT
+trap '_handle_int' INT
+trap '_handle_term' TERM
+
+switch_active_link() {
+  _ln_path=$(trusted_utility_path ln) || die "no trusted ln utility available"
+  _readlink_path=$(trusted_utility_path readlink) || die "no trusted readlink utility available"
+  if [ -e "$VALISE_ACTIVE_LINK" ] && [ ! -L "$VALISE_ACTIVE_LINK" ]; then
+    die "active path exists and is not a symlink: $VALISE_ACTIVE_LINK"
+  fi
+  # ln -sfn replaces the destination symlink. On both BSD and GNU systems,
+  # this executes unlink(2) followed by symlink(2), which is not atomic but
+  # is the most portable approach available in pure POSIX sh (mv -h is
+  # BSD-only, mv -T is GNU-only). The -n flag prevents following a
+  # destination that is a symlink to a directory, making the swap act on
+  # the symlink itself rather than descending into its target.
+  "$_ln_path" -sfn "$1" "$VALISE_ACTIVE_LINK" || die "failed to update active symlink"
+  [ -L "$VALISE_ACTIVE_LINK" ] || die "active symlink was not created"
+  [ "$($_readlink_path "$VALISE_ACTIVE_LINK" 2>/dev/null)" = "$1" ] || die "active symlink target mismatch"
+}
+
+source_path_is_physical() {
+  _source_root=$1
+  _source_relative=$2
+  _source_path=$_source_root
+  _source_remaining=$_source_relative
+  while [ -n "$_source_remaining" ]; do
+    case "$_source_remaining" in
+      */*)
+        _source_component=${_source_remaining%%/*}
+        _source_remaining=${_source_remaining#*/}
+        ;;
+      *)
+        _source_component=$_source_remaining
+        _source_remaining=
+        ;;
+    esac
+    [ -n "$_source_component" ] || return 1
+    _source_path=$_source_path/$_source_component
+    [ ! -L "$_source_path" ] || return 1
+  done
+  return 0
+}
+
+validate_manifest() {
+  _awk_path=$(trusted_utility_path awk) || return 1
+  "$_awk_path" -F '\t' '
+    NR == 1 { if ($0 != "shell-profile-release-manifest-v1") exit 10; next }
+    NR == 2 { if ($1 != "destination" || $2 != "source" || $3 != "source_mode" || $4 != "install_mode" || $5 != "bytes" || $6 != "sha256" || NF != 6) exit 11; next }
+    NF == 0 { next }
+    NF != 6 || $1 == "" || $2 == "" || $1 !~ /^[A-Za-z0-9._\/-]+$/ || $2 !~ /^[A-Za-z0-9._\/-]+$/ || $1 ~ /^\// || $2 ~ /^\// || $1 ~ /\/$/ || $2 ~ /\/$/ || $1 ~ /^#/ || $1 == "destination" || $1 == "shell-profile-release-manifest-v1" || $3 !~ /^0(644|755)$/ || $4 != (($3 == "0644") ? "0444" : "0555") || $5 !~ /^[0-9]+$/ || length($6) != 64 || $6 !~ /^[0-9a-fA-F]+$/ || $1 ~ /(^|\/)\.($|\/)/ || index($1, "//") || $1 ~ /(^|\/)\.\.($|\/)/ || index($2, "//") || $2 ~ /(^|\/)\.($|\/)/ || $2 ~ /(^|\/)\.\.($|\/)/ || seen[$1]++ || seen_source[$2]++ { exit 12 }
+    { data_rows = 1 }
+    END { if (NR < 3 || data_rows != 1) exit 13 }
+  ' "$1"
+}
+
+temp_path_is_safe() {
+  _temp_candidate=$1
+  _temp_kind=$2
+  _temp_root=${3:-${TMPDIR:-/tmp}}
+  case "$_temp_root" in /*) ;; *) return 1 ;; esac
+  case "$_temp_candidate" in /*) ;; *) return 1 ;; esac
+  [ -e "$_temp_candidate" ] || return 1
+  [ ! -L "$_temp_candidate" ] || return 1
+  case "$_temp_kind" in
+    file) [ -f "$_temp_candidate" ] || return 1 ;;
+    dir) [ -d "$_temp_candidate" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  _temp_root_canonical=$(cd "$_temp_root" 2>/dev/null && pwd -P) || return 1
+  _temp_parent=${_temp_candidate%/*}
+  [ "$_temp_parent" != "$_temp_candidate" ] || _temp_parent=/
+  _temp_parent_canonical=$(cd "$_temp_parent" 2>/dev/null && pwd -P) || return 1
+  case "$_temp_parent_canonical/" in
+    "$_temp_root_canonical/"*) ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+trusted_mktemp_at() {
+  _temp_root=$1
+  _temp_kind=$2
+  _temp_template=$3
+  _mktemp_path=$(trusted_utility_path mktemp) || return 1
+  case "$_temp_kind" in
+    file) _temp_candidate=$("$_mktemp_path" "$_temp_template") || return 1 ;;
+    dir) _temp_candidate=$("$_mktemp_path" -d "$_temp_template") || return 1 ;;
+    *) return 1 ;;
+  esac
+  temp_path_is_safe "$_temp_candidate" "$_temp_kind" "$_temp_root" || return 1
+  printf '%s\n' "$_temp_candidate"
+}
+
+trusted_mktemp() {
+  trusted_mktemp_at "${TMPDIR:-/tmp}" "$@"
+}
+
+prepare_manifest_rows() {
+  _cleanup_rm_path=$(trusted_utility_path rm) || return 1
+  if [ -n "$_manifest_rows" ]; then
+    "$_cleanup_rm_path" -f "$_manifest_rows" 2>/dev/null || :
+    _manifest_rows=""
+  fi
+  if [ -n "$_manifest_parse" ]; then
+    "$_cleanup_rm_path" -f "$_manifest_parse" 2>/dev/null || :
+    _manifest_parse=""
+  fi
+  # _manifest_rows is the exact private snapshot used for identity and
+  # publication. Parsing is performed from a second file that only adds a
+  # final newline, so an unterminated source row is still consumed by POSIX
+  # read without changing the bytes whose digest defines the release.
+  _manifest_rows=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-manifest.XXXXXX") || return 1
+  _cat_path=$(trusted_utility_path cat) || {
+    "$_cleanup_rm_path" -f "$_manifest_rows" 2>/dev/null || :
+    _manifest_rows=""
+    return 1
+  }
+  "$_cat_path" "$1" >"$_manifest_rows" || {
+    "$_cleanup_rm_path" -f "$_manifest_rows" 2>/dev/null || :
+    _manifest_rows=""
+    return 1
+  }
+  _manifest_parse=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-manifest-parse.XXXXXX") || {
+    "$_cleanup_rm_path" -f "$_manifest_rows" 2>/dev/null || :
+    _manifest_rows=""
+    return 1
+  }
+  _awk_path=$(trusted_utility_path awk) || {
+    "$_cleanup_rm_path" -f "$_manifest_rows" "$_manifest_parse" 2>/dev/null || :
+    _manifest_rows=""
+    _manifest_parse=""
+    return 1
+  }
+  "$_awk_path" '{ print }' "$_manifest_rows" >"$_manifest_parse" || {
+    "$_cleanup_rm_path" -f "$_manifest_rows" "$_manifest_parse" 2>/dev/null || :
+    _manifest_rows=""
+    _manifest_parse=""
+    return 1
+  }
+}
+
+locate_manifest() {
+  _loc_script_dir=$(cd "$(path_parent "$0")" && pwd -P) || return 1
+  _loc_repo_root="$_loc_script_dir/.."
+  for _loc_candidate in     "$_loc_repo_root/../shell/install/profile-release.manifest"     "$_loc_repo_root/shell/install/profile-release.manifest"     "./shell/install/profile-release.manifest"
+  do
+    if [ -f "$_loc_candidate" ]; then
+      printf '%s\n' "$_loc_candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_manifest_has_file() {
+  _awk_path=$(trusted_utility_path awk) || return 1
+  "$_awk_path" -F '\t' -v destination="$2" '
+    NR > 2 && NF && $1 == destination { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
+_manifest_has_descendant() {
+  _awk_path=$(trusted_utility_path awk) || return 1
+  "$_awk_path" -F '\t' -v prefix="$2/" '
+    NR > 2 && NF && index($1, prefix) == 1 { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
+verify_release_dir() {
+  _verify_dir=$1
+  _verify_manifest=$2
+  _verify_canonical=$(cd "$_verify_dir" 2>/dev/null && pwd -P) || die "cannot resolve release root"
+  [ "$(file_mode "$_verify_dir")" = "0555" ] || die "release root mode mismatch"
+  _verify_snapshot="$_verify_dir/.valise-manifest"
+  if [ -e "$_verify_snapshot" ] || [ -L "$_verify_snapshot" ]; then
+    [ -f "$_verify_snapshot" ] || die "release manifest snapshot is not a regular file"
+    [ ! -L "$_verify_snapshot" ] || die "release manifest snapshot must not be a symlink"
+    [ "$(file_mode "$_verify_snapshot")" = "0444" ] || die "release manifest snapshot mode mismatch"
+    [ "$(file_bytes "$_verify_snapshot")" = "$(file_bytes "$_verify_manifest")" ] || die "release manifest snapshot byte count mismatch"
+    _verify_snapshot_digest=$(file_sha256 "$_verify_snapshot") || die "no SHA-256 utility available"
+    _verify_manifest_digest=$(file_sha256 "$_verify_manifest") || die "no SHA-256 utility available"
+    [ "$_verify_snapshot_digest" = "$_verify_manifest_digest" ] || die "release manifest snapshot digest mismatch"
+    _verify_expected_id="${3:-}"
+    if [ -z "$_verify_expected_id" ]; then
+      _verify_expected_id=$(basename "$_verify_dir")
+    fi
+    [ "$_verify_snapshot_digest" = "$_verify_expected_id" ] || die "release manifest snapshot identity mismatch"
+  fi
+  while IFS="$(printf '\t')" read -r _dest _src _mode _imode _size _sha; do
+    [ -n "$_dest" ] || continue
+    case "$_dest" in shell-profile-release-manifest-v1|destination) continue ;; esac
+    _verify_file="$_verify_dir/$_dest"
+    [ -f "$_verify_file" ] || die "release file missing: $_dest"
+    [ ! -L "$_verify_file" ] || die "release file must not be a symlink: $_dest"
+    _verify_parent=$(cd "$(path_parent "$_verify_file")" 2>/dev/null && pwd -P) || die "release parent missing: $_dest"
+    case "$_verify_parent/" in "$_verify_canonical/"*) : ;; *) die "release path escapes target: $_dest" ;; esac
+    [ "$(file_mode "$_verify_file")" = "$_imode" ] || die "release mode mismatch for $_dest"
+    [ "$(file_bytes "$_verify_file")" = "$_size" ] || die "release byte count mismatch for $_dest"
+    case "$_sha" in *[!0123456789abcdefABCDEF]*) die "invalid release digest for $_dest" ;; esac
+    [ "${#_sha}" -eq 64 ] || die "invalid release digest for $_dest"
+    _verify_actual=$(file_sha256 "$_verify_file") || die "no trusted SHA-256 utility available"
+    _verify_expected=$(printf '%s' "$_sha" | lower_hex) || die "no trusted tr utility available"
+    [ "$_verify_actual" = "$_verify_expected" ] || die "release digest mismatch for $_dest"
+  done < "${_manifest_parse:-$_manifest_rows}"
+  _find_path=$(trusted_utility_path find) || die "no trusted find utility available"
+  _verify_bad=$("$_find_path" "$_verify_dir" -print | while IFS= read -r _verify_path; do
+    [ "$_verify_path" = "$_verify_dir" ] && continue
+    if [ -L "$_verify_path" ]; then
+      printf '%s\n' "$_verify_path"
+      break
+    fi
+    _verify_relative=${_verify_path#"$_verify_dir"/}
+    [ "$_verify_relative" = ".valise-manifest" ] && continue
+    if [ -f "$_verify_path" ]; then
+      _manifest_has_file "$_verify_manifest" "$_verify_relative" || { printf '%s\n' "$_verify_path"; break; }
+    elif [ -d "$_verify_path" ]; then
+      if [ "$(file_mode "$_verify_path")" != "0555" ] || ! _manifest_has_descendant "$_verify_manifest" "$_verify_relative"; then
+        printf '%s\n' "$_verify_path"
+        break
+      fi
+    else
+      printf '%s\n' "$_verify_path"
+      break
+    fi
+  done)
+  [ -z "$_verify_bad" ] || die "release contains unmanifested or mutable path: $_verify_bad"
+}
+
+# --- Subcommands ---
+
+cmd_version() {
+  printf '%s\n' "$VALISE_VERSION"
+}
+
+print_fish_integration() {
+  _fish_active_literal=$(fish_quote "$VALISE_ACTIVE_LINK") || return 1
+  _fish_cli_dir=$(cd "$(path_parent "$0")" 2>/dev/null && pwd -P) || return 1
+  _fish_cli_path="$_fish_cli_dir/${0##*/}"
+  _fish_cli_literal=$(fish_quote "$_fish_cli_path") || return 1
+  _fish_source_tree_mode=${_fish_source_tree_mode:-0}
+  printf '%s\n' \
+    "# valise shell integration" \
+    "begin" \
+    "set -l _valise_fish_source_tree_mode $_fish_source_tree_mode" \
+    "set -l _valise_fish_previous_root ''" \
+    "if builtin set -q SHELL_PROJECT_ROOT; and builtin test (builtin count \$SHELL_PROJECT_ROOT) -eq 1" \
+    "  set _valise_fish_previous_root (builtin path resolve -- \"\$SHELL_PROJECT_ROOT\" 2>/dev/null)" \
+    "end" \
+    "# Authenticate the universal-variable store before any untrusted release source runs." \
+    "set -l _valise_fish_persistence_config_home ''" \
+    "if builtin set -q XDG_CONFIG_HOME; and test -n \"\$XDG_CONFIG_HOME\"" \
+    "  set _valise_fish_persistence_config_home \"\$XDG_CONFIG_HOME\"" \
+    "else if builtin set -q HOME; and test -n \"\$HOME\"" \
+    "  set _valise_fish_persistence_config_home \"\$HOME/.config\"" \
+    "else" \
+    "  builtin exit 125" \
+    "end" \
+    "set -l _valise_fish_persistence_durable_file \"\$_valise_fish_persistence_config_home/fish/fish_variables\"" \
+    "set -g _valise_fish_persistence_path_physical_helper __valise_fish_path_(builtin random)" \
+    "function \$_valise_fish_persistence_path_physical_helper --no-scope-shadowing" \
+    "  set -l _persistence_path \$argv[1]" \
+    "  if test -x /usr/bin/uname; and test (/usr/bin/uname -s 2>/dev/null) = Darwin" \
+    "    if builtin test -L /var; and test (builtin path resolve -- /var 2>/dev/null) = /private/var" \
+    "      switch \"\$_persistence_path\"" \
+    "        case /var" \
+    "          set _persistence_path /private/var" \
+    "        case '/var/*'" \
+    "          set _persistence_path (builtin string replace -r '^/var' /private/var -- \"\$_persistence_path\")" \
+    "      end" \
+    "    end" \
+    "    if builtin test -L /tmp; and test (builtin path resolve -- /tmp 2>/dev/null) = /private/tmp" \
+    "      switch \"\$_persistence_path\"" \
+    "        case /tmp" \
+    "          set _persistence_path /private/tmp" \
+    "        case '/tmp/*'" \
+    "          set _persistence_path (builtin string replace -r '^/tmp' /private/tmp -- \"\$_persistence_path\")" \
+    "      end" \
+    "    end" \
+    "  end" \
+    "  if not builtin string match -q '/*' -- \"\$_persistence_path\"; or builtin string match -q '*//*' -- \"\$_persistence_path\"" \
+    "    return 1" \
+    "  end" \
+    "  set _persistence_prefix /" \
+    "  for _persistence_component in (builtin string split '/' -- \"\$_persistence_path\")" \
+    "    if test -z \"\$_persistence_component\"" \
+    "      continue" \
+    "    end" \
+    "    switch \"\$_persistence_component\"" \
+    "      case . .." \
+    "        return 1" \
+    "    end" \
+    "    if test \"\$_persistence_prefix\" = /" \
+    "      set _persistence_prefix /\$_persistence_component" \
+    "    else" \
+    "      set _persistence_prefix \"\$_persistence_prefix/\$_persistence_component\"" \
+    "    end" \
+    "    if builtin test -L \"\$_persistence_prefix\"" \
+    "      return 1" \
+    "    end" \
+    "  end" \
+    "  return 0" \
+    "end" \
+    "if not \$_valise_fish_persistence_path_physical_helper \"\$_valise_fish_persistence_durable_file\"" \
+    "  builtin exit 125" \
+    "end" \
+    "# Capture an absolute, writable, searchable temp parent before untrusted source." \
+    "set -l _valise_fish_persistence_tmp_parent /tmp" \
+    "if builtin set -q TMPDIR; and test -n \"\$TMPDIR\"" \
+    "  set _valise_fish_persistence_tmp_parent \"\$TMPDIR\"" \
+    "end" \
+    "set _valise_fish_persistence_tmp_parent (builtin path resolve -- \"\$_valise_fish_persistence_tmp_parent\" 2>/dev/null)" \
+    "if test (builtin count \$_valise_fish_persistence_tmp_parent) -ne 1; or not test -d \"\$_valise_fish_persistence_tmp_parent\"; or not test -w \"\$_valise_fish_persistence_tmp_parent\"; or not test -x \"\$_valise_fish_persistence_tmp_parent\"" \
+    "  builtin exit 125" \
+    "end" \
+    "# Capture persistent SHELL_PROJECT_ROOT scopes before clearing activation state." \
+    "set -l _valise_fish_scratch_names _valise_fish_root_global_set _valise_fish_root_global_exported _valise_fish_root_global_values _valise_fish_root_universal_set _valise_fish_root_universal_exported _valise_fish_root_universal_values VALISE_MODULE_ROOT XDG_CONFIG_HOME TMPDIR HOME" \
+    "set -l _valise_fish_scratch_prefix __valise_fish_scratch_state_(builtin random)" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_set_global_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_set_global_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_set_global_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_set_universal_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_set_universal_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_set_universal_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_exported_global_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_exported_global_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_exported_global_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_exported_universal_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_exported_universal_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_exported_universal_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_values_global_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_values_global_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_values_global_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_values_universal_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_values_universal_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_global_values_universal_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_set_global_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_set_global_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_set_global_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_set_universal_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_set_universal_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_set_universal_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_exported_global_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_exported_global_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_exported_global_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_exported_universal_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_exported_universal_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_exported_universal_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_values_global_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_values_global_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_values_global_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_values_universal_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_values_universal_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"__valise_fish_root_universal_values_universal_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_VALISE_MODULE_ROOT_global_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_VALISE_MODULE_ROOT_global_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_VALISE_MODULE_ROOT_global_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_VALISE_MODULE_ROOT_universal_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_VALISE_MODULE_ROOT_universal_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_VALISE_MODULE_ROOT_universal_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_XDG_CONFIG_HOME_global_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_XDG_CONFIG_HOME_global_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_XDG_CONFIG_HOME_global_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_XDG_CONFIG_HOME_universal_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_XDG_CONFIG_HOME_universal_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_XDG_CONFIG_HOME_universal_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_TMPDIR_global_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_TMPDIR_global_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_TMPDIR_global_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_TMPDIR_universal_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_TMPDIR_universal_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_TMPDIR_universal_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_HOME_global_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_HOME_global_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_HOME_global_values" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_HOME_universal_present" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_HOME_universal_exported" \
+    "set -l \"\$_valise_fish_scratch_prefix\"_HOME_universal_values" \
+    "set -l _valise_fish_scratch_capture_helper __valise_fish_scratch_capture_(builtin random)" \
+    "function \$_valise_fish_scratch_capture_helper --no-scope-shadowing" \
+    "  set -l _scratch_target \$argv[1]" \
+    "  set -l _scratch_prefix \$argv[2]_\$_scratch_target" \
+    "  set -l _scratch_global_present 0" \
+    "  builtin set -q -g \"\$_scratch_target\"; and set _scratch_global_present 1" \
+    "  set -l _scratch_global_exported 0" \
+    "  builtin set -q -gx \"\$_scratch_target\"; and set _scratch_global_exported 1" \
+    "  set -l _scratch_global_values" \
+    "  if test \$_scratch_global_present -eq 1" \
+    "    set _scratch_global_values \$\$_scratch_target" \
+    "  end" \
+    "  set -l _scratch_universal_present 0" \
+    "  builtin set -q -U \"\$_scratch_target\"; and set _scratch_universal_present 1" \
+    "  set -l _scratch_universal_exported 0" \
+    "  builtin set -q -Ux \"\$_scratch_target\"; and set _scratch_universal_exported 1" \
+    "  set -l _scratch_universal_values" \
+    "  if test \$_scratch_universal_present -eq 1" \
+    "    if test \$_scratch_global_present -eq 1" \
+    "      builtin set -e -g \"\$_scratch_target\"" \
+    "      set _scratch_universal_values \$\$_scratch_target" \
+    "      if test \$_scratch_global_exported -eq 1" \
+    "        builtin set -gx \"\$_scratch_target\" \$\$_scratch_global_values" \
+    "      else" \
+    "        builtin set -g \"\$_scratch_target\" \$\$_scratch_global_values" \
+    "      end" \
+    "    else" \
+    "      set _scratch_universal_values \$\$_scratch_target" \
+    "    end" \
+    "  end" \
+    "  set \"\$_scratch_prefix\"_global_present \$_scratch_global_present" \
+    "  set \"\$_scratch_prefix\"_global_exported \$_scratch_global_exported" \
+    "  set \"\$_scratch_prefix\"_global_values \$_scratch_global_values" \
+    "  set \"\$_scratch_prefix\"_universal_present \$_scratch_universal_present" \
+    "  set \"\$_scratch_prefix\"_universal_exported \$_scratch_universal_exported" \
+    "  set \"\$_scratch_prefix\"_universal_values \$_scratch_universal_values" \
+    "end" \
+    "\$_valise_fish_scratch_capture_helper _valise_fish_root_global_set \"\$_valise_fish_scratch_prefix\"" \
+    "\$_valise_fish_scratch_capture_helper _valise_fish_root_global_exported \"\$_valise_fish_scratch_prefix\"" \
+    "\$_valise_fish_scratch_capture_helper _valise_fish_root_global_values \"\$_valise_fish_scratch_prefix\"" \
+    "\$_valise_fish_scratch_capture_helper _valise_fish_root_universal_set \"\$_valise_fish_scratch_prefix\"" \
+    "\$_valise_fish_scratch_capture_helper _valise_fish_root_universal_exported \"\$_valise_fish_scratch_prefix\"" \
+    "\$_valise_fish_scratch_capture_helper _valise_fish_root_universal_values \"\$_valise_fish_scratch_prefix\"" \
+    "\$_valise_fish_scratch_capture_helper VALISE_MODULE_ROOT \"\$_valise_fish_scratch_prefix\"" \
+    "\$_valise_fish_scratch_capture_helper XDG_CONFIG_HOME \"\$_valise_fish_scratch_prefix\"" \
+    "\$_valise_fish_scratch_capture_helper TMPDIR \"\$_valise_fish_scratch_prefix\"" \
+    "\$_valise_fish_scratch_capture_helper HOME \"\$_valise_fish_scratch_prefix\"" \
+    "builtin functions -e \$_valise_fish_scratch_capture_helper 2>/dev/null" \
+    "set -l _valise_fish_root_global_set 0" \
+    "set -l _valise_fish_root_global_exported 0" \
+    "set -l _valise_fish_root_global_values" \
+    "set -l _valise_fish_root_universal_set 0" \
+    "set -l _valise_fish_root_universal_exported 0" \
+    "set -l _valise_fish_root_universal_values" \
+    "set -l _valise_fish_root_capture_helper __valise_fish_capture_(builtin random)" \
+    "function \$_valise_fish_root_capture_helper --no-scope-shadowing" \
+    "  set _valise_fish_root_global_set 0" \
+    "  set _valise_fish_root_global_exported 0" \
+    "  set _valise_fish_root_global_values" \
+    "  set _valise_fish_root_universal_set 0" \
+    "  set _valise_fish_root_universal_exported 0" \
+    "  set _valise_fish_root_universal_values" \
+    "  if builtin set -q -g SHELL_PROJECT_ROOT" \
+    "    set _valise_fish_root_global_set 1" \
+    "    builtin set -q -gx SHELL_PROJECT_ROOT; and set _valise_fish_root_global_exported 1" \
+    "    set _valise_fish_root_global_values \$SHELL_PROJECT_ROOT" \
+    "  end" \
+    "  if builtin set -q -U SHELL_PROJECT_ROOT" \
+    "    set _valise_fish_root_universal_set 1" \
+    "    builtin set -q -Ux SHELL_PROJECT_ROOT; and set _valise_fish_root_universal_exported 1" \
+    "    if builtin test \$_valise_fish_root_global_set -eq 1" \
+    "      builtin set -e -g SHELL_PROJECT_ROOT; or builtin exit 125" \
+    "      set _valise_fish_root_universal_values \$SHELL_PROJECT_ROOT" \
+    "      if builtin test \$_valise_fish_root_global_exported -eq 1" \
+    "        builtin set -gx SHELL_PROJECT_ROOT \$_valise_fish_root_global_values; or builtin exit 125" \
+    "      else" \
+    "        builtin set -g SHELL_PROJECT_ROOT \$_valise_fish_root_global_values; or builtin exit 125" \
+    "      end" \
+    "    else" \
+    "      set _valise_fish_root_universal_values \$SHELL_PROJECT_ROOT" \
+    "    end" \
+    "  end" \
+    "end" \
+    "\$_valise_fish_root_capture_helper" \
+    "builtin functions -e \$_valise_fish_root_capture_helper" \
+    "set -l _valise_fish_scratch_restore_helper __valise_fish_scratch_restore_(builtin random)" \
+    "function \$_valise_fish_scratch_restore_helper --no-scope-shadowing" \
+    "  set -l _scratch_target \$argv[1]" \
+    "  set -l _scratch_prefix \$argv[2]_\$_scratch_target" \
+    "  set -l _scratch_global_present_var \"\$_scratch_prefix\"_global_present" \
+    "  set -l _scratch_global_exported_var \"\$_scratch_prefix\"_global_exported" \
+    "  set -l _scratch_global_values_var \"\$_scratch_prefix\"_global_values" \
+    "  set -l _scratch_universal_present_var \"\$_scratch_prefix\"_universal_present" \
+    "  set -l _scratch_universal_exported_var \"\$_scratch_prefix\"_universal_exported" \
+    "  set -l _scratch_universal_values_var \"\$_scratch_prefix\"_universal_values" \
+    "  if builtin set -q -g \"\$_scratch_target\"" \
+    "    builtin set -e -g \"\$_scratch_target\"; or return 125" \
+    "  end" \
+    "  if builtin set -q -U \"\$_scratch_target\"" \
+    "    builtin set -e -U \"\$_scratch_target\"; or return 125" \
+    "  end" \
+    "  if test \$\$_scratch_global_present_var -eq 1" \
+    "    set -l _scratch_global_flags -g" \
+    "    if test \$\$_scratch_global_exported_var -eq 1" \
+    "      set _scratch_global_flags -gx" \
+    "    end" \
+    "    builtin set \$_scratch_global_flags \"\$_scratch_target\" \$\$_scratch_global_values_var" \
+    "    if test \$status -ne 0" \
+    "      return 125" \
+    "    end" \
+    "  end" \
+    "  if test \$\$_scratch_universal_present_var -eq 1" \
+    "    set -l _scratch_universal_flags -U" \
+    "    if test \$\$_scratch_universal_exported_var -eq 1" \
+    "      set _scratch_universal_flags -Ux" \
+    "    end" \
+    "    builtin set \$_scratch_universal_flags \"\$_scratch_target\" \$\$_scratch_universal_values_var" \
+    "    if test \$status -ne 0" \
+    "      return 125" \
+    "    end" \
+    "  end" \
+    "  if test \"\$_scratch_target\" = VALISE_MODULE_ROOT; or test \"\$_scratch_target\" = XDG_CONFIG_HOME; or test \"\$_scratch_target\" = TMPDIR; or test \"\$_scratch_target\" = HOME" \
+    "    if not builtin functions -q \$_valise_fish_persistence_verify_helper; or not builtin test (builtin functions \$_valise_fish_persistence_verify_helper | string collect) = \"\$_valise_fish_persistence_helper_definition\"" \
+    "      builtin printf '%s\\n' 'trusted universal persistence verifier was modified' >&2" \
+    "      return 125" \
+    "    end" \
+    "    \$_valise_fish_persistence_verify_helper \"\$_valise_fish_persistence_durable_file\" \"\$_valise_fish_persistence_tmp_parent\" \"\$_scratch_target\" \"\$\$_scratch_universal_present_var\" \"\$\$_scratch_universal_exported_var\" \$\$_scratch_universal_values_var; or return 125" \
+    "  end" \
+    "  for _scratch_suffix in global_present global_exported global_values universal_present universal_exported universal_values" \
+    "    set -l _scratch_snapshot_name \"\$_scratch_prefix\"_\$_scratch_suffix" \
+    "    if builtin set -q -l \"\$_scratch_snapshot_name\"" \
+    "      builtin set -e -l \"\$_scratch_snapshot_name\"; or return 125" \
+    "    end" \
+    "    if builtin set -q -g \"\$_scratch_snapshot_name\"" \
+    "      builtin set -e -g \"\$_scratch_snapshot_name\"; or return 125" \
+    "    end" \
+    "    if builtin set -q -U \"\$_scratch_snapshot_name\"" \
+    "      builtin set -e -U \"\$_scratch_snapshot_name\"; or return 125" \
+    "    end" \
+    "  end" \
+    "end" \
+    "set -l _valise_fish_persistence_verify_helper __valise_fish_verify_(builtin random)" \
+    "function \$_valise_fish_persistence_verify_helper --no-scope-shadowing" \
+    "  set -l _persistence_durable_file \$argv[1]" \
+    "  set -l _persistence_tmp_parent \$argv[2]" \
+    "  set -l _persistence_scope \$argv[3]" \
+    "  set -l _persistence_expected_present \$argv[4]" \
+    "  set -l _persistence_expected_exported \$argv[5]" \
+    "  set -l _persistence_expected_values \$argv[6..-1]" \
+    "  set -l _persistence_fish_path (status fish-path)" \
+    "  if test (builtin count \$_persistence_fish_path) -ne 1; or not test -x \"\$_persistence_fish_path\"" \
+    "    return 125" \
+    "  end" \
+    "  # _persistence_durable_file was captured before untrusted source execution." \
+    "  if not test -f \"\$_persistence_durable_file\"" \
+    "    if test \"\$_persistence_expected_present\" = 0" \
+    "      return 0" \
+    "    end" \
+    "    return 125" \
+    "  end" \
+    "  if not string match -q '/*' -- \"\$_persistence_tmp_parent\"; or not test -d \"\$_persistence_tmp_parent\"; or not test -w \"\$_persistence_tmp_parent\"; or not test -x \"\$_persistence_tmp_parent\"" \
+    "    return 125" \
+    "  end" \
+    "  set -l _persistence_checked_file \$_persistence_durable_file" \
+    "  if test -x /usr/bin/uname; and test (/usr/bin/uname -s 2>/dev/null) = Darwin" \
+    "    if builtin test -L /var; and test (builtin path resolve -- /var 2>/dev/null) = /private/var" \
+    "      set _persistence_checked_file (builtin string replace -r '^/var' /private/var -- \"\$_persistence_checked_file\")" \
+    "    end" \
+    "    if builtin test -L /tmp; and test (builtin path resolve -- /tmp 2>/dev/null) = /private/tmp" \
+    "      set _persistence_checked_file (builtin string replace -r '^/tmp' /private/tmp -- \"\$_persistence_checked_file\")" \
+    "    end" \
+    "  end" \
+    "  if not builtin string match -q '/*' -- \"\$_persistence_checked_file\"; or builtin string match -q '*//*' -- \"\$_persistence_checked_file\"" \
+    "    return 125" \
+    "  end" \
+    "  set -l _persistence_checked_prefix /" \
+    "  for _persistence_checked_component in (builtin string split '/' -- \"\$_persistence_checked_file\")" \
+    "    if test -z \"\$_persistence_checked_component\"" \
+    "      continue" \
+    "    end" \
+    "    switch \"\$_persistence_checked_component\"" \
+    "      case . .." \
+    "        return 125" \
+    "    end" \
+    "    if test \"\$_persistence_checked_prefix\" = /" \
+    "      set _persistence_checked_prefix /\$_persistence_checked_component" \
+    "    else" \
+    "      set _persistence_checked_prefix \"\$_persistence_checked_prefix/\$_persistence_checked_component\"" \
+    "    end" \
+    "    if builtin test -L \"\$_persistence_checked_prefix\"" \
+    "      return 125" \
+    "    end" \
+    "  end" \
+    "  set -e _persistence_checked_file _persistence_checked_prefix _persistence_checked_component" \
+    "  set -l _persistence_mktemp_path ''" \
+    "  for _persistence_candidate in /usr/bin/mktemp /bin/mktemp" \
+    "    if test -x \"\$_persistence_candidate\"" \
+    "      set _persistence_mktemp_path \"\$_persistence_candidate\"" \
+    "      break" \
+    "    end" \
+    "  end" \
+    "  set -l _persistence_mkdir_path ''" \
+    "  for _persistence_candidate in /bin/mkdir /usr/bin/mkdir" \
+    "    if test -x \"\$_persistence_candidate\"" \
+    "      set _persistence_mkdir_path \"\$_persistence_candidate\"" \
+    "      break" \
+    "    end" \
+    "  end" \
+    "  set -l _persistence_ln_path ''" \
+    "  for _persistence_candidate in /bin/ln /usr/bin/ln" \
+    "    if test -x \"\$_persistence_candidate\"" \
+    "      set _persistence_ln_path \"\$_persistence_candidate\"" \
+    "      break" \
+    "    end" \
+    "  end" \
+    "  set -l _persistence_rm_path ''" \
+    "  for _persistence_candidate in /bin/rm /usr/bin/rm" \
+    "    if test -x \"\$_persistence_candidate\"" \
+    "      set _persistence_rm_path \"\$_persistence_candidate\"" \
+    "      break" \
+    "    end" \
+    "  end" \
+    "  if test -z \"\$_persistence_mktemp_path\"; or test -z \"\$_persistence_mkdir_path\"; or test -z \"\$_persistence_ln_path\"; or test -z \"\$_persistence_rm_path\"" \
+    "    return 125" \
+    "  end" \
+    "  set -l _persistence_verify_root (\"\$_persistence_mktemp_path\" -d \"\$_persistence_tmp_parent/valise-fish-persistence.XXXXXX\" 2>/dev/null)" \
+    "  if test \$status -ne 0; or test (builtin count \$_persistence_verify_root) -ne 1" \
+    "    return 125" \
+    "  end" \
+    "  if not \"\$_persistence_mkdir_path\" -p \"\$_persistence_verify_root/fish\"; or not \"\$_persistence_ln_path\" -s \"\$_persistence_durable_file\" \"\$_persistence_verify_root/fish/fish_variables\"" \
+    "    if not \"\$_persistence_rm_path\" -rf -- \"\$_persistence_verify_root\" 2>/dev/null" \
+    "      return 125" \
+    "    end" \
+    "    return 125" \
+    "  end" \
+    "  set -lx XDG_CONFIG_HOME \"\$_persistence_verify_root\"" \
+    "  set -l _persistence_actual (\"\$_persistence_fish_path\" -c '" \
+    "    set -l _persistence_name \$argv[1]" \
+    "    # Remove an inherited global shadow before reading the universal store." \
+    "    if builtin set -q -g -- \$_persistence_name" \
+    "      set -l _persistence_global_values \$\$_persistence_name" \
+    "      builtin set -e -g -- \$_persistence_name; or exit 125" \
+    "    end" \
+    "    if builtin set -q -U -- \$_persistence_name" \
+    "      builtin printf \"1\\n\"" \
+    "      if builtin set -q -Ux -- \$_persistence_name" \
+    "        builtin printf \"1\\n\"" \
+    "      else" \
+    "        builtin printf \"0\\n\"" \
+    "      end" \
+    "      string escape -- \$\$_persistence_name" \
+    "    else" \
+    "      builtin printf \"0\\n0\\n\"" \
+    "    end" \
+    "  ' -- \"\$_persistence_scope\" 2>/dev/null)" \
+    "  set -l _persistence_child_status \$status" \
+    "  if not \"\$_persistence_rm_path\" -rf -- \"\$_persistence_verify_root\" 2>/dev/null" \
+    "    return 125" \
+    "  end" \
+    "  if test \$_persistence_child_status -ne 0" \
+    "    return 125" \
+    "  end" \
+    "  set -l _persistence_expected \$_persistence_expected_present \$_persistence_expected_exported" \
+    "  set -a _persistence_expected (string escape -- \$_persistence_expected_values)" \
+    "  if test (builtin count \$_persistence_actual) -ne (builtin count \$_persistence_expected)" \
+    "    return 125" \
+    "  end" \
+    "  set -l _persistence_index 1" \
+    "  while test \$_persistence_index -le (builtin count \$_persistence_expected)" \
+    "    if not builtin test \"\$_persistence_actual[\$_persistence_index]\" = \"\$_persistence_expected[\$_persistence_index]\"" \
+    "      return 125" \
+    "    end" \
+    "    set _persistence_index (builtin math \$_persistence_index + 1)" \
+    "  end" \
+    "  return 0" \
+    "end" \
+    "# Restore persistent caller root scopes and remove the temporary snapshot state." \
+    "set -l _valise_fish_root_restore_helper __valise_fish_restore_(builtin random)" \
+    "function \$_valise_fish_root_restore_helper --no-scope-shadowing" \
+    "  if builtin set -q -g SHELL_PROJECT_ROOT" \
+    "    builtin set -e -g SHELL_PROJECT_ROOT; or return 125" \
+    "  end" \
+    "  if builtin set -q -U SHELL_PROJECT_ROOT" \
+    "    builtin set -e -U SHELL_PROJECT_ROOT; or return 125" \
+    "  end" \
+    "  if builtin test \$_valise_fish_root_global_set -eq 1" \
+    "    set -l _valise_fish_root_global_flags -g" \
+    "    if builtin test \$_valise_fish_root_global_exported -eq 1" \
+    "      set _valise_fish_root_global_flags -gx" \
+    "    end" \
+    "    builtin set \$_valise_fish_root_global_flags SHELL_PROJECT_ROOT \$_valise_fish_root_global_values" \
+    "    if test \$status -ne 0" \
+    "      return 125" \
+    "    end" \
+    "  end" \
+    "  if not builtin functions -q \$_valise_fish_persistence_verify_helper; or not builtin test (builtin functions \$_valise_fish_persistence_verify_helper | string collect) = \"\$_valise_fish_persistence_helper_definition\"" \
+    "    builtin printf '%s\\n' 'trusted universal persistence verifier was modified' >&2" \
+    "    return 125" \
+    "  end" \
+    "  if builtin test \$_valise_fish_root_universal_set -eq 1" \
+    "    set -l _valise_fish_root_universal_flags -U" \
+    "    if builtin test \$_valise_fish_root_universal_exported -eq 1" \
+    "      set _valise_fish_root_universal_flags -Ux" \
+    "    end" \
+    "    builtin set \$_valise_fish_root_universal_flags SHELL_PROJECT_ROOT \$_valise_fish_root_universal_values" \
+    "    if test \$status -ne 0" \
+    "      return 125" \
+    "    end" \
+    "  end" \
+    "  \$_valise_fish_persistence_verify_helper \"\$_valise_fish_persistence_durable_file\" \"\$_valise_fish_persistence_tmp_parent\" SHELL_PROJECT_ROOT \"\$_valise_fish_root_universal_set\" \"\$_valise_fish_root_universal_exported\" \$_valise_fish_root_universal_values; or return 125" \
+    "  for _valise_fish_root_state in _valise_fish_root_global_set _valise_fish_root_global_exported _valise_fish_root_global_values _valise_fish_root_universal_set _valise_fish_root_universal_exported _valise_fish_root_universal_values" \
+    "    if builtin set -q -l \$_valise_fish_root_state" \
+    "      builtin set -e -l \$_valise_fish_root_state; or return 125" \
+    "    end" \
+    "  end" \
+    "  for _valise_fish_scratch_name in \$_valise_fish_scratch_names" \
+    "    if not builtin functions -q \$_valise_fish_scratch_restore_helper; or not builtin test (builtin functions \$_valise_fish_scratch_restore_helper | string collect) = \"\$_valise_fish_scratch_helper_definition\"" \
+    "      builtin printf '%s\\n' 'trusted scratch restore helper was modified' >&2" \
+    "      builtin exit 125" \
+    "    end" \
+    "    \$_valise_fish_scratch_restore_helper \"\$_valise_fish_scratch_name\" \"\$_valise_fish_scratch_prefix\"; or return 125" \
+    "  end" \
+    "  if builtin set -q _valise_fish_persistence_verify_helper; and builtin functions -q \"\$_valise_fish_persistence_verify_helper\"" \
+    "    builtin functions -e \"\$_valise_fish_persistence_verify_helper\"; or return 125" \
+    "  end" \
+    "  builtin functions -e (builtin status function) 2>/dev/null" \
+    "end" \
+    "# Publish only the authenticated active root and readiness marker. Untrusted" \
+    "# source may have left universal shadows behind, so remove them before the" \
+    "# global public state is exposed." \
+    "set -l _valise_fish_publish_active_helper __valise_fish_publish_(builtin random)" \
+    "function \$_valise_fish_publish_active_helper --no-scope-shadowing" \
+    "  if builtin set -q -U SHELL_PROJECT_ROOT" \
+    "    builtin set -e -U SHELL_PROJECT_ROOT; or return 125" \
+    "  end" \
+    "  builtin set -gx SHELL_PROJECT_ROOT \"\$_valise_fish_active_root\"; or return 125" \
+    "  if builtin set -q -U VALISE_FISH_READY" \
+    "    builtin set -e -U VALISE_FISH_READY; or return 125" \
+    "  end" \
+    "  builtin set -gx VALISE_FISH_READY 1; or return 125" \
+    "end" \
+    "set -l _valise_fish_publish_active_helper_definition (builtin functions \"\$_valise_fish_publish_active_helper\" | string collect)" \
+    "# Successful activation keeps the authenticated public root/readiness state." \
+    "# It only removes private snapshots and trusted helper functions; rollback" \
+    "# is reserved for failure paths." \
+    "set -l _valise_fish_success_cleanup_helper __valise_fish_cleanup_(builtin random)" \
+    "function \$_valise_fish_success_cleanup_helper --no-scope-shadowing" \
+    "  if not builtin functions -q \$_valise_fish_success_cleanup_helper; or not builtin test (builtin functions \$_valise_fish_success_cleanup_helper | string collect) = \"\$_valise_fish_success_cleanup_helper_definition\"" \
+    "    builtin printf '%s\\n' 'trusted success cleanup helper was modified' >&2" \
+    "    return 125" \
+    "  end" \
+    "  for _valise_fish_root_state in _valise_fish_root_global_set _valise_fish_root_global_exported _valise_fish_root_global_values _valise_fish_root_universal_set _valise_fish_root_universal_exported _valise_fish_root_universal_values" \
+    "    if builtin set -q -l \$_valise_fish_root_state" \
+    "      builtin set -e -l \$_valise_fish_root_state; or return 125" \
+    "    end" \
+    "  end" \
+    "  if not builtin functions -q \$_valise_fish_scratch_restore_helper; or not builtin test (builtin functions \$_valise_fish_scratch_restore_helper | string collect) = \"\$_valise_fish_scratch_restore_helper_definition\"" \
+    "    builtin printf '%s\\n' 'trusted scratch restore helper was modified' >&2" \
+    "    return 125" \
+    "  end" \
+    "  for _valise_fish_scratch_name in \$_valise_fish_scratch_names" \
+    "    if not builtin functions -q \$_valise_fish_scratch_restore_helper; or not builtin test (builtin functions \$_valise_fish_scratch_restore_helper | string collect) = \"\$_valise_fish_scratch_helper_definition\"" \
+    "      builtin printf '%s\\n' 'trusted scratch restore helper was modified' >&2" \
+    "      return 125" \
+    "    end" \
+    "    \$_valise_fish_scratch_restore_helper \"\$_valise_fish_scratch_name\" \"\$_valise_fish_scratch_prefix\"; or return 125" \
+    "  end" \
+    "  if builtin set -q _valise_fish_publish_active_helper; and builtin functions -q \"\$_valise_fish_publish_active_helper\"" \
+    "    if not builtin test (builtin functions \"\$_valise_fish_publish_active_helper\" | string collect) = \"\$_valise_fish_publish_active_helper_definition\"" \
+    "      builtin printf '%s\\n' 'trusted active-state publisher was modified' >&2" \
+    "      return 125" \
+    "    end" \
+    "    builtin functions -e \"\$_valise_fish_publish_active_helper\"; or return 125" \
+    "  end" \
+    "  if builtin set -q _valise_fish_persistence_verify_helper; and builtin functions -q \"\$_valise_fish_persistence_verify_helper\"" \
+    "    if not builtin test (builtin functions \"\$_valise_fish_persistence_verify_helper\" | string collect) = \"\$_valise_fish_persistence_helper_definition\"" \
+    "      builtin printf '%s\\n' 'trusted universal persistence verifier was modified' >&2" \
+    "      return 125" \
+    "    end" \
+    "    builtin functions -e \"\$_valise_fish_persistence_verify_helper\"; or return 125" \
+    "  end" \
+    "  if builtin functions -q \"\$_valise_fish_root_restore_helper\"" \
+    "    if not builtin test (builtin functions \"\$_valise_fish_root_restore_helper\" | string collect) = \"\$_valise_fish_root_helper_definition\"" \
+    "      builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
+    "      return 125" \
+    "    end" \
+    "    builtin functions -e \"\$_valise_fish_root_restore_helper\"; or return 125" \
+    "  end" \
+    "  if builtin functions -q \"\$_valise_fish_scratch_restore_helper\"" \
+    "    if not builtin test (builtin functions \"\$_valise_fish_scratch_restore_helper\" | string collect) = \"\$_valise_fish_scratch_restore_helper_definition\"" \
+    "      builtin printf '%s\\n' 'trusted scratch restore helper was modified' >&2" \
+    "      return 125" \
+    "    end" \
+    "    builtin functions -e \"\$_valise_fish_scratch_restore_helper\"; or return 125" \
+    "  end" \
+    "  builtin functions -e (builtin status function) 2>/dev/null; or return 125" \
+    "end" \
+    "# Keep cleanup definitions outside the Fish function namespace while" \
+    "# untrusted entrypoints and generated plans are executing. Function names" \
+    "# are enumerable, so the trusted definitions stay in caller-local Fish" \
+    "# variables rather than same-user-writable temporary files." \
+    "set -l _valise_fish_root_helper_definition (builtin functions \"\$_valise_fish_root_restore_helper\" | string collect)" \
+    "set -l _valise_fish_success_cleanup_helper_definition (builtin functions \"\$_valise_fish_success_cleanup_helper\" | string collect)" \
+    "set -l _valise_fish_persistence_helper_definition (builtin functions \"\$_valise_fish_persistence_verify_helper\" | string collect)" \
+    "set -l _valise_fish_scratch_helper_definition (builtin functions \"\$_valise_fish_scratch_restore_helper\" | string collect)" \
+    "set -l _valise_fish_scratch_restore_helper_definition (builtin functions \"\$_valise_fish_scratch_restore_helper\" | string collect)" \
+    "if test (builtin count \$_valise_fish_root_helper_definition) -ne 1; or test (builtin count \$_valise_fish_success_cleanup_helper_definition) -ne 1; or test (builtin count \$_valise_fish_publish_active_helper_definition) -ne 1; or test (builtin count \$_valise_fish_persistence_helper_definition) -ne 1; or test (builtin count \$_valise_fish_scratch_helper_definition) -ne 1; or test (builtin count \$_valise_fish_scratch_restore_helper_definition) -ne 1" \
+    "  printf '%s\\n' 'valise Fish integration: trusted cleanup snapshot unavailable' >&2" \
+    "  return 125" \
+    "end" \
+    "# Activate one historical generated Fish plan transactionally." \
+    "set -l _valise_fish_legacy_runner __valise_fish_legacy_run_(builtin random)" \
+    "function \$_valise_fish_legacy_runner" \
+    "  set -l _legacy_root \$argv[1]" \
+    "  set -l _legacy_plan \$argv[2]" \
+    "  set -l _legacy_before (builtin functions --all --names)" \
+    "  set -l _legacy_snapshot_names" \
+    "  set -l _legacy_snapshot_definitions" \
+    "  set -l _legacy_runner_name (builtin status function)" \
+    "  set -l _legacy_snapshot_index 1" \
+    "  set -l _legacy_critical_names contains test string source path functions set printf echo math count eval cd pwd" \
+    "  set -l _legacy_snapshot_sources" \
+    "  for _legacy_function in \$_legacy_before" \
+    "    if builtin contains -- \"\$_legacy_function\" \"\$_legacy_runner_name\"; or not builtin functions -q \"\$_legacy_function\"" \
+    "      continue" \
+    "    end" \
+    "    set -l _legacy_source (builtin functions --details \"\$_legacy_function\")" \
+    "    if not builtin contains -- \"\$_legacy_function\" \$_legacy_critical_names; and builtin string match -q -r '^(embedded:|autoloaded:|builtin)' -- \"\$_legacy_source\"" \
+    "      continue" \
+    "    end" \
+    "    set -l _legacy_definition (builtin functions \"\$_legacy_function\" | string collect)" \
+    "    if test (builtin count \$_legacy_definition) -ne 1" \
+    "      builtin printf 'valise Fish integration: unable to snapshot caller Fish function: %s\\n' \"\$_legacy_function\" >&2" \
+    "      return 1" \
+    "    end" \
+    "    set -a _legacy_snapshot_names \"\$_legacy_function\"" \
+    "    set -a _legacy_snapshot_definitions \"\$_legacy_definition\"" \
+    "    set -a _legacy_snapshot_sources \"\$_legacy_source\"" \
+    "    set _legacy_snapshot_index (builtin math \$_legacy_snapshot_index + 1)" \
+    "  end" \
+    "  builtin set -gx VALISE_MODULE_ROOT \"\$_legacy_root\"" \
+    "  set -l _legacy_source_runner __valise_fish_legacy_source_(builtin random)" \
+    "  function \$_legacy_source_runner" \
+    "    builtin source \"\$argv[1]\"" \
+    "    return \$status" \
+    "  end" \
+    "  \$_legacy_source_runner \"\$_legacy_plan\"" \
+    "  set -l _legacy_status \$status" \
+    "  builtin functions -e \$_legacy_source_runner 2>/dev/null" \
+    "  set -l _legacy_after (builtin functions --all --names)" \
+    "  set -l _legacy_created" \
+    "  set -l _legacy_critical_created" \
+    "  for _legacy_function in \$_legacy_after" \
+    "    if not builtin contains -- \"\$_legacy_function\" \$_legacy_before" \
+    "      set -a _legacy_created \"\$_legacy_function\"" \
+    "      if builtin contains -- \"\$_legacy_function\" \$_legacy_critical_names" \
+    "        set -a _legacy_critical_created \"\$_legacy_function\"" \
+    "      end" \
+    "    end" \
+    "  end" \
+    "  set -l _legacy_replaced" \
+    "  set -l _legacy_embedded_replaced" \
+    "  set _legacy_snapshot_index 1" \
+    "  for _legacy_original in \$_legacy_snapshot_names" \
+    "    set -l _legacy_definition \"\$_legacy_snapshot_definitions[\$_legacy_snapshot_index]\"" \
+    "    if not builtin functions -q \"\$_legacy_original\"; or not test (builtin functions \"\$_legacy_original\" | string collect) = \"\$_legacy_definition\"" \
+    "      set -a _legacy_replaced \"\$_legacy_original\"" \
+    "      if builtin string match -q 'embedded:*' -- \"\$_legacy_snapshot_sources[\$_legacy_snapshot_index]\"" \
+    "        set -a _legacy_embedded_replaced \"\$_legacy_original\"" \
+    "      end" \
+    "    end" \
+    "    set _legacy_snapshot_index (builtin math \$_legacy_snapshot_index + 1)" \
+    "  end" \
+    "  for _legacy_state in VALISE_FISH_READY _sp_fish_loader_expected_source _sp_fish_metadata_expected_source _sp_fish_loader_bootstrap_status _sp_fish_loader_bootstrap_mode _sp_fish_loader_bootstrap_seeds VALISE_MODULE_ROOT SHELL_PROJECT_ROOT XDG_CONFIG_HOME TMPDIR HOME" \
+    "    if builtin set -q -g \"\$_legacy_state\"; and not builtin set -e -g \"\$_legacy_state\"; builtin exit 125; end" \
+    "    if builtin set -q -U \"\$_legacy_state\"; and not builtin set -e -U \"\$_legacy_state\"; builtin exit 125; end" \
+    "  end" \
+    "  # Embedded critical replacement cannot be restored without changing Fish provenance. Fail closed before any restoration." \
+    "  if test (builtin count \$_legacy_embedded_replaced) -ne 0; or test (builtin count \$_legacy_critical_created) -ne 0" \
+    "    builtin printf '%s\\n' 'valise Fish integration: legacy Fish plan mutated a critical Fish function' >&2" \
+    "    builtin exit 125" \
+    "  end" \
+    "  if test (builtin count \$_legacy_replaced) -ne 0" \
+    "    builtin printf '%s\\n' 'valise Fish integration: exact caller-function restoration is unavailable' >&2" \
+    "      builtin exit 125" \
+    "  end" \
+    "  if test \$_legacy_status -ne 0; or test (builtin count \$_legacy_replaced) -ne 0; or test (builtin count \$_legacy_critical_created) -ne 0;" \
+    "    for _legacy_function in \$_legacy_created" \
+    "      if builtin functions -q \"\$_legacy_function\"" \
+    "        if builtin contains -- \"\$_legacy_function\" \$_legacy_critical_created; or test \$_legacy_status -ne 0; or test (builtin count \$_legacy_replaced) -ne 0" \
+    "          builtin functions -e \"\$_legacy_function\"" \
+    "        end" \
+    "      end" \
+    "    end" \
+    "    if test (builtin count \$_legacy_embedded_replaced) -ne 0; or test (builtin count \$_legacy_critical_created) -ne 0;" \
+    "      builtin printf '%s\\n' 'valise Fish integration: legacy Fish plan mutated a critical Fish function' >&2" \
+    "      test \$_legacy_status -ne 0; or set _legacy_status 125" \
+    "    else if test (builtin count \$_legacy_replaced) -ne 0" \
+    "      builtin printf '%s\\n' 'valise Fish integration: legacy Fish plan replaced a caller-owned function' >&2" \
+    "      test \$_legacy_status -ne 0; or set _legacy_status 1" \
+    "    else" \
+    "      builtin printf 'valise Fish integration: legacy Fish plan failed with status %d\\n' \$_legacy_status >&2" \
+    "    end" \
+    "    return \$_legacy_status" \
+    "  end" \
+    "  builtin set -g _sp_fish_legacy_owned_exports \$_legacy_created" \
+    "  set -l _legacy_sources" \
+    "  for _legacy_function in \$_legacy_created" \
+    "    set -a _legacy_sources (builtin functions --details \"\$_legacy_function\")" \
+    "  end" \
+    "  builtin set -g _sp_fish_legacy_owned_sources \$_legacy_sources" \
+    "  if not builtin set -q _sp_fish_module_roots" \
+    "    builtin set -g _sp_fish_module_roots" \
+    "  end" \
+    "  builtin set -ga _sp_fish_module_roots \"\$_legacy_root\"" \
+    "  return 0" \
+    "end" \
+    "# Clear handshake and readiness in both persistent scopes before activation." \
+    "for _valise_fish_state_name in VALISE_FISH_READY _sp_fish_loader_bootstrap_status _sp_fish_loader_bootstrap_mode _sp_fish_loader_bootstrap_seeds _sp_fish_loader_expected_source _sp_fish_metadata_expected_source VALISE_MODULE_ROOT" \
+    "  if builtin set -q -g \"\$_valise_fish_state_name\"; and not builtin set -e -g \"\$_valise_fish_state_name\"; builtin exit 125; end" \
+    "  if builtin set -q -U \"\$_valise_fish_state_name\"; and not builtin set -e -U \"\$_valise_fish_state_name\"; builtin exit 125; end" \
+    "end" \
+    "# Cleanup only functions whose exact current source matches an authenticated ownership ledger." \
+    "# Installed ledgers are accepted only for complete, authenticated release roots; source-tree mode is intentionally broader because it is an unauthenticated development surface." \
+    "set -l _valise_fish_active_root" \
+    "if test \"\$_valise_fish_source_tree_mode\" = 1" \
+    "  set _valise_fish_active_root (builtin path resolve -- ${_fish_active_literal})" \
+    "else" \
+    "  set _valise_fish_active_root (${_fish_cli_literal} verify-active --print-root 2>/dev/null)" \
+    "end" \
+    "set -l _valise_fish_owned_cleanup __valise_fish_owned_cleanup_(builtin random)" \
+    "function \$_valise_fish_owned_cleanup --no-scope-shadowing" \
+    "  set -l _valise_fish_trusted_root \$_valise_fish_active_root" \
+    "  set -l _valise_fish_ledger_invalid 0" \
+    "  builtin test -n \"\$_valise_fish_trusted_root\"; or set _valise_fish_ledger_invalid 1" \
+    "  for _valise_fish_ledger_name in _sp_fish_loader_owned_exports _sp_fish_legacy_owned_exports _sp_fish_metadata_owned_exports _sp_fish_entrypoint_owned_exports" \
+    "    set -l _valise_fish_source_ledger_name ''" \
+    "    switch \"\$_valise_fish_ledger_name\"" \
+    "      case _sp_fish_loader_owned_exports" \
+    "        set _valise_fish_source_ledger_name _sp_fish_loader_owned_sources" \
+    "      case _sp_fish_legacy_owned_exports" \
+    "        set _valise_fish_source_ledger_name _sp_fish_legacy_owned_sources" \
+    "      case _sp_fish_metadata_owned_exports" \
+    "        set _valise_fish_source_ledger_name _sp_fish_metadata_owned_sources" \
+    "      case _sp_fish_entrypoint_owned_exports" \
+    "        set _valise_fish_source_ledger_name _sp_fish_entrypoint_owned_sources" \
+    "    end" \
+    "    set -l _valise_fish_ledger_present 0" \
+    "    set -l _valise_fish_source_present 0" \
+    "    builtin set -q \$_valise_fish_ledger_name; and set _valise_fish_ledger_present 1" \
+    "    builtin set -q \$_valise_fish_source_ledger_name; and set _valise_fish_source_present 1" \
+    "    if builtin test \$_valise_fish_ledger_present -ne \$_valise_fish_source_present" \
+    "      set _valise_fish_ledger_invalid 1" \
+    "    else if builtin test \$_valise_fish_ledger_present -eq 1" \
+    "      set -l _valise_fish_owned_names \$\$_valise_fish_ledger_name" \
+    "      set -l _valise_fish_owned_sources \$\$_valise_fish_source_ledger_name" \
+    "      if builtin test (builtin count \$_valise_fish_owned_names) -ne (builtin count \$_valise_fish_owned_sources)" \
+    "        set _valise_fish_ledger_invalid 1" \
+    "      else" \
+    "        set -l _valise_fish_owned_index 1" \
+    "        for _valise_fish_owned_source in \$_valise_fish_owned_sources" \
+    "          set -l _valise_fish_source_valid 0" \
+    "          if builtin string match -q 'embedded:*' -- \"\$_valise_fish_owned_source\"; or builtin string match -q 'autoloaded:*' -- \"\$_valise_fish_owned_source\"; or builtin string match -q 'builtin' -- \"\$_valise_fish_owned_source\"" \
+    "            set _valise_fish_source_valid 1" \
+    "          else if builtin test \"\$_valise_fish_source_tree_mode\" = 1; and builtin test -f \"\$_valise_fish_owned_source\"" \
+    "            set -l _valise_fish_source_canonical (builtin path resolve -- \"\$_valise_fish_owned_source\" 2>/dev/null)" \
+    "            if builtin string match -q \"\$_valise_fish_trusted_root/*\" -- \"\$_valise_fish_source_canonical\"" \
+    "              set _valise_fish_source_valid 1" \
+    "            else if builtin test -n \"\$_valise_fish_previous_root\"; and builtin string match -q \"\$_valise_fish_previous_root/*\" -- \"\$_valise_fish_source_canonical\"" \
+    "              set _valise_fish_source_valid 1" \
+    "            end" \
+    "          else if builtin test \"\$_valise_fish_source_tree_mode\" != 1" \
+    "            set -l _valise_fish_source_relative ''" \
+    "            if builtin string match -q '*/entrypoints/fish/profile.fish' -- \"\$_valise_fish_owned_source\"" \
+    "              set _valise_fish_source_relative entrypoints/fish/profile.fish" \
+    "            else if builtin string match -q '*/vendor/shell-profile/lib/fish/loader.fish' -- \"\$_valise_fish_owned_source\"; or builtin string match -q '*/vendor/shell-profile/lib/fish/metadata.fish' -- \"\$_valise_fish_owned_source\"" \
+    "              if builtin string match -q '*/loader.fish' -- \"\$_valise_fish_owned_source\"; set _valise_fish_source_relative vendor/shell-profile/lib/fish/loader.fish; else; set _valise_fish_source_relative vendor/shell-profile/lib/fish/metadata.fish; end" \
+    "            else if builtin string match -q '*/generated/installed-modules.fish' -- \"\$_valise_fish_owned_source\"" \
+    "              set _valise_fish_source_relative generated/installed-modules.fish" \
+    "            end" \
+    "            if builtin test -n \"\$_valise_fish_source_relative\"; and builtin test (builtin path resolve -- \"\$_valise_fish_owned_source\") = (builtin path resolve -- \"\$_valise_fish_trusted_root/\$_valise_fish_source_relative\")" \
+    "              set _valise_fish_source_valid 1" \
+    "            end" \
+    "          end" \
+    "          if builtin test \$_valise_fish_source_valid -ne 1" \
+    "            set _valise_fish_ledger_invalid 1" \
+    "            break" \
+    "          end" \
+    "          set _valise_fish_owned_index (builtin math \$_valise_fish_owned_index + 1)" \
+    "        end" \
+    "      end" \
+    "    end" \
+    "  end" \
+    "  if builtin test \$_valise_fish_ledger_invalid -ne 0" \
+    "    for _valise_fish_ledger_name in _sp_fish_loader_owned_exports _sp_fish_loader_owned_sources _sp_fish_legacy_owned_exports _sp_fish_legacy_owned_sources _sp_fish_metadata_owned_exports _sp_fish_metadata_owned_sources _sp_fish_entrypoint_owned_exports _sp_fish_entrypoint_owned_sources" \
+    "      if builtin set -q -g \"\$_valise_fish_ledger_name\"; and not builtin set -e -g \"\$_valise_fish_ledger_name\"; builtin exit 125; end" \
+    "      if builtin set -q -U \"\$_valise_fish_ledger_name\"; and not builtin set -e -U \"\$_valise_fish_ledger_name\"; builtin exit 125; end" \
+    "    end" \
+    "    builtin printf '%s\n' 'valise Fish integration: ownership ledger is not authenticated' >&2" \
+    "    return 125" \
+    "  end" \
+    "  for _valise_fish_ledger_name in _sp_fish_loader_owned_exports _sp_fish_legacy_owned_exports _sp_fish_metadata_owned_exports _sp_fish_entrypoint_owned_exports" \
+    "    set -l _valise_fish_source_ledger_name ''" \
+    "    switch \"\$_valise_fish_ledger_name\"" \
+    "      case _sp_fish_loader_owned_exports" \
+    "        set _valise_fish_source_ledger_name _sp_fish_loader_owned_sources" \
+    "      case _sp_fish_legacy_owned_exports" \
+    "        set _valise_fish_source_ledger_name _sp_fish_legacy_owned_sources" \
+    "      case _sp_fish_metadata_owned_exports" \
+    "        set _valise_fish_source_ledger_name _sp_fish_metadata_owned_sources" \
+    "      case _sp_fish_entrypoint_owned_exports" \
+    "        set _valise_fish_source_ledger_name _sp_fish_entrypoint_owned_sources" \
+    "    end" \
+    "    if builtin set -q \"\$_valise_fish_ledger_name\"; and builtin set -q \"\$_valise_fish_source_ledger_name\"" \
+    "      set -l _valise_fish_owned_index 1" \
+    "      for _valise_fish_owned_function in \$\$_valise_fish_ledger_name" \
+    "        set -l _valise_fish_owned_sources \$\$_valise_fish_source_ledger_name" \
+    "        set -l _valise_fish_owned_source \$_valise_fish_owned_sources[\$_valise_fish_owned_index]" \
+    "        if test -n \"\$_valise_fish_owned_source\"; and builtin functions -q \"\$_valise_fish_owned_function\"; and builtin test (builtin functions --details \"\$_valise_fish_owned_function\") = \"\$_valise_fish_owned_source\"" \
+    "          builtin functions -e \"\$_valise_fish_owned_function\"; or builtin exit 125" \
+    "        end" \
+    "        set _valise_fish_owned_index (builtin math \$_valise_fish_owned_index + 1)" \
+    "      end" \
+    "    end" \
+    "    if builtin set -q -g \"\$_valise_fish_ledger_name\"; and not builtin set -e -g \"\$_valise_fish_ledger_name\"; builtin exit 125; end" \
+    "    if builtin set -q -U \"\$_valise_fish_ledger_name\"; and not builtin set -e -U \"\$_valise_fish_ledger_name\"; builtin exit 125; end" \
+    "    if builtin set -q -g \"\$_valise_fish_source_ledger_name\"; and not builtin set -e -g \"\$_valise_fish_source_ledger_name\"; builtin exit 125; end" \
+    "    if builtin set -q -U \"\$_valise_fish_source_ledger_name\"; and not builtin set -e -U \"\$_valise_fish_source_ledger_name\"; builtin exit 125; end" \
+    "  end" \
+    "  return 0" \
+    "end" \
+    "set -l _valise_fish_owned_cleanup_definition (builtin functions \"\$_valise_fish_owned_cleanup\" | string collect)" \
+    "if test (builtin count \"\$_valise_fish_owned_cleanup_definition\") -ne 1" \
+    "  printf '%s\\n' 'valise Fish integration: trusted ownership cleanup snapshot unavailable' >&2" \
+    "  return 125" \
+    "end" \
+    "if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
+    "  builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
+    "  builtin exit 125" \
+    "end" \
+    "\$_valise_fish_owned_cleanup \"\$_valise_fish_active_root\" \"\$_valise_fish_source_tree_mode\"" \
+    "set -l _valise_fish_owned_cleanup_status \$status" \
+    "if test \$_valise_fish_owned_cleanup_status -ne 0" \
+    "  return \$_valise_fish_owned_cleanup_status" \
+    "end" \
+    "set -l _valise_fish_legacy_activation_before (builtin functions --all --names)" \
+    "if test -z \"\$_valise_fish_active_root\"; or not builtin test -d \"\$_valise_fish_active_root\"" \
+    "  printf '%s\\n' 'valise Fish integration: active release path cannot be resolved' >&2" \
+    "  if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
+    "    builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
+    "    builtin exit 125" \
+    "  end" \
+    "  \$_valise_fish_owned_cleanup" \
+    "  builtin functions -e \$_valise_fish_legacy_runner 2>/dev/null" \
+    "  if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
+    "    builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
+    "    builtin exit 125" \
+    "  end" \
+    "  \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "  return 1" \
+    "end" \
+    "if test \"\$_valise_fish_source_tree_mode\" != 1" \
+    "  set -l _valise_fish_reverified_root (${_fish_cli_literal} verify-active --print-root 2>/dev/null)" \
+    "  if not test -x ${_fish_cli_literal}; or not test \"\$_valise_fish_reverified_root\" = \"\$_valise_fish_active_root\"" \
+    "    printf '%s\\n' 'valise Fish integration: active release authentication failed' >&2" \
+    "    if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
+    "      builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
+    "      builtin exit 125" \
+    "    end" \
+    "    \$_valise_fish_owned_cleanup" \
+    "    if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
+    "      builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
+    "      builtin exit 125" \
+    "    end" \
+    "    \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "    return 1" \
+    "  end" \
+    "end" \
+    "if test -e \"\$_valise_fish_active_root/entrypoints/fish/profile.fish\"" \
+    "  set -l _valise_fish_entrypoint_runner __valise_fish_entrypoint_runner_(builtin random)" \
+    "  function \$_valise_fish_entrypoint_runner" \
+    "    set -l _entrypoint_file \$argv[1]" \
+    "    set -l _entrypoint_expected_root \$argv[2]" \
+    "    set -l _entrypoint_source_tree_mode \$argv[3]" \
+    "    set -l _entrypoint_transaction_name (builtin status function)" \
+    "    set -l _entrypoint_before (builtin functions --all --names)" \
+    "    set -l _entrypoint_critical_names contains test string source path functions set printf echo math count eval cd pwd" \
+    "    set -l _entrypoint_snapshot_names" \
+    "    set -l _entrypoint_snapshot_definitions" \
+    "    set -l _entrypoint_snapshot_sources" \
+    "    for _entrypoint_function in \$_entrypoint_before" \
+    "      if test \"\$_entrypoint_function\" = \"\$_entrypoint_transaction_name\"; or not builtin functions -q \"\$_entrypoint_function\"" \
+    "        continue" \
+    "      end" \
+    "      set -l _entrypoint_source (builtin functions --details \"\$_entrypoint_function\")" \
+    "      if not builtin contains -- \"\$_entrypoint_function\" \$_entrypoint_critical_names; and builtin string match -q -r '^(embedded:|autoloaded:|builtin)' -- \"\$_entrypoint_source\"" \
+    "        continue" \
+    "      end" \
+    "      set -a _entrypoint_snapshot_names \"\$_entrypoint_function\"" \
+    "      set -a _entrypoint_snapshot_definitions (builtin functions \"\$_entrypoint_function\" | string collect)" \
+    "      set -a _entrypoint_snapshot_sources \"\$_entrypoint_source\"" \
+    "    end" \
+    "    set -l _entrypoint_source_helper __valise_fish_entrypoint_source_(builtin random)" \
+    "    function \$_entrypoint_source_helper" \
+    "      builtin source \"\$argv[1]\"" \
+    "      return \$status" \
+    "    end" \
+    "    \$_entrypoint_source_helper \"\$_entrypoint_file\"" \
+    "    set -l _entrypoint_status \$status" \
+    "    builtin functions -e \$_entrypoint_source_helper 2>/dev/null" \
+    "    set -l _entrypoint_after (builtin functions --all --names)" \
+    "    set -l _entrypoint_created" \
+    "    for _entrypoint_function in \$_entrypoint_after" \
+    "      if not builtin contains -- \"\$_entrypoint_function\" \$_entrypoint_before" \
+    "        set -a _entrypoint_created \"\$_entrypoint_function\"" \
+    "      end" \
+    "    end" \
+    "    set -l _entrypoint_replaced" \
+    "    set -l _entrypoint_snapshot_index 1" \
+    "    for _entrypoint_original in \$_entrypoint_snapshot_names" \
+    "      set -l _entrypoint_saved \"\$_entrypoint_snapshot_definitions[\$_entrypoint_snapshot_index]\"" \
+    "      set -l _entrypoint_live (builtin functions \"\$_entrypoint_original\" | string collect)" \
+    "      if not builtin functions -q \"\$_entrypoint_original\"; or not test \"\$_entrypoint_live\" = \"\$_entrypoint_saved\"" \
+    "        set -a _entrypoint_replaced \"\$_entrypoint_original\"" \
+    "      end" \
+    "      set _entrypoint_snapshot_index (builtin math \$_entrypoint_snapshot_index + 1)" \
+    "    end" \
+    "    set -l _entrypoint_embedded_replaced" \
+    "    set _entrypoint_snapshot_index 1" \
+    "    for _entrypoint_original in \$_entrypoint_snapshot_names" \
+    "      if builtin contains -- \"\$_entrypoint_original\" \$_entrypoint_replaced; and builtin string match -q 'embedded:*' -- \"\$_entrypoint_snapshot_sources[\$_entrypoint_snapshot_index]\"" \
+    "        set _entrypoint_embedded_replaced \"\$_entrypoint_original\"" \
+    "        break" \
+    "      end" \
+    "      set _entrypoint_snapshot_index (builtin math \$_entrypoint_snapshot_index + 1)" \
+    "    end" \
+    "    if test -n \"\$_entrypoint_embedded_replaced\"" \
+    "      builtin printf 'valise Fish integration: embedded Fish function was mutated: %s\\n' \"\$_entrypoint_embedded_replaced\" >&2" \
+    "      test \$_entrypoint_status -ne 0; or set _entrypoint_status 125" \
+    "    end" \
+    "    if not test \"\$_entrypoint_expected_root\" = \"\$SHELL_PROJECT_ROOT\"" \
+    "      test \$_entrypoint_status -ne 0; or set _entrypoint_status 1" \
+    "    end" \
+    "    if not builtin set -q VALISE_FISH_READY; or not test (builtin count \$VALISE_FISH_READY) -eq 1; or not string match -qr '^1\$' -- \"\$VALISE_FISH_READY\"" \
+    "      test \$_entrypoint_status -ne 0; or set _entrypoint_status 1" \
+    "    end" \
+    "    if test \$_entrypoint_source_tree_mode = 1" \
+    "      set -l _entrypoint_protected_names _sp_fish_loader_expected_source _sp_fish_metadata_expected_source _sp_fish_loader_bootstrap_mode _sp_fish_loader_bootstrap_seeds _sp_fish_loader_bootstrap_status _sp_fish_loaded_modules _sp_fish_module_roots _sp_fish_metadata_provider _sp_fish_loader_owned_exports _sp_fish_loader_owned_sources _sp_fish_legacy_owned_exports _sp_fish_legacy_owned_sources _sp_fish_metadata_owned_exports _sp_fish_metadata_owned_sources _sp_fish_entrypoint_owned_exports _sp_fish_entrypoint_owned_sources" \
+    "      set -l _entrypoint_protected_changed 0" \
+    "      for _entrypoint_protected_name in \$_entrypoint_protected_names" \
+    "        if builtin set -q -g \"\$_entrypoint_protected_name\"; or builtin set -q -U \"\$_entrypoint_protected_name\"" \
+    "          set _entrypoint_protected_changed 1" \
+    "          if builtin set -q -g \"\$_entrypoint_protected_name\"; and not builtin set -e -g \"\$_entrypoint_protected_name\"; builtin exit 125; end" \
+    "          if builtin set -q -U \"\$_entrypoint_protected_name\"; and not builtin set -e -U \"\$_entrypoint_protected_name\"; builtin exit 125; end" \
+    "        end" \
+    "      end" \
+    "      if test \$_entrypoint_protected_changed -ne 0; and test \$_entrypoint_status -eq 0" \
+    "        set _entrypoint_status 1" \
+    "      end" \
+    "    end" \
+    "    # The entrypoint is selected only after verify-active authenticates its" \
+    "    # immutable release. Its native metadata/loader state is therefore an" \
+    "    # intentional result of authenticated activation, not caller mutation." \
+    "    # Keep the exact caller-function and embedded-function checks above; those" \
+    "    # are the custody boundary for this source transaction." \
+    "    if test \$_entrypoint_status -ne 0; or test (builtin count \$_entrypoint_replaced) -ne 0" \
+    "      for _entrypoint_function in \$_entrypoint_created" \
+    "        if builtin functions -q \"\$_entrypoint_function\"" \
+    "          builtin functions -e \"\$_entrypoint_function\"; or builtin exit 125" \
+    "        end" \
+    "      end" \
+    "      if test (builtin count \$_entrypoint_replaced) -ne 0" \
+    "        builtin printf '%s\\n' 'valise Fish integration: exact caller-function restoration is unavailable' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "    if builtin set -q -g VALISE_FISH_READY; and not builtin set -e -g VALISE_FISH_READY; builtin exit 125; end" \
+    "    if builtin set -q -U VALISE_FISH_READY; and not builtin set -e -U VALISE_FISH_READY; builtin exit 125; end" \
+    "      if test (builtin count \$_entrypoint_replaced) -ne 0; and test \$_entrypoint_status -eq 0" \
+    "        set _entrypoint_status 1" \
+    "      end" \
+    "      return \$_entrypoint_status" \
+    "    end" \
+    "    # Publish only functions created by this authenticated entrypoint. The" \
+    "    # source string is read back from Fish after sourcing; callers cannot" \
+    "    # claim ownership by forging names or a parallel source ledger." \
+    "    set -l _entrypoint_owned_sources" \
+    "    for _entrypoint_function in \$_entrypoint_created" \
+    "      if not builtin functions -q \"\$_entrypoint_function\"" \
+    "        builtin printf '%s\\n' 'valise Fish integration: created entrypoint function disappeared before ownership publication' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      set -l _entrypoint_source (builtin functions --details \"\$_entrypoint_function\")" \
+    "      if test -z \"\$_entrypoint_source\"" \
+    "        builtin printf '%s\\n' 'valise Fish integration: created entrypoint function has no authenticated source' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      set -a _entrypoint_owned_sources \"\$_entrypoint_source\"" \
+    "    end" \
+    "    builtin set -g _sp_fish_entrypoint_owned_exports \$_entrypoint_created; or builtin exit 125" \
+    "    builtin set -g _sp_fish_entrypoint_owned_sources \$_entrypoint_owned_sources; or builtin exit 125" \
+    "    return 0" \
+    "  end" \
+    "    builtin set -gx SHELL_PROJECT_ROOT \"\$_valise_fish_active_root\"" \
+    "    \$_valise_fish_entrypoint_runner \"\$_valise_fish_active_root/entrypoints/fish/profile.fish\" \"\$_valise_fish_active_root\" \"\$_valise_fish_source_tree_mode\"" \
+    "    set -l _valise_fish_entrypoint_status \$status" \
+    "    builtin functions -e \$_valise_fish_entrypoint_runner 2>/dev/null" \
+    "    # The legacy runner is created before route selection; remove it on" \
+    "    # every project-entrypoint return so it cannot leak into the caller." \
+    "    builtin functions -e \$_valise_fish_legacy_runner 2>/dev/null" \
+    "    if test \$_valise_fish_entrypoint_status -ne 0" \
+    "      if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
+    "        builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      \$_valise_fish_owned_cleanup" \
+    "      if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
+    "        builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "      return \$_valise_fish_entrypoint_status" \
+    "    end" \
+    "    if not builtin functions -q \$_valise_fish_success_cleanup_helper; or not builtin test (builtin functions \$_valise_fish_success_cleanup_helper | string collect) = \"\$_valise_fish_success_cleanup_helper_definition\"" \
+    "      builtin printf '%s\\n' 'trusted success cleanup helper was modified' >&2" \
+    "      builtin exit 125" \
+    "    end" \
+    "    \$_valise_fish_publish_active_helper; or builtin exit 125" \
+    "    \$_valise_fish_success_cleanup_helper; or builtin exit 125" \
+    "    return \$_valise_fish_entrypoint_status" \
+    "else" \
+    "  if test -f \"\$_valise_fish_active_root/vendor/shell-profile/lib/fish/metadata.fish\"; and test -f \"\$_valise_fish_active_root/vendor/shell-profile/lib/fish/loader.fish\"" \
+    "  builtin set -gx SHELL_PROJECT_ROOT \"\$_valise_fish_active_root\"" \
+    "  builtin set -g _sp_fish_loader_expected_source \"\$_valise_fish_active_root/vendor/shell-profile/lib/fish/loader.fish\"" \
+    "  builtin set -g _sp_fish_metadata_expected_source \"\$_valise_fish_active_root/vendor/shell-profile/lib/fish/metadata.fish\"" \
+    "  # Metadata is executable Fish source; load it transactionally before the" \
+    "  # native loader sees its declarations. The runner serializes caller functions" \
+    "  # into caller-local Fish variables and sources metadata in an isolated helper scope." \
+    "  set -l _valise_fish_metadata_transaction __valise_fish_metadata_transaction_(builtin random)" \
+    "  function \$_valise_fish_metadata_transaction" \
+    "    set -l _metadata_runner_name (builtin status function)" \
+    "    set -l _metadata_persistence_helper \$argv[2]" \
+    "    set -l _metadata_persistence_definition \$argv[3]" \
+    "    set -l _metadata_persistence_durable_file \$argv[4]" \
+    "    set -l _metadata_persistence_tmp_parent \$argv[5]" \
+    "    set -l _metadata_expected_source ''" \
+    "    if builtin set -q _sp_fish_metadata_expected_source" \
+    "      set _metadata_expected_source \$_sp_fish_metadata_expected_source" \
+    "    end" \
+    "    if test -z \"\$_metadata_expected_source\"; or not builtin test \"\$argv[1]\" = \"\$_metadata_expected_source\"" \
+    "      builtin printf '%s\\n' 'metadata source is not the authenticated expected source' >&2" \
+    "      builtin exit 125" \
+    "    end" \
+    "    set -l _metadata_before (builtin functions --all --names)" \
+    "    set -l _metadata_snapshot_names" \
+    "    set -l _metadata_snapshot_definitions" \
+    "    set -l _metadata_snapshot_sources" \
+    "    set -l _metadata_snapshot_copy_sources" \
+    "    set -l _metadata_snapshot_copies" \
+    "    set -l _metadata_snapshot_nonce (builtin random)" \
+    "    set -l _metadata_critical_names contains test string source path functions set printf echo math count eval cd pwd" \
+    "    set -l _metadata_snapshot_status 0" \
+    "    set -l _metadata_snapshot_index 1" \
+    "    for _metadata_function in \$_metadata_before" \
+    "      if test \"\$_metadata_function\" = \"\$_metadata_runner_name\"; or not builtin functions -q \"\$_metadata_function\"" \
+    "        continue" \
+    "      end" \
+    "      set -l _metadata_source (builtin functions --details \"\$_metadata_function\")" \
+    "      if builtin string match -q -r '^(autoloaded:|embedded:|builtin)' -- \"\$_metadata_source\"" \
+    "        continue" \
+    "      end" \
+    "      set -l _metadata_definition (builtin functions \"\$_metadata_function\" | string collect)" \
+    "      if test (builtin count \$_metadata_definition) -ne 1" \
+    "        set _metadata_snapshot_status 125" \
+    "        break" \
+    "      end" \
+    "      set -a _metadata_snapshot_names \"\$_metadata_function\"" \
+    "      set -a _metadata_snapshot_definitions \"\$_metadata_definition\"" \
+    "      set -l _metadata_snapshot_copy \"__valise_fish_metadata_snapshot_\"\$_metadata_snapshot_nonce\"_\"\$_metadata_snapshot_index" \
+    "      if builtin functions -q \"\$_metadata_snapshot_copy\"; or not builtin functions --copy \"\$_metadata_function\" \"\$_metadata_snapshot_copy\"" \
+    "        set _metadata_snapshot_status 125" \
+    "        break" \
+    "      end" \
+    "      set -a _metadata_snapshot_sources \"\$_metadata_source\"" \
+    "      set -a _metadata_snapshot_copy_sources (builtin functions --details \"\$_metadata_snapshot_copy\")" \
+    "      set -a _metadata_snapshot_copies \"\$_metadata_snapshot_copy\"" \
+    "      set _metadata_snapshot_index (builtin math \$_metadata_snapshot_index + 1)" \
+    "    end" \
+    "    # Preserve embedded critical definitions without copying them from inside this helper: Fish changes their provenance when copied here." \
+    "    set -l _metadata_embedded_names" \
+    "    set -l _metadata_embedded_sources" \
+    "    set -l _metadata_critical_index 1" \
+    "    for _metadata_critical_name in \$_metadata_critical_names" \
+    "      if builtin functions -q \"\$_metadata_critical_name\"; and builtin string match -q 'embedded:*' -- (builtin functions --details \"\$_metadata_critical_name\")" \
+    "        set -a _metadata_embedded_names \"\$_metadata_critical_name\"" \
+    "        set -a _metadata_embedded_sources (builtin functions --details \"\$_metadata_critical_name\")" \
+    "      end" \
+    "      set _metadata_critical_index (builtin math \$_metadata_critical_index + 1)" \
+    "    end" \
+    "    # Metadata is executable Fish source. Keep the handshake, root, and" \
+    "    # loader-private state transactional as well as its function namespace." \
+    "    set -l _metadata_protected_names SHELL_PROJECT_ROOT VALISE_FISH_READY _sp_fish_loader_expected_source _sp_fish_metadata_expected_source _sp_fish_loader_bootstrap_mode _sp_fish_loader_bootstrap_seeds _sp_fish_loader_bootstrap_status _sp_fish_loaded_modules _sp_fish_module_roots _sp_fish_metadata_provider _sp_fish_loader_owned_exports _sp_fish_loader_owned_sources _sp_fish_legacy_owned_exports _sp_fish_legacy_owned_sources _sp_fish_metadata_owned_exports _sp_fish_metadata_owned_sources _sp_fish_entrypoint_owned_exports _sp_fish_entrypoint_owned_sources XDG_CONFIG_HOME TMPDIR HOME" \
+    "    set -l _metadata_protected_prefix __valise_fish_metadata_state_(builtin random)" \
+    "    set -l _metadata_capture_helper __valise_fish_metadata_capture_(builtin random)" \
+    "    # Predeclare every capture slot in this transaction's local scope. The" \
+    "    # The trusted capture helper writes into this transaction's local slots; metadata source" \
+    "    # cannot enumerate or forge them as global rollback state." \
+    "    for _metadata_slot_name in \$_metadata_protected_names" \
+    "      for _metadata_slot_suffix in global_present global_exported global_values universal_present universal_exported universal_values" \
+    "        set -f \"\$_metadata_protected_prefix\"_before_\"\$_metadata_slot_name\"_\"\$_metadata_slot_suffix\"" \
+    "        set -f \"\$_metadata_protected_prefix\"_after_\"\$_metadata_slot_name\"_\"\$_metadata_slot_suffix\"" \
+    "      end" \
+    "    end" \
+    "    function \$_metadata_capture_helper --no-scope-shadowing" \
+    "      set -l _scope_name \$argv[1]" \
+    "      set -l _scope_prefix \$argv[2]_\$_scope_name" \
+    "      set -l _global_present 0" \
+    "      builtin set -q -g \"\$_scope_name\"; and set _global_present 1" \
+    "      set -l _global_exported 0" \
+    "      builtin set -q -gx \"\$_scope_name\"; and set _global_exported 1" \
+    "      set -l _global_values" \
+    "      if test \$_global_present -eq 1" \
+    "        set _global_values \$\$_scope_name" \
+    "      end" \
+    "      set -l _universal_present 0" \
+    "      builtin set -q -U \"\$_scope_name\"; and set _universal_present 1" \
+    "      set -l _universal_exported 0" \
+    "      builtin set -q -Ux \"\$_scope_name\"; and set _universal_exported 1" \
+    "      set -l _universal_values" \
+    "      if test \$_universal_present -eq 1" \
+    "        if test \$_global_present -eq 1" \
+    "          builtin set -e -g \"\$_scope_name\"" \
+    "          set _universal_values \$\$_scope_name" \
+    "          set -l _restore_global_flags -g" \
+    "          if test \$_global_exported -eq 1" \
+    "            set _restore_global_flags -gx" \
+    "          end" \
+    "          builtin set \$_restore_global_flags \"\$_scope_name\" \$_global_values" \
+    "          if test \$status -ne 0" \
+    "            builtin exit 125" \
+    "          end" \
+    "        else" \
+    "          set _universal_values \$\$_scope_name" \
+    "        end" \
+    "      end" \
+    "      set \"\$_scope_prefix\"_global_present \$_global_present" \
+    "      set \"\$_scope_prefix\"_global_exported \$_global_exported" \
+    "      set \"\$_scope_prefix\"_global_values \$_global_values" \
+    "      set \"\$_scope_prefix\"_universal_present \$_universal_present" \
+    "      set \"\$_scope_prefix\"_universal_exported \$_universal_exported" \
+    "      set \"\$_scope_prefix\"_universal_values \$_universal_values" \
+    "    end" \
+    "    set -l _metadata_restore_helper __valise_fish_metadata_restore_(builtin random)" \
+    "    function \$_metadata_restore_helper --no-scope-shadowing" \
+    "      set -l _restore_name \$argv[1]" \
+    "      set -l _restore_prefix \$argv[2]_\$argv[1]" \
+    "      set -l _expected_persistence_helper \$argv[3]" \
+    "      set -l _expected_persistence_definition \$argv[4]" \
+    "      set -l _global_present_var \"\$_restore_prefix\"_global_present" \
+    "      set -l _global_exported_var \"\$_restore_prefix\"_global_exported" \
+    "      set -l _global_values_var \"\$_restore_prefix\"_global_values" \
+    "      set -l _universal_present_var \"\$_restore_prefix\"_universal_present" \
+    "      set -l _universal_exported_var \"\$_restore_prefix\"_universal_exported" \
+    "      set -l _universal_values_var \"\$_restore_prefix\"_universal_values" \
+    "      set -l _expected_global_present \$\$_global_present_var" \
+    "      set -l _expected_global_exported \$\$_global_exported_var" \
+    "      set -l _expected_global_values \$\$_global_values_var" \
+    "      set -l _expected_universal_present \$\$_universal_present_var" \
+    "      set -l _expected_universal_exported \$\$_universal_exported_var" \
+    "      set -l _expected_universal_values \$\$_universal_values_var" \
+    "" \
+    "      # Every persistent erase/set is conditional or checked. An absent scope" \
+    "      # is an expected before-image, not a failed erase operation." \
+    "      if not builtin functions -q \$_expected_persistence_helper; or not builtin test (builtin functions \$_expected_persistence_helper | string collect) = \"\$_expected_persistence_definition\"" \
+    "        builtin printf '%s\\n' 'trusted universal persistence verifier was modified' >&2" \
+    "        return 125" \
+    "      end" \
+    "      if builtin set -q -g \"\$_restore_name\"" \
+    "        builtin set -e -g \"\$_restore_name\"; or return 125" \
+    "      end" \
+    "      if builtin set -q -U \"\$_restore_name\"" \
+    "        builtin set -e -U \"\$_restore_name\"; or return 125" \
+    "      end" \
+    "      # Restore universal before recreating a global shadow so Fish can read the" \
+    "      # universal before-image without a false mutation failure." \
+    "      if test \"\$_expected_universal_present\" = 1" \
+    "         set -l _restore_universal_flags -U" \
+    "         if test \"\$_expected_universal_exported\" = 1" \
+    "           set _restore_universal_flags -Ux" \
+    "         end" \
+    "         builtin set \$_restore_universal_flags \"\$_restore_name\" \$_expected_universal_values" \
+    "         if test \$status -ne 0" \
+    "           return 125" \
+    "         end" \
+    "      end" \
+    "      \$_expected_persistence_helper \"\$_metadata_persistence_durable_file\" \"\$_metadata_persistence_tmp_parent\" \"\$_restore_name\" \"\$_expected_universal_present\" \"\$_expected_universal_exported\" \$_expected_universal_values; or return 125" \
+    "      if test \"\$_expected_global_present\" = 1" \
+    "         set -l _restore_global_flags -g" \
+    "         if test \"\$_expected_global_exported\" = 1" \
+    "           set _restore_global_flags -gx" \
+    "         end" \
+    "         builtin set \$_restore_global_flags \"\$_restore_name\" \$_expected_global_values" \
+    "         if test \$status -ne 0" \
+    "           return 125" \
+    "         end" \
+    "      end" \
+    "      # Verify global presence/export/value exactly before inspecting the" \
+    "      # universal binding hidden by a global binding." \
+    "      set -l _actual_global_present 0" \
+    "      builtin set -q -g \"\$_restore_name\"; and set _actual_global_present 1" \
+    "      set -l _actual_global_exported 0" \
+    "      builtin set -q -gx \"\$_restore_name\"; and set _actual_global_exported 1" \
+    "      set -l _actual_global_values" \
+    "      if test \"\$_actual_global_present\" = 1" \
+    "        set _actual_global_values \$\$_restore_name" \
+    "      end" \
+    "      if test \"\$_actual_global_present\" != \"\$_expected_global_present\"; or test \"\$_actual_global_exported\" != \"\$_expected_global_exported\"; or test (builtin count \$_actual_global_values) -ne (builtin count \$_expected_global_values)" \
+    "        return 125" \
+    "      end" \
+    "      set -l _value_index 1" \
+    "      while test \$_value_index -le (builtin count \$_expected_global_values)" \
+    "        if not builtin test \"\$_expected_global_values[\$_value_index]\" = \"\$_actual_global_values[\$_value_index]\"" \
+    "          return 125" \
+    "        end" \
+    "        builtin set _value_index (builtin math \$_value_index + 1)" \
+    "      end" \
+    "" \
+    "      set -l _hid_global 0" \
+    "      if builtin set -q -g \"\$_restore_name\"" \
+    "        builtin set -e -g \"\$_restore_name\"; or return 125" \
+    "        set _hid_global 1" \
+    "      end" \
+    "      set -l _actual_universal_present 0" \
+    "      builtin set -q -U \"\$_restore_name\"; and set _actual_universal_present 1" \
+    "      set -l _actual_universal_exported 0" \
+    "      builtin set -q -Ux \"\$_restore_name\"; and set _actual_universal_exported 1" \
+    "      set -l _actual_universal_values" \
+    "      if test \"\$_actual_universal_present\" = 1" \
+    "        set _actual_universal_values \$\$_restore_name" \
+    "      end" \
+    "      if test \"\$_actual_universal_present\" != \"\$_expected_universal_present\"; or test \"\$_actual_universal_exported\" != \"\$_expected_universal_exported\"; or test (builtin count \$_actual_universal_values) -ne (builtin count \$_expected_universal_values)" \
+    "        if test \$_hid_global -eq 1" \
+    "           set -l _restore_global_flags -g" \
+    "           if test \"\$_expected_global_exported\" = 1" \
+    "             set _restore_global_flags -gx" \
+    "           end" \
+    "           builtin set \$_restore_global_flags \"\$_restore_name\" \$_expected_global_values" \
+    "           if test \$status -ne 0" \
+    "             return 125" \
+    "           end" \
+    "        end" \
+    "        return 125" \
+    "      end" \
+    "      set _value_index 1" \
+    "      while test \$_value_index -le (builtin count \$_expected_universal_values)" \
+    "        if not builtin test \"\$_expected_universal_values[\$_value_index]\" = \"\$_actual_universal_values[\$_value_index]\"" \
+    "          if test \$_hid_global -eq 1" \
+    "             set -l _restore_global_flags -g" \
+    "             if test \"\$_expected_global_exported\" = 1" \
+    "               set _restore_global_flags -gx" \
+    "             end" \
+    "             builtin set \$_restore_global_flags \"\$_restore_name\" \$_expected_global_values" \
+    "             if test \$status -ne 0" \
+    "               return 125" \
+    "             end" \
+    "          end" \
+    "          return 125" \
+    "        end" \
+    "        builtin set _value_index (builtin math \$_value_index + 1)" \
+    "      end" \
+    "      if test \$_hid_global -eq 1" \
+    "         set -l _restore_global_flags -g" \
+    "         if test \"\$_expected_global_exported\" = 1" \
+    "           set _restore_global_flags -gx" \
+    "         end" \
+    "         builtin set \$_restore_global_flags \"\$_restore_name\" \$_expected_global_values" \
+    "         if test \$status -ne 0" \
+    "           return 125" \
+    "         end" \
+    "      end" \
+    "" \
+    "      # The global binding was restored after universal inspection. Verify it" \
+    "      # once more so the completed rollback has an exact before-image." \
+    "      set _actual_global_present 0" \
+    "      builtin set -q -g \"\$_restore_name\"; and set _actual_global_present 1" \
+    "      set _actual_global_exported 0" \
+    "      builtin set -q -gx \"\$_restore_name\"; and set _actual_global_exported 1" \
+    "      set _actual_global_values" \
+    "      if test \"\$_actual_global_present\" = 1" \
+    "        set _actual_global_values \$\$_restore_name" \
+    "      end" \
+    "      if test \"\$_actual_global_present\" != \"\$_expected_global_present\"; or test \"\$_actual_global_exported\" != \"\$_expected_global_exported\"; or test (builtin count \$_actual_global_values) -ne (builtin count \$_expected_global_values)" \
+    "        return 125" \
+    "      end" \
+    "      set _value_index 1" \
+    "      while test \$_value_index -le (builtin count \$_expected_global_values)" \
+    "        if not builtin test \"\$_expected_global_values[\$_value_index]\" = \"\$_actual_global_values[\$_value_index]\"" \
+    "          return 125" \
+    "        end" \
+    "        builtin set _value_index (builtin math \$_value_index + 1)" \
+    "      end" \
+    "      return 0" \
+    "    end" \
+    "    set -l _metadata_capture_definition (builtin functions \"\$_metadata_capture_helper\" | string collect)" \
+    "    set -l _metadata_restore_definition (builtin functions \"\$_metadata_restore_helper\" | string collect)" \
+    "    if test (builtin count \$_metadata_capture_definition) -ne 1; or test (builtin count \$_metadata_restore_definition) -ne 1" \
+    "      set _metadata_snapshot_status 125" \
+    "    end" \
+    "    if test \$_metadata_snapshot_status -eq 0" \
+    "      for _metadata_protected_name in \$_metadata_protected_names" \
+    "        \$_metadata_capture_helper \"\$_metadata_protected_name\" \"\$_metadata_protected_prefix\"_before" \
+    "      end" \
+    "    end" \
+    "    set -l _metadata_source_helper __valise_fish_metadata_source_(builtin random)" \
+    "    set -l _metadata_status 0" \
+    "    if test \$_metadata_snapshot_status -eq 0" \
+    "      function \$_metadata_source_helper" \
+    "        builtin source \"\$argv[1]\"" \
+    "        return \$status" \
+    "      end" \
+    "      \$_metadata_source_helper \"\$argv[1]\"" \
+    "      set _metadata_status \$status" \
+    "      builtin functions -e \$_metadata_source_helper 2>/dev/null" \
+    "    else" \
+    "      set -l _metadata_status \$_metadata_snapshot_status" \
+    "    end" \
+    "    set -l _metadata_protected_changed 0" \
+    "    if test \$_metadata_snapshot_status -eq 0" \
+    "      if not builtin functions -q \$_metadata_capture_helper; or not builtin test (builtin functions \$_metadata_capture_helper | string collect) = \"\$_metadata_capture_definition\"" \
+    "        builtin printf '%s\\n' 'metadata capture helper was modified' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      if not builtin functions -q \$_metadata_restore_helper; or not builtin test (builtin functions \$_metadata_restore_helper | string collect) = \"\$_metadata_restore_definition\"" \
+    "        builtin printf '%s\\n' 'metadata restore helper was modified' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      for _metadata_protected_name in \$_metadata_protected_names" \
+    "        \$_metadata_capture_helper \"\$_metadata_protected_name\" \"\$_metadata_protected_prefix\"_after" \
+    "      end" \
+    "      builtin functions -e \$_metadata_capture_helper 2>/dev/null" \
+    "      for _metadata_protected_name in \$_metadata_protected_names" \
+    "        set -l _metadata_before_prefix \"\$_metadata_protected_prefix\"_before_\$_metadata_protected_name" \
+    "        set -l _metadata_after_prefix \"\$_metadata_protected_prefix\"_after_\$_metadata_protected_name" \
+    "        for _metadata_scope in global universal" \
+    "          set -l _metadata_before_present_var \"\$_metadata_before_prefix\"_\"\$_metadata_scope\"_present" \
+    "          set -l _metadata_after_present_var \"\$_metadata_after_prefix\"_\"\$_metadata_scope\"_present" \
+    "          set -l _metadata_before_exported_var \"\$_metadata_before_prefix\"_\"\$_metadata_scope\"_exported" \
+    "          set -l _metadata_after_exported_var \"\$_metadata_after_prefix\"_\"\$_metadata_scope\"_exported" \
+    "          set -l _metadata_before_values_var \"\$_metadata_before_prefix\"_\"\$_metadata_scope\"_values" \
+    "          set -l _metadata_after_values_var \"\$_metadata_after_prefix\"_\"\$_metadata_scope\"_values" \
+    "          if not test \$\$_metadata_before_present_var = \$\$_metadata_after_present_var; or not test \$\$_metadata_before_exported_var = \$\$_metadata_after_exported_var" \
+    "            set _metadata_protected_changed 1" \
+    "          else if test (builtin count \$\$_metadata_before_values_var) -ne (builtin count \$\$_metadata_after_values_var)" \
+    "            set _metadata_protected_changed 1" \
+    "          else" \
+    "            set -l _metadata_value_index 1" \
+    "            while test \$_metadata_value_index -le (builtin count \$\$_metadata_before_values_var)" \
+    "              if not test \"\$\$_metadata_before_values_var[\$_metadata_value_index]\" = \"\$\$_metadata_after_values_var[\$_metadata_value_index]\"" \
+    "                set _metadata_protected_changed 1" \
+    "                break" \
+    "              end" \
+    "              set _metadata_value_index (builtin math \$_metadata_value_index + 1)" \
+    "            end" \
+    "          end" \
+    "        end" \
+    "      end" \
+    "    end" \
+    "    set -l _metadata_after (builtin functions --all --names)" \
+    "    set -l _metadata_created" \
+    "    for _metadata_function in \$_metadata_after" \
+    "      if not builtin contains -- \"\$_metadata_function\" \$_metadata_before" \
+    "        if not builtin contains -- \"\$_metadata_function\" \$_metadata_snapshot_copies" \
+    "          set -a _metadata_created \"\$_metadata_function\"" \
+    "        end" \
+    "      end" \
+    "    end" \
+    "    set -l _metadata_critical_created" \
+    "    for _metadata_function in \$_metadata_created" \
+    "      if builtin contains -- \"\$_metadata_function\" \$_metadata_critical_names" \
+    "        set -a _metadata_critical_created \"\$_metadata_function\"" \
+    "      end" \
+    "    end" \
+    "    set -l _metadata_embedded_replaced" \
+    "    set -l _metadata_embedded_index 1" \
+    "    for _metadata_embedded_name in \$_metadata_embedded_names" \
+    "      if not builtin functions -q \"\$_metadata_embedded_name\"; or not builtin test (builtin functions --details \"\$_metadata_embedded_name\") = \"\$_metadata_embedded_sources[\$_metadata_embedded_index]\"" \
+    "        set -a _metadata_embedded_replaced \"\$_metadata_embedded_name\"" \
+    "      end" \
+    "      set _metadata_embedded_index (builtin math \$_metadata_embedded_index + 1)" \
+    "    end" \
+    "    if builtin functions -q cd" \
+    "      set -l _metadata_cd_source (builtin functions --details cd)" \
+    "      if not builtin contains -- \"\$_metadata_cd_source\" embedded:functions/cd.fish /usr/share/fish/functions/cd.fish /usr/local/share/fish/functions/cd.fish /opt/local/share/fish/functions/cd.fish /opt/homebrew/share/fish/functions/cd.fish" \
+    "        set -a _metadata_embedded_replaced cd" \
+    "      end" \
+    "    end" \
+    "    set -l _metadata_replaced" \
+    "    set -l _metadata_untrusted_replaced" \
+    "    set -l _metadata_snapshot_compromised 0" \
+    "    # Snapshot aliases are visible Fish functions. Validate source identity and" \
+    "    # the complete saved definition before trusting one for rollback." \
+    "    if test \$_metadata_snapshot_status -eq 0" \
+    "      set -l _metadata_snapshot_index 1" \
+    "      for _metadata_function in \$_metadata_snapshot_names" \
+    "        set -l _metadata_saved \"\$_metadata_snapshot_definitions[\$_metadata_snapshot_index]\"" \
+    "        set -l _metadata_saved_lines (string split \\n -- \"\$_metadata_saved\")" \
+    "        set -l _metadata_snapshot_copy \"\$_metadata_snapshot_copies[\$_metadata_snapshot_index]\"" \
+    "        if not builtin functions -q \"\$_metadata_snapshot_copy\"" \
+    "          set _metadata_snapshot_compromised 1" \
+    "          break" \
+    "        end" \
+    "        set -l _metadata_copy_lines (string split \\n -- (builtin functions \"\$_metadata_snapshot_copy\" | string collect))" \
+    "        if test (builtin functions --details \"\$_metadata_snapshot_copy\") != \"\$_metadata_snapshot_copy_sources[\$_metadata_snapshot_index]\"; or test (builtin count \$_metadata_copy_lines) -ne (builtin count \$_metadata_saved_lines)" \
+    "          set _metadata_snapshot_compromised 1" \
+    "          break" \
+    "        end" \
+    "        set -l _metadata_copy_origin (string replace -r ', copied .*' '' -- \"\$_metadata_copy_lines[1]\")" \
+    "        set -l _metadata_saved_origin (string replace -r ', copied .*' '' -- \"\$_metadata_saved_lines[1]\")" \
+    "        if not builtin test \"\$_metadata_copy_origin\" = \"\$_metadata_saved_origin\"" \
+    "          set _metadata_snapshot_compromised 1" \
+    "          break" \
+    "        end" \
+    "        set -l _metadata_copy_line 2" \
+    "        while test \$_metadata_copy_line -le (builtin count \$_metadata_saved_lines)" \
+    "          set -l _metadata_copy_expected \"\$_metadata_saved_lines[\$_metadata_copy_line]\"" \
+    "          set -l _metadata_copy_actual \"\$_metadata_copy_lines[\$_metadata_copy_line]\"" \
+    "          if test \$_metadata_copy_line -eq 2" \
+    "            set _metadata_copy_expected (string replace -r '^function [^[:space:]]+' 'function __valise_snapshot__' -- \"\$_metadata_copy_expected\")" \
+    "            set _metadata_copy_actual (string replace -r '^function [^[:space:]]+' 'function __valise_snapshot__' -- \"\$_metadata_copy_actual\")" \
+    "          end" \
+    "          if not builtin test \"\$_metadata_copy_actual\" = \"\$_metadata_copy_expected\"" \
+    "            set _metadata_snapshot_compromised 1" \
+    "            break" \
+    "          end" \
+    "          set _metadata_copy_line (builtin math \$_metadata_copy_line + 1)" \
+    "        end" \
+    "        test \$_metadata_snapshot_compromised -eq 0; or break" \
+    "        set _metadata_snapshot_index (builtin math \$_metadata_snapshot_index + 1)" \
+    "      end" \
+    "    end" \
+    "    if test \$_metadata_snapshot_compromised -ne 0" \
+    "      builtin printf '%s\\n' 'valise Fish integration: metadata rollback custody was modified' >&2" \
+    "      builtin exit 125" \
+    "    end" \
+    "    if test \$_metadata_snapshot_status -eq 0" \
+    "      set -l _metadata_snapshot_index 1" \
+    "      for _metadata_function in \$_metadata_snapshot_names" \
+    "        set -l _metadata_saved \"\$_metadata_snapshot_definitions[\$_metadata_snapshot_index]\"" \
+    "        set -l _metadata_saved_lines (string split \\n -- \"\$_metadata_saved\")" \
+    "        set -l _metadata_live_lines" \
+    "        set -l _metadata_changed 0" \
+    "        if not builtin functions -q \"\$_metadata_function\"" \
+    "          set _metadata_changed 1" \
+    "        else" \
+    "          set _metadata_live_lines (string split \\n -- (builtin functions \"\$_metadata_function\" | string collect))" \
+    "          if test (builtin count \$_metadata_live_lines) -ne (builtin count \$_metadata_saved_lines)" \
+    "            set _metadata_changed 1" \
+    "          else" \
+    "            set -l _metadata_line 1" \
+    "            while test \$_metadata_line -le (builtin count \$_metadata_saved_lines)" \
+    "              if not builtin test \"\$_metadata_saved_lines[\$_metadata_line]\" = \"\$_metadata_live_lines[\$_metadata_line]\"" \
+    "                set _metadata_changed 1" \
+    "                break" \
+    "              end" \
+    "              set _metadata_line (builtin math \$_metadata_line + 1)" \
+    "            end" \
+    "          end" \
+    "        end" \
+    "        if test \$_metadata_changed -eq 1" \
+    "          set -a _metadata_replaced \"\$_metadata_function\"" \
+    "          set -l _metadata_previous_owned 0" \
+    "          set -l _metadata_previous_index 1" \
+    "          for _metadata_previous_name in \$_sp_fish_metadata_owned_exports" \
+    "            if test \"\$_metadata_previous_name\" = \"\$_metadata_function\"; and test \"\$_sp_fish_metadata_owned_sources[\$_metadata_previous_index]\" = \"\$_metadata_snapshot_sources[\$_metadata_snapshot_index]\"" \
+    "              set _metadata_previous_owned 1" \
+    "              break" \
+    "            end" \
+    "            set _metadata_previous_index (builtin math \$_metadata_previous_index + 1)" \
+    "          end" \
+    "          if test \$_metadata_previous_owned -eq 0" \
+    "            set -a _metadata_untrusted_replaced \"\$_metadata_function\"" \
+    "          end" \
+    "        end" \
+    "        set _metadata_snapshot_index (builtin math \$_metadata_snapshot_index + 1)" \
+    "      end" \
+    "    end" \
+    "    # A metadata source can edit fish_variables directly without changing" \
+    "    # any visible Fish binding. Verify every protected universal before" \
+    "    # publishing success so that path is transactional too." \
+    "    set -l _metadata_persistence_changed 0" \
+    "    if test \$_metadata_snapshot_status -eq 0" \
+    "      if not builtin functions -q \$_metadata_persistence_helper; or not builtin test (builtin functions \$_metadata_persistence_helper | string collect) = \"\$_metadata_persistence_definition\"" \
+    "        builtin printf '%s\\n' 'metadata persistence verifier was modified' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      for _metadata_protected_name in \$_metadata_protected_names" \
+    "        set -l _metadata_after_prefix \"\$_metadata_protected_prefix\"_after_\$_metadata_protected_name" \
+    "        set -l _metadata_after_present_var \"\$_metadata_after_prefix\"_universal_present" \
+    "        set -l _metadata_after_exported_var \"\$_metadata_after_prefix\"_universal_exported" \
+    "        set -l _metadata_after_values_var \"\$_metadata_after_prefix\"_universal_values" \
+    "        \$_metadata_persistence_helper \"\$_metadata_persistence_durable_file\" \"\$_metadata_persistence_tmp_parent\" \"\$_metadata_protected_name\" \"\$\$_metadata_after_present_var\" \"\$\$_metadata_after_exported_var\" \$\$_metadata_after_values_var" \
+    "        if test \$status -ne 0" \
+    "          set _metadata_persistence_changed 1" \
+    "          break" \
+    "        end" \
+    "      end" \
+    "    end" \
+    "    set -l _metadata_failure 0" \
+    "    if test \$_metadata_snapshot_status -ne 0" \
+    "      set _metadata_status \$_metadata_snapshot_status" \
+    "      set _metadata_failure 1" \
+    "    end" \
+    "    if test \$_metadata_status -ne 0" \
+    "      set _metadata_failure 1" \
+    "      set _metadata_protected_changed 1" \
+    "    end" \
+    "    if test (builtin count \$_metadata_untrusted_replaced) -ne 0" \
+    "      set _metadata_failure 1" \
+    "    end" \
+    "    if test (builtin count \$_metadata_embedded_replaced) -ne 0" \
+    "      set _metadata_failure 1" \
+    "    end" \
+    "    if test \$_metadata_protected_changed -ne 0" \
+    "      set _metadata_failure 1" \
+    "      test \$_metadata_status -eq 0; and set _metadata_status 1" \
+    "    end" \
+    "    if test \$_metadata_persistence_changed -ne 0" \
+    "      set _metadata_failure 1" \
+    "      set _metadata_protected_changed 1" \
+    "      set _metadata_status 125" \
+    "    end" \
+    "    if test \$_metadata_failure -ne 0" \
+    "      if test \$_metadata_snapshot_status -ne 0" \
+    "        builtin printf '%s\\n' 'valise Fish integration: metadata rollback snapshot unavailable' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      if test (builtin count \$_metadata_untrusted_replaced) -ne 0" \
+    "        builtin printf '%s\\n' 'valise Fish integration: metadata source replaced a caller-owned function' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      if test (builtin count \$_metadata_embedded_replaced) -ne 0" \
+    "        builtin printf '%s\\n' 'valise Fish integration: embedded Fish function was mutated' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      if test (builtin count \$_metadata_replaced) -ne 0" \
+    "        builtin printf '%s\\n' 'valise Fish integration: exact metadata function restoration is unavailable' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      for _metadata_function in \$_metadata_created" \
+    "        if not test \"\$_metadata_function\" = \"\$_metadata_restore_helper\"" \
+    "          if builtin functions -q \"\$_metadata_function\"" \
+    "            builtin functions -e \"\$_metadata_function\"; or builtin exit 125" \
+    "          end" \
+    "        end" \
+    "      end" \
+    "      set -l _metadata_restore_failed 0" \
+    "      if test \$_metadata_protected_changed -ne 0" \
+    "        for _metadata_protected_name in \$_metadata_protected_names" \
+    "          \$_metadata_restore_helper \"\$_metadata_protected_name\" \"\$_metadata_protected_prefix\"_before \"\$_metadata_persistence_helper\" \"\$_metadata_persistence_definition\"" \
+    "          if test \$status -ne 0" \
+    "            set _metadata_restore_failed 1" \
+    "          end" \
+    "        end" \
+    "      end" \
+    "      builtin functions -e \$_metadata_restore_helper 2>/dev/null" \
+    "      for _metadata_snapshot_copy in \$_metadata_snapshot_copies" \
+    "        if builtin functions -q \"\$_metadata_snapshot_copy\"" \
+    "          builtin functions -e \"\$_metadata_snapshot_copy\"; or builtin exit 125" \
+    "        end" \
+    "      end" \
+    "      if test \$_metadata_restore_failed -ne 0" \
+    "        set _metadata_status 125" \
+    "      end" \
+    "      return \$_metadata_status" \
+    "    end" \
+    "    for _metadata_snapshot_copy in \$_metadata_snapshot_copies" \
+      "      builtin functions -q \"\$_metadata_snapshot_copy\"; and builtin functions -e \"\$_metadata_snapshot_copy\"" \
+    "    end" \
+    "    builtin functions -e \$_metadata_restore_helper 2>/dev/null" \
+    "    builtin set -g _sp_fish_metadata_owned_exports" \
+    "    builtin set -g _sp_fish_metadata_owned_sources" \
+    "    for _metadata_function in \$_metadata_after" \
+    "      set -l _metadata_source (builtin functions --details \"\$_metadata_function\")" \
+    "      if test \"\$_metadata_source\" = \"\$_metadata_expected_source\"" \
+    "        builtin set -a _sp_fish_metadata_owned_exports \"\$_metadata_function\"" \
+    "        builtin set -a _sp_fish_metadata_owned_sources \"\$_metadata_source\"" \
+    "      end" \
+    "    end" \
+    "    return \$_metadata_status" \
+    "  end" \
+    "  \$_valise_fish_metadata_transaction \"\$_valise_fish_active_root/vendor/shell-profile/lib/fish/metadata.fish\" \"\$_valise_fish_persistence_verify_helper\" \"\$_valise_fish_persistence_helper_definition\" \"\$_valise_fish_persistence_durable_file\" \"\$_valise_fish_persistence_tmp_parent\"" \
+    "  set -l _valise_fish_metadata_status \$status" \
+    "  builtin functions -e \$_valise_fish_metadata_transaction 2>/dev/null" \
+    "  if test \$_valise_fish_metadata_status -ne 0" \
+    "    builtin functions -e \$_valise_fish_legacy_runner 2>/dev/null" \
+    "    if builtin set -q -g VALISE_FISH_READY; and not builtin set -e -g VALISE_FISH_READY; builtin exit 125; end" \
+    "    if builtin set -q -U VALISE_FISH_READY; and not builtin set -e -U VALISE_FISH_READY; builtin exit 125; end" \
+    "    if builtin set -q -g _sp_fish_loader_bootstrap_status; and not builtin set -e -g _sp_fish_loader_bootstrap_status; builtin exit 125; end" \
+    "    if builtin set -q -U _sp_fish_loader_bootstrap_status; and not builtin set -e -U _sp_fish_loader_bootstrap_status; builtin exit 125; end" \
+    "    if builtin set -q -g _sp_fish_loader_bootstrap_mode; and not builtin set -e -g _sp_fish_loader_bootstrap_mode; builtin exit 125; end" \
+    "    if builtin set -q -U _sp_fish_loader_bootstrap_mode; and not builtin set -e -U _sp_fish_loader_bootstrap_mode; builtin exit 125; end" \
+    "    if builtin set -q -g _sp_fish_loader_bootstrap_seeds; and not builtin set -e -g _sp_fish_loader_bootstrap_seeds; builtin exit 125; end" \
+    "    if builtin set -q -U _sp_fish_loader_bootstrap_seeds; and not builtin set -e -U _sp_fish_loader_bootstrap_seeds; builtin exit 125; end" \
+    "    if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
+    "      builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
+    "      builtin exit 125" \
+    "    end" \
+    "    \$_valise_fish_owned_cleanup" \
+    "    if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
+    "      builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
+    "      builtin exit 125" \
+    "    end" \
+    "    \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "    printf 'valise Fish integration: metadata loader failed with status %d\\n' \$_valise_fish_metadata_status >&2" \
+    "    return \$_valise_fish_metadata_status" \
+    "  else" \
+    "    if builtin set -q -g _sp_fish_loader_bootstrap_status; and not builtin set -e -g _sp_fish_loader_bootstrap_status; builtin exit 125; end" \
+    "    if builtin set -q -U _sp_fish_loader_bootstrap_status; and not builtin set -e -U _sp_fish_loader_bootstrap_status; builtin exit 125; end" \
+    "    if builtin set -q -g _sp_fish_loader_bootstrap_mode; and not builtin set -e -g _sp_fish_loader_bootstrap_mode; builtin exit 125; end" \
+    "    if builtin set -q -U _sp_fish_loader_bootstrap_mode; and not builtin set -e -U _sp_fish_loader_bootstrap_mode; builtin exit 125; end" \
+    "    if builtin set -q -g _sp_fish_loader_bootstrap_seeds; and not builtin set -e -g _sp_fish_loader_bootstrap_seeds; builtin exit 125; end" \
+    "    if builtin set -q -U _sp_fish_loader_bootstrap_seeds; and not builtin set -e -U _sp_fish_loader_bootstrap_seeds; builtin exit 125; end" \
+    "    builtin set -g _sp_fish_loader_bootstrap_mode strict" \
+    "    builtin set -g _sp_fish_loader_bootstrap_seeds fish_path fish_environment fish_secure_local_bin" \
+    "    builtin source \"\$_valise_fish_active_root/vendor/shell-profile/lib/fish/loader.fish\"" \
+    "    set -l _valise_fish_source_status \$status" \
+    "    if builtin set -q -g VALISE_FISH_READY; and not builtin set -e -g VALISE_FISH_READY; builtin exit 125; end" \
+    "    if builtin set -q -U VALISE_FISH_READY; and not builtin set -e -U VALISE_FISH_READY; builtin exit 125; end" \
+    "    set -l _valise_fish_status_published 0" \
+    "    set -l _valise_fish_loader_status 1" \
+    "    if builtin set -q _sp_fish_loader_bootstrap_status" \
+    "      set _valise_fish_status_published 1" \
+    "      set _valise_fish_loader_status \$_sp_fish_loader_bootstrap_status" \
+    "    end" \
+    "    if builtin set -q -g _sp_fish_loader_bootstrap_mode; and not builtin set -e -g _sp_fish_loader_bootstrap_mode; builtin exit 125; end" \
+    "    if builtin set -q -U _sp_fish_loader_bootstrap_mode; and not builtin set -e -U _sp_fish_loader_bootstrap_mode; builtin exit 125; end" \
+    "    if builtin set -q -g _sp_fish_loader_bootstrap_seeds; and not builtin set -e -g _sp_fish_loader_bootstrap_seeds; builtin exit 125; end" \
+    "    if builtin set -q -U _sp_fish_loader_bootstrap_seeds; and not builtin set -e -U _sp_fish_loader_bootstrap_seeds; builtin exit 125; end" \
+    "    if builtin set -q -g _sp_fish_loader_bootstrap_status; and not builtin set -e -g _sp_fish_loader_bootstrap_status; builtin exit 125; end" \
+    "    if builtin set -q -U _sp_fish_loader_bootstrap_status; and not builtin set -e -U _sp_fish_loader_bootstrap_status; builtin exit 125; end" \
+    "    if test \$_valise_fish_source_status -ne 0" \
+    "      builtin functions -e \$_valise_fish_legacy_runner 2>/dev/null" \
+    "      if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
+    "        builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      \$_valise_fish_owned_cleanup" \
+    "      if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
+    "        builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "      printf 'valise Fish integration: native loader source failed with status %d\\n' \$_valise_fish_source_status >&2" \
+    "      return \$_valise_fish_source_status" \
+    "    else" \
+    "      if test \$_valise_fish_status_published -ne 1" \
+    "      if builtin functions -q sp_fish_loader_load_ordered; and test -f \"\$_valise_fish_active_root/generated/installed-modules.fish\"" \
+    "        # Legacy releases expose only the authenticated generated Fish plan." \
+    "        \$_valise_fish_legacy_runner \"\$_valise_fish_active_root\" \"\$_valise_fish_active_root/generated/installed-modules.fish\"" \
+    "        set -l _valise_fish_legacy_status \$status" \
+    "        builtin functions -e \$_valise_fish_legacy_runner 2>/dev/null" \
+    "        if test \$_valise_fish_legacy_status -ne 0" \
+    "          if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
+    "            builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
+    "            builtin exit 125" \
+    "          end" \
+    "          \$_valise_fish_owned_cleanup" \
+    "          if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
+    "            builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
+    "            builtin exit 125" \
+    "          end" \
+    "          \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "          return \$_valise_fish_legacy_status" \
+    "        end" \
+    "        \$_valise_fish_publish_active_helper; or builtin exit 125" \
+    "      else" \
+    "        if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
+    "          builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
+    "          builtin exit 125" \
+    "        end" \
+    "        \$_valise_fish_owned_cleanup" \
+    "        builtin functions -e \$_valise_fish_legacy_runner 2>/dev/null" \
+    "        if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
+    "          builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
+    "          builtin exit 125" \
+    "        end" \
+    "        \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "        printf '%s\\n' 'valise Fish integration: native loader did not publish a fresh status' >&2" \
+    "        return 1" \
+    "      end" \
+    "      else" \
+    "        if not string match -qr '^[0-9]+$' -- \"\$_valise_fish_loader_status\"; or test \$_valise_fish_loader_status -ne 0" \
+    "      builtin functions -e \$_valise_fish_legacy_runner 2>/dev/null" \
+    "      if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
+    "        builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      \$_valise_fish_owned_cleanup" \
+    "      if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
+    "        builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
+    "        builtin exit 125" \
+    "      end" \
+    "      \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "      printf 'valise Fish integration: native loader failed with status %s\\n' \$_valise_fish_loader_status >&2" \
+    "      return \$_valise_fish_loader_status" \
+    "    end" \
+    "      end" \
+    "    builtin set -gx VALISE_FISH_READY 1" \
+    "    builtin functions -e \$_valise_fish_legacy_runner 2>/dev/null" \
+    "    end" \
+    "  end" \
+    "else" \
+    "    if test -f \"\$_valise_fish_active_root/generated/installed-modules.fish\"" \
+    "  # Compatibility path for releases that predate native Fish infrastructure." \
+    "  \$_valise_fish_legacy_runner \"\$_valise_fish_active_root\" \"\$_valise_fish_active_root/generated/installed-modules.fish\"" \
+    "  set -l _valise_fish_legacy_status \$status" \
+    "  builtin functions -e \$_valise_fish_legacy_runner 2>/dev/null" \
+    "  if test \$_valise_fish_legacy_status -ne 0" \
+    "    if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
+    "      builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
+    "      builtin exit 125" \
+    "    end" \
+    "    \$_valise_fish_owned_cleanup" \
+    "    if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
+    "      builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
+    "      builtin exit 125" \
+    "    end" \
+    "    \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "    return \$_valise_fish_legacy_status" \
+    "  end" \
+    "  \$_valise_fish_publish_active_helper; or builtin exit 125" \
+    "    else" \
+    "  printf '%s\\n' 'valise Fish integration: native Fish loader infrastructure is unavailable' >&2" \
+    "  builtin functions -e \$_valise_fish_legacy_runner 2>/dev/null" \
+    "  if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
+    "    builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
+    "    builtin exit 125" \
+    "  end" \
+    "  \$_valise_fish_owned_cleanup" \
+    "  if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
+    "    builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
+    "    builtin exit 125" \
+    "  end" \
+    "  \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "  return 1" \
+    "end" \
+    "  end" \
+    "end" \
+    "builtin functions -e \$_valise_fish_legacy_runner 2>/dev/null" \
+    "if not builtin functions -q \$_valise_fish_success_cleanup_helper; or not builtin test (builtin functions \$_valise_fish_success_cleanup_helper | string collect) = \"\$_valise_fish_success_cleanup_helper_definition\"" \
+    "  builtin printf '%s\\n' 'trusted success cleanup helper was modified' >&2" \
+    "  builtin exit 125" \
+    "end" \
+    "\$_valise_fish_success_cleanup_helper; or builtin exit 125" \
+    "end"
+}
+
+cmd_init() {
+  _shell="${1:-}"
+  if [ "$#" -gt 0 ]; then
+    shift
+  fi
+  _fish_source_tree_mode=0
+  for _arg do
+    case "$_arg" in
+      --source-tree) _fish_source_tree_mode=1 ;;
+      *) die "unknown init option: $_arg" ;;
+    esac
+  done
+  if [ -z "$_shell" ]; then
+    # Detect current shell
+    case "${SHELL:-}" in
+      *bash) _shell=bash ;;
+      *zsh)  _shell=zsh ;;
+      *ksh)  _shell=ksh ;;
+      *fish) _shell=fish ;;
+      *)     _shell=sh ;;
+    esac
+  fi
+
+  case "$_shell" in
+    bash|zsh|ksh|sh)
+      # shell_quote() returns a POSIX single-quoted literal (e.g.
+      # '/home/u/.config/valise/active'). Embed that literal directly
+      # into the generated snippet as the right-hand side of an
+      # assignment to _valise_active_link. Every later use references
+      # "$_valise_active_link" in double quotes — no visually-unquoted
+      # shell_quote output remains in the emitted text.
+      _shell_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
+      printf '%s\n' \
+        "# valise shell integration" \
+        "_valise_active_link=${_shell_active_literal}" \
+        "if [ -L \"\$_valise_active_link/entrypoints/profile.sh\" ] || [ -f \"\$_valise_active_link/entrypoints/profile.sh\" ]; then" \
+        "  _valise_active=\$(cd \"\$_valise_active_link\" 2>/dev/null && pwd -P)" \
+        "  if [ -n \"\$_valise_active\" ]; then" \
+        "    VALISE_ROOT=\"\$_valise_active\"" \
+        "    . \"\$_valise_active/entrypoints/profile.sh\"" \
+        "  fi" \
+        "  unset _valise_active" \
+        "fi" \
+        "unset _valise_active_link"
+      ;;
+    fish)
+      print_fish_integration
+      ;;
+    *)
+      die "unsupported shell: $_shell (use bash, zsh, ksh, or fish)"
+      ;;
+  esac
+}
+
+cmd_doctor() {
+  _status=0
+
+  info "checking environment..."
+
+  # Check POSIX utilities
+  for _cmd in mkdir rm cp mv ln cat sha256sum shasum stat cmp find; do
+    if command -v "$_cmd" >/dev/null 2>&1; then
+      printf '  ok: %s\n' "$_cmd"
+    else
+      case "$_cmd" in
+        sha256sum|shasum)
+          # Need at least one
+          if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+            printf '  FAIL: no SHA-256 utility (need sha256sum or shasum)\n'
+            _status=1
+          else
+            printf '  ok: sha256 (via %s)\n' "$(command -v sha256sum 2>/dev/null || command -v shasum 2>/dev/null)"
+          fi
+          ;;
+        *)
+          printf '  FAIL: missing required utility: %s\n' "$_cmd"
+          _status=1
+          ;;
+      esac
+    fi
+  done
+
+  # Check XDG directories
+  for _dir in "$VALISE_XDG_DATA" "$VALISE_XDG_CONFIG" "$VALISE_XDG_STATE"; do
+    if [ -d "$_dir" ]; then
+      printf '  ok: directory exists: %s\n' "$_dir"
+    else
+      printf '  warn: directory missing (will create on install): %s\n' "$_dir"
+    fi
+  done
+
+  # Check active symlink
+  if [ -L "$VALISE_ACTIVE_LINK" ]; then
+    _target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
+    if [ -d "$_target" ]; then
+      printf '  ok: active release: %s\n' "$_target"
+    else
+      printf '  FAIL: active symlink points to missing directory: %s\n' "$_target"
+      _status=1
+    fi
+  elif [ -e "$VALISE_ACTIVE_LINK" ]; then
+    printf '  FAIL: active pointer is not a symlink: %s\n' "$VALISE_ACTIVE_LINK"
+    _status=1
+  else
+    printf '  info: no active release configured\n'
+  fi
+
+  # Platform check (informational only; install and variant use are portable
+  # POSIX and not gated on any particular uname).
+  _uname=$(uname -s 2>/dev/null || echo unknown)
+  printf '  platform: %s\n' "$_uname"
+
+  if [ "$_status" -eq 0 ]; then
+    info "all checks passed"
+  else
+    die "some checks failed"
+  fi
+}
+cmd_verify_release_root() {
+  [ "$#" -eq 1 ] || die "usage: valise _verify-release-root <release-root>"
+  _verify_release_arg=$1
+  case "$_verify_release_arg" in
+    /*) : ;;
+    *) die "release root must be absolute" ;;
+  esac
+  [ -d "$_verify_release_arg" ] || die "release root is not a directory"
+  [ ! -L "$_verify_release_arg" ] || die "release root must not be a symlink"
+  _verify_release_canonical=$(cd "$_verify_release_arg" 2>/dev/null && pwd -P) || die "cannot resolve release root"
+  _verify_releases_canonical=$(cd "$VALISE_RELEASES_DIR" 2>/dev/null && pwd -P) || die "release storage is unavailable"
+  _verify_release_parent=$(cd "$(path_parent "$_verify_release_canonical")" 2>/dev/null && pwd -P) || die "release parent unavailable"
+  [ "$_verify_release_parent" = "$_verify_releases_canonical" ] || die "release root escapes release storage"
+  _verify_release_id=${_verify_release_canonical##*/}
+  case "$_verify_release_id" in
+    *[!0123456789abcdefABCDEF]*|'') die "release root identity is not a SHA-256 digest" ;;
+  esac
+  [ "${#_verify_release_id}" -eq 64 ] || die "release root identity is not a SHA-256 digest"
+  _verify_release_snapshot="$_verify_release_canonical/.valise-manifest"
+  [ -f "$_verify_release_snapshot" ] || die "release manifest snapshot is missing"
+  [ ! -L "$_verify_release_snapshot" ] || die "release manifest snapshot must not be a symlink"
+  prepare_manifest_rows "$_verify_release_snapshot" || die "cannot read release manifest snapshot"
+  _verify_release_rows=$_manifest_rows
+  validate_manifest "$_verify_release_rows" || die "invalid release manifest snapshot"
+  verify_release_dir "$_verify_release_canonical" "$_verify_release_rows" "$_verify_release_id"
+  printf '%s\n' "$_verify_release_canonical"
+}
+
+cmd_verify_active() {
+  _verify_print_root=0
+  for _verify_arg do
+    case "$_verify_arg" in
+      --print-root) _verify_print_root=1 ;;
+      *) die "unknown verify-active option: $_verify_arg" ;;
+    esac
+  done
+  [ -L "$VALISE_ACTIVE_LINK" ] || die "active pointer is not a symlink"
+  _verify_active_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null) || die "cannot read active pointer"
+  case "$_verify_active_target" in
+    /*) : ;;
+    *)
+      _verify_active_link_parent=$(cd "$(path_parent "$VALISE_ACTIVE_LINK")" 2>/dev/null && pwd -P) || die "active pointer parent unavailable"
+      _verify_active_target="$_verify_active_link_parent/$_verify_active_target"
+      ;;
+  esac
+  [ -d "$_verify_active_target" ] || die "active release target is not a directory"
+  _verify_active_root=$(cd "$_verify_active_target" 2>/dev/null && pwd -P) || die "cannot resolve active release root"
+  _verify_releases_root=$(cd "$VALISE_RELEASES_DIR" 2>/dev/null && pwd -P) || die "release root unavailable"
+  _verify_active_parent=$(cd "$(path_parent "$_verify_active_root")" 2>/dev/null && pwd -P) || die "active release parent unavailable"
+  [ "$_verify_active_parent" = "$_verify_releases_root" ] || die "active release escapes release root"
+  _verify_active_id=${_verify_active_root##*/}
+  case "$_verify_active_id" in
+    *[!0123456789abcdefABCDEF]*|'') die "active release identity is not a SHA-256 digest" ;;
+  esac
+  [ "${#_verify_active_id}" -eq 64 ] || die "active release identity is not a SHA-256 digest"
+  _verify_active_manifest="$_verify_active_root/.valise-manifest"
+  [ -f "$_verify_active_manifest" ] || die "active release manifest is missing"
+  [ ! -L "$_verify_active_manifest" ] || die "active release manifest must not be a symlink"
+  prepare_manifest_rows "$_verify_active_manifest" || die "cannot read active release manifest"
+  _verify_active_manifest_rows="$_manifest_rows"
+  validate_manifest "$_verify_active_manifest_rows" || die "invalid active release manifest"
+  verify_release_dir "$_verify_active_root" "$_verify_active_manifest_rows" "$_verify_active_id"
+  if [ "$_verify_print_root" -eq 1 ]; then
+    printf '%s\n' "$_verify_active_root"
+  fi
+  return 0
+}
+cmd_variant() {
+  _subcmd="${1:-list}"
+  case "$_subcmd" in
+    list)
+      if [ -d "$VALISE_RELEASES_DIR" ]; then
+        for _rel in "$VALISE_RELEASES_DIR"/*/; do
+          [ -d "$_rel" ] || continue
+          _name=$(basename "$_rel")
+          if [ -L "$VALISE_ACTIVE_LINK" ] && [ "$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null)" = "$_rel" ]; then
+            printf '* %s (active)\n' "$_name"
+          else
+            printf '  %s\n' "$_name"
+          fi
+        done
+      else
+        info "no releases installed"
+      fi
+      ;;
+    use)
+      _target="${2:-}"
+      [ -n "$_target" ] || die "usage: valise variant use <sha256>"
+      case "$_target" in
+        *[!A-Za-z0-9_.-]*|.*|*-|.-*|*..*) die "invalid release name: $_target" ;;
+      esac
+      _target_dir="$VALISE_RELEASES_DIR/$_target"
+      [ -e "$_target_dir" ] || die "release not found: $_target"
+      [ -d "$_target_dir" ] || die "release target is not a directory: $_target"
+      [ ! -L "$_target_dir" ] || die "release target must not be a symlink: $_target"
+      _releases_root=$(cd "$VALISE_RELEASES_DIR" 2>/dev/null && pwd -P) || die "release root unavailable"
+      _target_parent=$(cd "$(path_parent "$_target_dir")" 2>/dev/null && pwd -P) || die "release target parent unavailable"
+      case "$_target_parent/" in
+        "$_releases_root/"*) : ;;
+        *) die "release target escapes release root: $_target" ;;
+      esac
+      _target_manifest="$_target_dir/.valise-manifest"
+      if [ -e "$_target_manifest" ] || [ -L "$_target_manifest" ]; then
+        [ -f "$_target_manifest" ] || die "release manifest snapshot is not a regular file"
+        [ ! -L "$_target_manifest" ] || die "release manifest snapshot must not be a symlink"
+        _manifest="$_target_manifest"
+      else
+        _manifest=$(locate_manifest) || die "cannot find profile-release.manifest to verify release"
+      fi
+      prepare_manifest_rows "$_manifest" || die "cannot snapshot profile-release.manifest"
+      _manifest="$_manifest_rows"
+      validate_manifest "$_manifest" || die "invalid profile-release.manifest schema or row"
+      verify_release_dir "$_target_dir" "$_manifest" "$_target"
+      _config_parent=$(path_parent "$VALISE_ACTIVE_LINK")
+      if [ ! -d "$_config_parent" ]; then
+        _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+        "$_mkdir_path" -p "$_config_parent"
+      fi
+      acquire_lock
+      switch_active_link "$_target_dir"
+      release_lock
+      info "switched to release $_target"
+      ;;
+    *)
+      die "unknown variant subcommand: $_subcmd (use list or use)"
+      ;;
+  esac
+}
+
+cmd_install() {
+  for _arg do
+    case "$_arg" in
+      --help|-h) usage; return 0 ;;
+      --*) die "unknown install option: $_arg (usage: valise install)" ;;
+    esac
+  done
+
+  _manifest_source=$(locate_manifest) || die "cannot find profile-release.manifest; run from repository root or installed tree"
+  _manifest_root=$(cd "$(path_parent "$_manifest_source")/../.." && pwd -P) || die "cannot resolve manifest source root"
+  prepare_manifest_rows "$_manifest_source" || die "cannot normalize profile-release.manifest"
+  _manifest="$_manifest_rows"
+  validate_manifest "$_manifest" || die "invalid profile-release.manifest schema or row"
+
+  # Release identity is content-derived; the schema header is not an ID.
+  _release_id=$(file_sha256 "$_manifest") || die "no trusted SHA-256 utility available"
+  case "$_release_id" in
+    *[!0123456789abcdefABCDEF]*|'') die "invalid release ID derived from manifest" ;;
+  esac
+  [ "${#_release_id}" -eq 64 ] || die "invalid release ID derived from manifest"
+
+  _target_dir="$VALISE_RELEASES_DIR/$_release_id"
+
+  acquire_lock
+  _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  _chmod_path=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+  "$_mkdir_path" -p "$VALISE_XDG_CONFIG" "$VALISE_XDG_STATE" || die "cannot create valise configuration directories"
+  [ ! -L "$_target_dir" ] || die "release target must not be a symlink: $_release_id"
+
+  if [ -e "$_target_dir" ] && [ ! -d "$_target_dir" ]; then
+    die "release path is not a directory: $_target_dir"
+  fi
+  if [ -d "$_target_dir" ]; then
+    _target_manifest="$_target_dir/.valise-manifest"
+    if [ -e "$_target_manifest" ] || [ -L "$_target_manifest" ]; then
+      [ -f "$_target_manifest" ] || die "release manifest snapshot is not a regular file"
+      [ ! -L "$_target_manifest" ] || die "release manifest snapshot must not be a symlink"
+      prepare_manifest_rows "$_target_manifest" || die "cannot snapshot release manifest"
+      _target_manifest="$_manifest_rows"
+      validate_manifest "$_target_manifest" || die "invalid release manifest snapshot"
+      verify_release_dir "$_target_dir" "$_target_manifest" "$_release_id"
+    else
+      verify_release_dir "$_target_dir" "$_manifest" "$_release_id"
+    fi
+    info "release $_release_id already installed and verified"
+  else
+    info "installing release $_release_id..."
+
+    # Create target directories
+    "$_mkdir_path" -p "$VALISE_RELEASES_DIR" "$VALISE_XDG_CONFIG" "$VALISE_XDG_STATE"
+
+    # Stage into temp directory first
+    _stage=$(trusted_mktemp dir "${TMPDIR:-/tmp}/valise-install.XXXXXX") || die "cannot create staging directory"
+    _cp_path=$(trusted_utility_path cp) || die "no trusted cp utility available"
+    "$_cp_path" -p "$_manifest" "$_stage/.valise-manifest" || die "failed to stage release manifest"
+    "$_chmod_path" 0444 "$_stage/.valise-manifest" || die "failed to seal release manifest"
+
+    # Copy release files from manifest
+    # The manifest format is: destination source mode install_mode size sha256
+    while IFS="$(printf '\t')" read -r _dest _src _mode _imode _size _sha; do
+      [ -n "$_dest" ] || continue
+      case "$_dest" in \#*|shell-profile-release-manifest-v1|destination) continue ;; esac
+      case "$_src" in
+        ""|.|./*|*/.|*/./*|*//*|/*|*/../*|../*|*/..|..*) die "invalid manifest source path: $_src" ;;
+      esac
+      case "$_dest" in
+        ""|.|./*|*/.|*/./*|*//*|/*|*/../*|../*|*/..|..*) die "invalid manifest destination path: $_dest" ;;
+      esac
+      _src_path="$_manifest_root/$_src"
+      _dest_path="$_stage/$_dest"
+      [ -f "$_src_path" ] || die "manifest source missing: $_src"
+      source_path_is_physical "$_manifest_root" "$_src" || die "manifest source path contains a symlink: $_src"
+      [ ! -L "$_src_path" ] || die "manifest source must not be a symlink: $_src"
+      _src_parent=$(cd "$(path_parent "$_src_path")" 2>/dev/null && pwd -P) || die "manifest source parent missing: $_src"
+      case "$_src_parent/" in
+        "$_manifest_root/"*) : ;;
+        *) die "manifest source escapes source root: $_src" ;;
+      esac
+      [ "$(file_mode "$_src_path")" = "$_mode" ] || die "manifest source mode mismatch: $_src"
+      [ "$(file_bytes "$_src_path")" = "$_size" ] || die "manifest source byte count mismatch: $_src"
+      case "$_mode:$_imode" in
+        0644:0444|0755:0555) : ;;
+        *) die "invalid immutable mode pair for $_dest" ;;
+      esac
+      [ -n "$_sha" ] || die "manifest digest missing: $_dest"
+      case "$_sha" in
+        *[!0123456789abcdefABCDEF]*) die "invalid manifest digest for $_dest" ;;
+      esac
+      [ "${#_sha}" -eq 64 ] || die "invalid manifest digest for $_dest"
+      _dest_parent=$(path_parent "$_dest_path")
+      "$_mkdir_path" -p "$_dest_parent"
+      "$_cp_path" -p "$_src_path" "$_dest_path" || die "failed to copy $_src"
+      "$_chmod_path" "$_imode" "$_dest_path" || die "failed to seal $_dest"
+    done < "${_manifest_parse:-$_manifest_rows}"
+
+    # Verify staged files against manifest digests
+    _verify_ok=1
+    while IFS="$(printf '\t')" read -r _dest _src _mode _imode _size _sha; do
+      [ -n "$_dest" ] || continue
+      case "$_dest" in \#*|shell-profile-release-manifest-v1|destination) continue ;; esac
+      case "$_dest" in
+        ""|.|./*|*/.|*/./*|*//*|/*|*/../*|../*|*/..|..*) die "invalid manifest destination path: $_dest" ;;
+      esac
+      _staged_file="$_stage/$_dest"
+      [ -f "$_staged_file" ] || die "staged manifest file missing: $_dest"
+      [ "$(file_mode "$_staged_file")" = "$_imode" ] || die "staged install mode mismatch: $_dest"
+      [ "$(file_bytes "$_staged_file")" = "$_size" ] || die "staged byte count mismatch: $_dest"
+      [ -n "$_sha" ] || die "manifest digest missing: $_dest"
+      case "$_sha" in
+        *[!0123456789abcdefABCDEF]*) die "invalid manifest digest for $_dest" ;;
+      esac
+      [ "${#_sha}" -eq 64 ] || die "invalid manifest digest for $_dest"
+      _actual=$(file_sha256 "$_staged_file") || die "no trusted SHA-256 utility available"
+      _expected=$(printf '%s' "$_sha" | lower_hex) || die "no trusted tr utility available"
+      if [ "$_actual" != "$_expected" ]; then
+        die "digest mismatch for $_dest: expected $_sha got $_actual"
+      fi
+    done < "${_manifest_parse:-$_manifest_rows}"
+
+    # Seal all release directories; files already received their declared
+    # immutable mode while being staged. Never publish an incompletely sealed
+    # tree.
+    seal_tree "$_stage" || die "failed to seal release directories"
+
+    # Publish through a temporary sibling, then atomically rename the
+    # complete immutable tree into place. The EXIT/signal cleanup removes any
+    # incomplete sibling before it can poison this release ID.
+    _publish_tmp="$VALISE_RELEASES_DIR/.valise-release.$_release_id.$$"
+    [ ! -e "$_publish_tmp" ] && [ ! -L "$_publish_tmp" ] || die "release publication temporary path already exists"
+    "$_cp_path" -rp "$_stage" "$_publish_tmp" || die "failed to publish release"
+    seal_tree "$_publish_tmp" || die "failed to seal published release"
+    verify_release_dir "$_publish_tmp" "$_manifest" "$_release_id"
+    [ ! -e "$_target_dir" ] && [ ! -L "$_target_dir" ] || die "release target appeared during publication"
+    _mv_path=$(trusted_utility_path mv) || die "no trusted mv utility available"
+    "$_mv_path" "$_publish_tmp" "$_target_dir" || die "failed to publish release"
+    _publish_tmp=""
+    [ -d "$_target_dir" ] || die "published release directory is missing"
+    verify_release_dir "$_target_dir" "$_manifest" "$_release_id"
+    remove_tree "$_stage" || die "failed to remove staging directory"
+    _stage=""
+    info "release $_release_id installed"
+  fi
+
+  # Update active symlink atomically without clobbering a non-symlink path.
+  if [ ! -L "$VALISE_ACTIVE_LINK" ] || [ "$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null)" != "$_target_dir" ]; then
+    acquire_lock
+    if [ -e "$VALISE_ACTIVE_LINK" ] && [ ! -L "$VALISE_ACTIVE_LINK" ]; then
+      release_lock
+      die "active path exists and is not a symlink: $VALISE_ACTIVE_LINK"
+    fi
+    switch_active_link "$_target_dir"
+    release_lock
+    info "active release set to $_release_id"
+  fi
+
+  # Deploy the Fish conf.d hook when Fish is available. Installed releases
+  # currently expose the generated Fish plan; older releases may expose the
+  # project Fish entrypoint, so the emitted integration handles both.
+  _fish_path=$(trusted_utility_path fish 2>/dev/null || :)
+  if [ -n "$_fish_path" ]; then
+    _fish_conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
+    _fish_hook="$_fish_conf_dir/valise.fish"
+    _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+    "$_mkdir_path" -p "$_fish_conf_dir" || die "cannot create Fish configuration directory"
+    [ ! -L "$_fish_hook" ] || die "Fish hook path must not be a symlink: $_fish_hook"
+    if [ -d "$_fish_hook" ]; then
+      die "Fish hook path is a directory: $_fish_hook"
+    fi
+    # Use the platform mktemp in the destination directory. Its exclusive
+    # creation makes a pre-created predictable symlink unable to redirect the
+    # shell redirection below into an attacker-selected victim.
+    _hook_tmp=$(trusted_mktemp_at "$_fish_conf_dir" file "$_fish_conf_dir/.valise-hook.XXXXXX") || die "cannot create Fish hook staging file"
+    [ -f "$_hook_tmp" ] && [ ! -L "$_hook_tmp" ] || die "Fish hook staging path is unsafe"
+    {
+      printf '%s\n' \
+        "# Managed by valise install — do not edit." \
+        "# This hook loads the active valise release for Fish sessions."
+      print_fish_integration
+    } >"$_hook_tmp" || die "cannot write Fish hook"
+    _chmod_path=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+    "$_chmod_path" 0644 "$_hook_tmp" || die "cannot set Fish hook mode"
+    _cat_path=$(trusted_utility_path cat) || die "no trusted cat utility available"
+    _hook_expected=$("$_cat_path" "$_hook_tmp") || die "cannot read Fish hook staging file"
+    _mv_path=$(trusted_utility_path mv) || die "no trusted mv utility available"
+    # mv -f uses rename(2) which atomically replaces a regular file
+    # destination on both BSD and GNU systems. The hook path was verified
+    # non-symlink above, so no explicit removal is needed — mv -f alone
+    # preserves atomicity.
+    "$_mv_path" -f "$_hook_tmp" "$_fish_hook" || die "cannot publish Fish hook"
+    _hook_tmp=""
+    [ -f "$_fish_hook" ] || die "Fish hook was not published"
+    [ "$(file_mode "$_fish_hook")" = 0644 ] || die "Fish hook mode mismatch"
+    _hook_actual=$("$_cat_path" "$_fish_hook") || die "cannot read published Fish hook"
+    [ "$_hook_actual" = "$_hook_expected" ] || die "published Fish hook contents mismatch"
+    info "Fish hook deployed: $_fish_hook"
+  fi
+
+  # Deploy POSIX shell integration to the platform-appropriate profile file.
+  # macOS: Terminal.app and iTerm2 open every window/tab as a login shell,
+  # so .bash_profile / .zprofile is sourced per terminal.
+  # Linux: terminal emulators open non-login interactive shells, so
+  # .bashrc / .zshrc / .kshrc is sourced per terminal.
+  _posix_shell="${SHELL:-}"
+  _posix_shell_name=""
+  case "$_posix_shell" in
+    */bash|bash) _posix_shell_name=bash ;;
+    */zsh|zsh)   _posix_shell_name=zsh ;;
+    */ksh|ksh)   _posix_shell_name=ksh ;;
+  esac
+  if [ -n "$_posix_shell_name" ] && [ -n "${HOME:-}" ]; then
+    _posix_platform=$(trusted_uname -s 2>/dev/null || echo unknown)
+    _posix_profile=""
+    case "$_posix_platform" in
+      Darwin)
+        case "$_posix_shell_name" in
+          bash) _posix_profile="$HOME/.bash_profile" ;;
+          zsh)  _posix_profile="$HOME/.zprofile" ;;
+          ksh)  _posix_profile="$HOME/.kshrc" ;;
+        esac
+        ;;
+      *)
+        case "$_posix_shell_name" in
+          bash) _posix_profile="$HOME/.bashrc" ;;
+          zsh)  _posix_profile="$HOME/.zshrc" ;;
+          ksh)  _posix_profile="$HOME/.kshrc" ;;
+        esac
+        ;;
+    esac
+    if [ -n "$_posix_profile" ]; then
+      if [ -L "$_posix_profile" ]; then
+        info "shell integration skipped: $_posix_profile is a symlink (managed externally)"
+      else
+        _posix_marker="managed by valise install"
+        _posix_already=0
+        if [ -f "$_posix_profile" ]; then
+          _awk_path=$(trusted_utility_path awk) || die "no trusted awk utility available"
+          if "$_awk_path" -v m="$_posix_marker" 'index($0,m){found=1;exit} END{exit !found}' "$_posix_profile" 2>/dev/null; then
+            _posix_already=1
+          fi
+        fi
+        if [ "$_posix_already" -eq 1 ]; then
+          info "shell integration already present: $_posix_profile"
+        else
+          _posix_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || die "cannot quote active link path"
+          _posix_profile_dir=$(path_parent "$_posix_profile")
+          if [ ! -d "$_posix_profile_dir" ]; then
+            _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+            "$_mkdir_path" -p "$_posix_profile_dir" || die "cannot create profile directory: $_posix_profile_dir"
+          fi
+          _posix_tmp=$(trusted_mktemp_at "$_posix_profile_dir" file "$_posix_profile_dir/.valise-profile.XXXXXX") || die "cannot create profile staging file"
+          [ -f "$_posix_tmp" ] && [ ! -L "$_posix_tmp" ] || die "profile staging path is unsafe"
+          if [ -f "$_posix_profile" ]; then
+            _cat_path=$(trusted_utility_path cat) || die "no trusted cat utility available"
+            "$_cat_path" "$_posix_profile" > "$_posix_tmp" || die "cannot copy existing profile"
+            printf '\n' >> "$_posix_tmp"
+          fi
+          {
+            printf '%s\n' "# valise shell integration — $_posix_marker"
+            printf '%s\n' "_valise_active_link=${_posix_active_literal}"
+            printf '%s\n' "if [ -L \"\$_valise_active_link/entrypoints/profile.sh\" ] || [ -f \"\$_valise_active_link/entrypoints/profile.sh\" ]; then"
+            printf '%s\n' "  _valise_active=\$(cd \"\$_valise_active_link\" 2>/dev/null && pwd -P)"
+            printf '%s\n' "  if [ -n \"\$_valise_active\" ]; then"
+            printf '%s\n' "    VALISE_ROOT=\"\$_valise_active\""
+            printf '%s\n' "    . \"\$_valise_active/entrypoints/profile.sh\""
+            printf '%s\n' "  fi"
+            printf '%s\n' "  unset _valise_active"
+            printf '%s\n' "fi"
+            printf '%s\n' "unset _valise_active_link"
+          } >> "$_posix_tmp" || die "cannot write profile snippet"
+          _chmod_path=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+          if [ -f "$_posix_profile" ]; then
+            _posix_existing_mode=$(file_mode "$_posix_profile")
+            [ -n "$_posix_existing_mode" ] || die "cannot read existing profile mode: $_posix_profile"
+            "$_chmod_path" "$_posix_existing_mode" "$_posix_tmp" || die "cannot preserve profile mode"
+          else
+            "$_chmod_path" 0644 "$_posix_tmp" || die "cannot set profile mode"
+          fi
+          _mv_path=$(trusted_utility_path mv) || die "no trusted mv utility available"
+          "$_mv_path" -f "$_posix_tmp" "$_posix_profile" || die "cannot publish profile snippet"
+          _posix_tmp=""
+          info "shell integration deployed: $_posix_profile"
+        fi
+      fi
+    fi
+  fi
+
+  info "installation complete"
+  info "run 'valise init' to print the shell integration snippet for manual setup"
+}
+
+cmd_make_manifest() {
+  _mm_tree=""
+  _mm_out=""
+  _mm_want_out=0
+  for _mm_arg do
+    case "$_mm_arg" in
+      --output) _mm_want_out=1 ;;
+      --output=*)
+        _mm_out=${_mm_arg#--output=}
+        [ -n "$_mm_out" ] || die "usage: valise make-manifest <tree> [--output <file>]"
+        ;;
+      --help|-h) printf '%s\n' "usage: valise make-manifest <tree> [--output <file>]"; return 0 ;;
+      --*) die "unknown make-manifest option: $_mm_arg" ;;
+      *)
+        if [ "$_mm_want_out" -eq 1 ]; then
+          _mm_out=$_mm_arg
+          _mm_want_out=0
+        elif [ -n "$_mm_tree" ]; then
+          die "usage: valise make-manifest <tree> [--output <file>]"
+        else
+          _mm_tree=$_mm_arg
+        fi
+        ;;
+    esac
+  done
+  [ "$_mm_want_out" -eq 0 ] || die "usage: valise make-manifest <tree> [--output <file>]"
+  [ -n "$_mm_tree" ] || die "usage: valise make-manifest <tree> [--output <file>]"
+  [ -d "$_mm_tree" ] || die "manifest tree is not a directory: $_mm_tree"
+  _mm_root=$(cd "$_mm_tree" && pwd -P) || die "cannot resolve manifest tree: $_mm_tree"
+  _mm_default_out="$_mm_root/shell/install/profile-release.manifest"
+  if [ -z "$_mm_out" ]; then
+    _mm_out="$_mm_default_out"
+  fi
+  case "$_mm_out" in
+    /*) : ;;
+    *)
+      while :; do
+        case "$_mm_out" in
+          ./*) _mm_out=${_mm_out#./} ;;
+          *) break ;;
+        esac
+      done
+      _mm_cwd=$(pwd -P) || die "cannot resolve working directory"
+      _mm_out="$_mm_cwd/$_mm_out"
+      ;;
+  esac
+  _mm_out_dir=$(path_parent "$_mm_out") || die "cannot resolve manifest parent"
+  _mm_mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  "$_mm_mkdir_path" -p "$_mm_out_dir" || die "cannot create manifest directory: $_mm_out_dir"
+  _mm_find_path=$(trusted_utility_path find) || die "no trusted find utility available"
+  _mm_sort_path=$(trusted_utility_path sort) || die "no trusted sort utility available"
+  # Symlinks never enter a sealed release: find without -L reports them as
+  # -type l, so any symlink anywhere under the tree fails closed here.
+  _mm_links=$("$_mm_find_path" "$_mm_root" -type l -print) || die "cannot scan manifest tree: $_mm_root"
+  [ -z "$_mm_links" ] || die "manifest tree must not contain symlinks: $_mm_root"
+  _mm_list=$("$_mm_find_path" "$_mm_root" -type f -print) || die "cannot list manifest tree: $_mm_root"
+  _mm_tmp=$(trusted_mktemp_at "$_mm_out_dir" file "$_mm_out_dir/.valise-manifest.XXXXXX") || die "cannot stage manifest"
+  _mm_tab=$(printf '\t')
+  _mm_nl='
+'
+  _mm_count=0
+  printf '%s\n' "shell-profile-release-manifest-v1" >"$_mm_tmp" || die "cannot write manifest"
+  printf 'destination\tsource\tsource_mode\tinstall_mode\tbytes\tsha256\n' >>"$_mm_tmp" || die "cannot write manifest"
+  _mm_sorted=$(printf '%s\n' "$_mm_list" | LC_ALL=C "$_mm_sort_path") || die "cannot sort manifest tree listing"
+  while IFS= read -r _mm_full || [ -n "$_mm_full" ]; do
+    [ -n "$_mm_full" ] || continue
+    # The manifest describes the tree payload, never itself: both the
+    # requested output and the default output path stay out of the rows so
+    # consecutive runs over an unchanged tree are byte-identical.
+    [ "$_mm_full" != "$_mm_out" ] || continue
+    [ "$_mm_full" != "$_mm_default_out" ] || continue
+    [ "$_mm_full" != "$_mm_tmp" ] || continue
+    _mm_rel=${_mm_full#"$_mm_root"/}
+    # Same name rules as validate_manifest: the schema charset plus no
+    # tab/newline (row delimiters) and no dot segments. Anything else
+    # fails here naming the file instead of at validation time.
+    case "$_mm_rel" in
+      *"$_mm_nl"*|*"$_mm_tab"*|*[!A-Za-z0-9._/-]*|"#"*|.|..|./*|../*|*/.|*/..|*/./*|*/../*) die "manifest tree file has an unrepresentable name: $_mm_full" ;;
+    esac
+    _mm_mode=$(file_mode "$_mm_full") || die "cannot read file mode: $_mm_full"
+    case "$_mm_mode" in
+      0644) _mm_imode=0444 ;;
+      0755) _mm_imode=0555 ;;
+      *) die "manifest tree file has unsupported mode $_mm_mode (normalize to 0644 or 0755): $_mm_full" ;;
+    esac
+    _mm_bytes=$(file_bytes "$_mm_full") || die "cannot read file size: $_mm_full"
+    _mm_sha=$(file_sha256 "$_mm_full") || die "no trusted SHA-256 utility available"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$_mm_rel" "$_mm_rel" "$_mm_mode" "$_mm_imode" "$_mm_bytes" "$_mm_sha" >>"$_mm_tmp" || die "cannot write manifest"
+    _mm_count=$((_mm_count + 1))
+  done <<_MM_SORTED_EOF
+$_mm_sorted
+_MM_SORTED_EOF
+  [ "$_mm_count" -gt 0 ] || die "manifest tree contains no files: $_mm_root"
+  validate_manifest "$_mm_tmp" || die "generated manifest failed validation"
+  _mm_mv_path=$(trusted_utility_path mv) || die "no trusted mv utility available"
+  "$_mm_mv_path" -f "$_mm_tmp" "$_mm_out" || die "cannot publish manifest: $_mm_out"
+  _mm_chmod_path=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+  "$_mm_chmod_path" 0644 "$_mm_out" || die "cannot set manifest mode: $_mm_out"
+  _mm_tmp=""
+  info "manifest written: $_mm_out ($_mm_count files)"
+}
+
+cmd_compile() {
+  _out_dir=""
+  _variant="workstation-full"
+  _bundle=""
+  _bundle_requested=0
+  for _arg do
+    case "$_arg" in
+      --variant=*) _variant="${_arg#--variant=}" ;;
+      --bundle=*) _bundle="${_arg#--bundle=}"; _bundle_requested=1 ;;
+      --help|-h) usage; return 0 ;;
+      *) [ -z "$_out_dir" ] && _out_dir="$_arg" ;;
+    esac
+  done
+  [ -n "$_out_dir" ] || die "usage: valise compile [--bundle=<name>] [--variant=<name>] <output-dir>"
+  _script_dir=$(cd "$(path_parent "$0")" && pwd -P)
+  _awk_compiler="$_script_dir/../lib/compiler.awk"
+  [ -f "$_awk_compiler" ] || die "compiler.awk not found at $_awk_compiler"
+
+  # Find source tree root (look for shell/release/ relative to script or cwd)
+  _src_root=""
+  for _candidate in "$_script_dir/../../.." "$_script_dir/../.." "$_script_dir/.." "."; do
+    if [ -f "$_candidate/shell/release/module-registry.tsv" ]; then
+      _src_root=$(cd "$_candidate" && pwd -P)
+      break
+    fi
+  done
+  [ -n "$_src_root" ] || die "cannot find source tree (need shell/release/module-registry.tsv)"
+
+  _registry="$_src_root/shell/release/module-registry.tsv"
+  _roots_json="$_src_root/shell/release/profile-release.json"
+  _release_compiler="$_src_root/hack/compile-shell-profile-release.py"
+  [ -f "$_release_compiler" ] || die "release compiler not found: $_release_compiler"
+  _prelude="$_src_root/submodule/valise-sh/lib/capabilities.sh"
+  _variants_file="$_src_root/shell/release/install-variants"
+  _variant_matches=$(awk -F'\t' -v v="$_variant" '$1 == v { count++ } END { print count + 0 }' "$_variants_file")
+  [ "$_variant_matches" -eq 1 ] || die "unknown or ambiguous variant: $_variant"
+  # Extract prelude function names
+  # Extract sp_cap_ functions matching Python SHELL_FUNCTION_DEFINITION regex
+  # Pattern: ^name() { (file-appearance order, no sorting)
+  [ -r "$_prelude" ] || die "capabilities prelude not found: $_prelude"
+  _prelude_fns=$(sed -n 's/^\([a-z_][a-zA-Z0-9_]*\)()[[:space:]]*{.*/\1/p' "$_prelude" | grep '^sp_cap_' | tr '\n' ' ')
+  [ -n "$_prelude_fns" ] || die "capabilities prelude contains no sp_cap_ functions"
+
+  # Extract exclusion list and validate each exclusion against the identity
+  # represented by install-variants. Bare names are project module identities;
+  # qualified names may explicitly name another registry source. Do this before
+  # creating output so all fail-closed validation paths are transactional.
+  _exclude_list=""
+  if [ -f "$_variants_file" ]; then
+    _exclude_list=$(awk -F'	' -v v="$_variant" '$1 == v { print $3 }' "$_variants_file")
+  fi
+  if [ -z "$_exclude_list" ] && [ "$_variant" != "workstation-full" ]; then
+    info "warning: variant $_variant not found in install-variants, using default"
+  fi
+  for _excluded_module in $_exclude_list; do
+    _excluded_count=$(awk -F '	' -v wanted="$_excluded_module" '
+      NR > 1 {
+        if (index(wanted, "@")) {
+          split(wanted, parts, "@"); match_row = ($1 == parts[1] && $11 == parts[2])
+        } else { match_row = ($1 == wanted && $11 == "shell/module.d") }
+        if (match_row) count++
+      }
+      END { print count + 0 }' "$_registry")
+    [ "$_excluded_count" -eq 1 ] ||
+      die "variant $_variant excludes unknown or ambiguous registry module: $_excluded_module"
+  done
+
+  if [ "$_bundle_requested" -eq 1 ]; then
+    [ -n "$_bundle" ] || die "bundle name must not be empty"
+    # Validate bundle identity before creating the output transaction.
+    python3 "$_release_compiler" --root "$_src_root" --bundle-roots bash --bundle "$_bundle" >/dev/null ||
+      die "failed to resolve bundle roots for bash"
+  fi
+
+  # Compile into a private sibling directory. A non-empty destination is
+  # rejected before any plan is generated, so a failed compile can never leave
+  # a partially replaced output tree. An empty existing directory is supported
+  # for callers that pre-create their destination; it is replaced only after
+  # every plan has compiled successfully. Trailing slashes are normalized so
+  # "out/" and "out" are the same destination (see path_parent).
+  while [ "$_out_dir" != "/" ] && [ "${_out_dir%/}" != "$_out_dir" ]; do
+    _out_dir=${_out_dir%/}
+  done
+  _out_parent=$(path_parent "$_out_dir")
+  _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  if [ ! -d "$_out_parent" ]; then
+    "$_mkdir_path" -p "$_out_parent" || die "cannot create output parent directory"
+  fi
+  _compile_output_existed=0
+  if [ -e "$_out_dir" ] || [ -L "$_out_dir" ]; then
+    [ -d "$_out_dir" ] && [ ! -L "$_out_dir" ] || die "output path is not a directory: $_out_dir"
+    _compile_output_existed=1
+    _compile_output_empty=1
+    for _existing_entry in "$_out_dir"/* "$_out_dir"/.[!.]* "$_out_dir"/..?*; do
+      if [ -e "$_existing_entry" ] || [ -L "$_existing_entry" ]; then
+        _compile_output_empty=0
+        break
+      fi
+    done
+    [ "$_compile_output_empty" -eq 1 ] || die "output directory must be empty: $_out_dir"
+  fi
+  _stage=$(trusted_mktemp_at "$_out_parent" dir "$_out_parent/.valise-compile.XXXXXX") ||
+    die "cannot create compile staging directory"
+
+  # Fish plans require native Fish syntax; awk compiler emits POSIX sh only.
+  # Python compiler (hack/compile-shell-profile-release.py) handles Fish correctly.
+  info "fish plan generation requires Python compiler (awk compiler is POSIX-only)"
+  for _shell in bash zsh ksh wrapper_lifecycle; do
+    # Extract roots for this shell from JSON using POSIX tools
+    if [ "$_bundle_requested" -eq 1 ]; then
+      _roots=$(python3 "$_release_compiler" --root "$_src_root" --bundle-roots "$_shell" --bundle "$_bundle") || die "failed to resolve bundle roots for $_shell"
+    else
+      _roots=$(python3 "$_release_compiler" --root "$_src_root" --bundle-roots "$_shell") || die "failed to resolve bundle roots for $_shell"
+    fi
+
+    [ -n "$_roots" ] || continue
+
+    # wrapper_lifecycle uses bash shell filtering (matches Python compiler)
+    _effective_shell="$_shell"
+    [ "$_shell" != "wrapper_lifecycle" ] || _effective_shell="bash"
+
+    _plan_file="installed-modules.$_shell"
+    [ "$_shell" != "wrapper_lifecycle" ] || _plan_file="wrapper-lifecycle.bash"
+
+    # Filter registry for modules matching this shell and build input stream
+    {
+      # Filter seeds through exclusion list
+      _filtered_roots=""
+      for _seed in $_roots; do
+        _seed_name=${_seed%@*}
+        _seed_source="shell/module.d"
+        case "$_seed" in *@*) _seed_source=${_seed#*@} ;; esac
+        _excluded=0
+        for _ex in $_exclude_list; do
+          case "$_ex" in
+            *@*) [ "$_seed" = "$_ex" ] && _excluded=1 ;;
+            *) [ "$_seed_name" = "$_ex" ] && [ "$_seed_source" = "shell/module.d" ] && _excluded=1 ;;
+          esac
+          [ "$_excluded" -eq 1 ] && break
+        done
+        [ "$_excluded" -eq 1 ] || _filtered_roots="$_filtered_roots $_seed"
+      done
+      _filtered_roots="${_filtered_roots# }"
+      printf 'SEED:%s
+' "$_filtered_roots"
+      printf 'PRELUDE:%s
+' "$_prelude_fns"
+      # Preprocess the registry with source-qualified identities. This keeps
+      # duplicate module names distinct and gives contribution bodies their
+      # installed layer prefix.
+      awk -F'	' -v shell="$_effective_shell" -v excludes="$_exclude_list" '
+        function shell_matches(shells, wanted, count, i, values) {
+          if (shells == "any") return 1
+          count = split(shells, values, " ")
+          for (i = 1; i <= count; i++) {
+            if (values[i] == wanted || values[i] == "sh") return 1
+          }
+          return 0
+        }
+        NR == 1 { next }
+        {
+          name = $1; msrc = $11
+          if (name == "" || msrc == "shell/helpers" || !shell_matches($6, shell)) next
+          identity = name "@" msrc
+          row_exists[identity] = 1
+          row_name[identity] = name
+          row_source[identity] = msrc
+          row_req[identity] = $4
+          row_load[identity] = $9
+        }
+        END {
+          for (identity in row_exists) {
+            name = row_name[identity]; source = row_source[identity]
+            excluded = 0
+            if (source == "shell/module.d" && excludes != "") {
+              n_ex = split(excludes, ex_arr, " ")
+              for (ei = 1; ei <= n_ex; ei++) {
+                if (ex_arr[ei] == name || ex_arr[ei] == identity) { excluded = 1; break }
+              }
+            }
+            if (excluded) continue
+            req = ""
+            n_req = split(row_req[identity], req_arr, " ")
+            for (ri = 1; ri <= n_req; ri++) {
+              dep = req_arr[ri]
+              if (dep == "") continue
+              candidate = dep "@" source
+              if (candidate in row_exists) { resolved = candidate }
+              else {
+                resolved = dep; candidate_count = 0
+                for (candidate_key in row_exists) {
+                  if (row_name[candidate_key] == dep) { resolved = candidate_key; candidate_count++ }
+                }
+                if (candidate_count != 1) resolved = dep
+              }
+              req = req (req == "" ? "" : " ") resolved
+            }
+            load_path = row_load[identity]
+            if (source == "shell/layers/contrib/module.d") load_path = "layers/contrib/" load_path
+            printf "MOD:%s\t%s\t%s\n", identity, req, load_path
+          }
+        }
+      ' "$_registry"
+    } | awk -v target_shell="$_effective_shell" -v plan_name="$_shell" -f "$_awk_compiler" > "$_stage/$_plan_file"
+
+    info "compiled plan for $_shell"
+  done
+
+  _mv_path=$(trusted_utility_path mv) || die "no trusted mv utility available"
+  if [ "$_compile_output_existed" -eq 1 ]; then
+    _rmdir_path=$(trusted_utility_path rmdir) || die "no trusted rmdir utility available"
+    "$_rmdir_path" "$_out_dir" || die "cannot clear empty output directory"
+  fi
+  if ! "$_mv_path" "$_stage" "$_out_dir"; then
+    if [ "$_compile_output_existed" -eq 1 ] && [ ! -e "$_out_dir" ] && [ ! -L "$_out_dir" ]; then
+      "$_mkdir_path" "$_out_dir" 2>/dev/null || :
+    fi
+    die "cannot publish compiled plans"
+  fi
+  _stage=""
+}
+
+
+cmd_explain_variant() {
+  _variant="${1:-workstation-full}"
+  _script_dir=$(cd "$(path_parent "$0")" && pwd -P)
+  _src_root=""
+  for _candidate in "$_script_dir/../../.." "$_script_dir/../.." "$_script_dir/.." "."; do
+    if [ -f "$_candidate/shell/release/install-variants" ]; then
+      _src_root=$(cd "$_candidate" && pwd -P)
+      break
+    fi
+  done
+  [ -n "$_src_root" ] || die "cannot find source tree"
+
+  _variants_file="$_src_root/shell/release/install-variants"
+  [ -f "$_variants_file" ] || die "install-variants file not found"
+
+  _release_compiler="$_src_root/hack/compile-shell-profile-release.py"
+  [ -f "$_release_compiler" ] || die "release compiler not found: $_release_compiler"
+
+  _exclude_list=$(awk -F'	' -v v="$_variant" '$1 == v { print $3 }' "$_variants_file")
+  _desc=$(awk -F'	' -v v="$_variant" '$1 == v { print $2 }' "$_variants_file")
+
+  printf 'Variant: %s
+' "$_variant"
+  printf 'Description: %s
+' "${_desc:-unknown}"
+  printf 'Excluded modules: %s
+' "${_exclude_list:-none (default)}"
+  printf '
+Per-shell impact:
+'
+
+  for _shell in bash zsh ksh wrapper_lifecycle fish; do
+    _roots=$(python3 "$_release_compiler" --root "$_src_root" --bundle-roots "$_shell") || continue
+
+    _count=0
+    _excluded=0
+    for _seed in $_roots; do
+      _is_ex=0
+      _seed_name=${_seed%@*}
+      _seed_source="shell/module.d"
+      case "$_seed" in *@*) _seed_source=${_seed#*@} ;; esac
+      for _ex in $_exclude_list; do
+        case "$_ex" in
+          *@*) [ "$_seed" = "$_ex" ] && _is_ex=1 ;;
+          *) [ "$_seed_name" = "$_ex" ] && [ "$_seed_source" = "shell/module.d" ] && _is_ex=1 ;;
+        esac
+        [ "$_is_ex" -eq 1 ] && break
+      done
+      if [ "$_is_ex" -eq 1 ]; then
+        _excluded=$((_excluded+1))
+      else
+        _count=$((_count+1))
+      fi
+    done
+    printf '  %s: %d roots (%d excluded)
+' "$_shell" "$_count" "$_excluded"
+  done
+}
+
+cmd_explain_bundles() {
+  _script_dir=$(cd "$(path_parent "$0")" && pwd -P)
+  _src_root=""
+  for _candidate in "$_script_dir/../../.." "$_script_dir/../.." "$_script_dir/.." "."; do
+    if [ -f "$_candidate/shell/release/bundles.json" ] && [ -f "$_candidate/shell/release/profile-release.json" ]; then
+      _src_root=$(cd "$_candidate" && pwd -P)
+      break
+    fi
+  done
+  [ -n "$_src_root" ] || die "cannot find source tree with bundle and release manifests"
+  command -v python3 >/dev/null 2>&1 || die "python3 required for explain-bundles"
+  _compiler="$_src_root/hack/compile-shell-profile-release.py"
+  [ -f "$_compiler" ] || die "release compiler not found: $_compiler"
+  python3 "$_compiler" --root "$_src_root" --explain-bundles
+  _rc=$?
+  [ "$_rc" -eq 0 ] || die "explain-bundles failed"
+}
+
+cmd_layer_lint() {
+  _layer_name="${1:-}"
+  [ -n "$_layer_name" ] || die "usage: valise layer-lint <layer-name>"
+
+  _script_dir=$(cd "$(path_parent "$0")" && pwd -P)
+  _src_root=""
+  for _candidate in "$_script_dir/../../.." "$_script_dir/../.." "$_script_dir/.." "."; do
+    if [ -d "$_candidate/shell/layers" ]; then
+      _src_root=$(cd "$_candidate" && pwd -P)
+      break
+    fi
+  done
+  [ -n "$_src_root" ] || die "cannot find source tree with shell/layers/"
+
+  _validator="$_src_root/hack/validate-layer.py"
+  [ -f "$_validator" ] || die "layer validator not found: $_validator"
+
+  command -v python3 >/dev/null 2>&1 || die "python3 required for layer-lint"
+  python3 "$_validator" "$_layer_name"
+}
+
+# --- Main dispatch ---
+
+_cmd="${1:-}"
+# POSIX shells may treat a zero-argument shift as a fatal error under -e,
+# even when guarded by an OR-list. Only shift when there is an argument.
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+case "$_cmd" in
+  init)    cmd_init "$@" ;;
+  install) cmd_install "$@" ;;
+  _verify-release-root) cmd_verify_release_root "$@" ;;
+  verify-active) cmd_verify_active "$@" ;;
+  doctor)  cmd_doctor ;;
+  variant) cmd_variant "$@" ;;
+  make-manifest) cmd_make_manifest "$@" ;;
+  compile) cmd_compile "$@" ;;
+  explain-variant) cmd_explain_variant "$@" ;;
+  explain-bundles) cmd_explain_bundles ;;
+  layer-lint)  cmd_layer_lint "$@" ;;
+  version|--version|-v) cmd_version ;;
+  help|--help|-h|'') usage ;;
+  *)       die "unknown command: $_cmd (run 'valise help')" ;;
+esac

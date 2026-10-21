@@ -1,0 +1,9 @@
+name=generated_writer
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=generated-file
+exports=generated_writer_loaded
+updates=
+load=modules/generated_writer.sh

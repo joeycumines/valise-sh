@@ -1,0 +1,9 @@
+name=alpha
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=alpha_loaded
+updates=
+load=modules/alpha.sh

@@ -1,0 +1,10 @@
+name=bridge_fail
+requires=core
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=bridge_fail_loaded
+updates=
+load=
+load_hook=_shell_module_bridge_fail

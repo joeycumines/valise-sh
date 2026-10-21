@@ -1,0 +1,9 @@
+name=clobber_cleanup
+shells=sh
+platforms=any
+side_effect=read-only
+requires=
+optional=
+load=modules/clobber_cleanup.sh
+exports=clobber_cleanup_loaded
+updates=

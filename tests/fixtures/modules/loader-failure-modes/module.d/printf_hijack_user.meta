@@ -1,0 +1,9 @@
+name=printf_hijack_user
+shells=sh
+platforms=any
+side_effect=read-only
+requires=printf_hijack_dep
+optional=
+load=modules/printf_hijack_user.sh
+exports=printf_hijack_user_loaded
+updates=

@@ -1,0 +1,9 @@
+name=invalid_dependency
+requires=bad/name
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=invalid_dependency_loaded
+updates=
+load=modules/invalid_dependency.sh

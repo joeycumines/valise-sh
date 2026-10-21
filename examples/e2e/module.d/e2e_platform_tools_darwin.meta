@@ -1,0 +1,9 @@
+name=e2e_platform_tools_darwin
+requires=platform_macos
+optional=e2e_env_setup
+shells=sh bash zsh ksh
+platforms=darwin
+side_effect=read-only
+exports=e2e_darwin_tools_ready
+updates=
+load=modules/e2e/platform_tools_darwin.sh

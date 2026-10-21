@@ -1,0 +1,9 @@
+name=clobber_unset
+shells=sh
+platforms=any
+side_effect=read-only
+requires=
+optional=
+load=modules/clobber_unset.sh
+exports=clobber_unset_loaded
+updates=

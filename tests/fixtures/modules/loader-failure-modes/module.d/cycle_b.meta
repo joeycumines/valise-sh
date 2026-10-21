@@ -1,0 +1,9 @@
+name=cycle_b
+requires=cycle_a
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=cycle_b_loaded
+updates=
+load=modules/cycle_b.sh

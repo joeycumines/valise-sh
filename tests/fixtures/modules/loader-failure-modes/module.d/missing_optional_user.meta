@@ -1,0 +1,9 @@
+name=missing_optional_user
+requires=core
+optional=missing_optional_dep
+shells=sh
+platforms=any
+side_effect=read-only
+exports=missing_optional_user_loaded
+updates=
+load=modules/missing_optional_user.sh

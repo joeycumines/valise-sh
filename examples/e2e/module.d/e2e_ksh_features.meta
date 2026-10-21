@@ -1,0 +1,9 @@
+name=e2e_ksh_features
+requires=e2e_env_setup
+optional=
+shells=ksh
+platforms=any
+side_effect=read-only
+exports=e2e_ksh_loaded
+updates=
+load=modules/e2e/ksh_features.sh

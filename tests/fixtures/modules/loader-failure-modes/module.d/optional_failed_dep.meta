@@ -1,0 +1,9 @@
+name=optional_failed_dep
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=optional_failed_dep_loaded
+updates=
+load=modules/optional_failed_dep.sh

@@ -1,0 +1,9 @@
+name=e2e_fish_features
+requires=
+optional=e2e_env_setup
+shells=fish
+platforms=any
+side_effect=read-only
+exports=e2e_fish_loaded
+updates=
+load=modules/e2e/fish_features.fish

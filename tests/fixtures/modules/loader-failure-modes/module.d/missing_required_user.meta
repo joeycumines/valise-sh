@@ -1,0 +1,9 @@
+name=missing_required_user
+requires=missing_dep
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=missing_required_user_loaded
+updates=
+load=modules/missing_required_user.sh

@@ -1,0 +1,9 @@
+name=readonly_command
+shells=sh bash
+platforms=any
+side_effect=read-only
+requires=
+optional=
+load=modules/readonly_command.sh
+exports=readonly_command_loaded
+updates=

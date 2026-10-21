@@ -1,0 +1,9 @@
+name=optional_cycle_app
+requires=
+optional=optional_cycle_opt
+shells=sh
+platforms=any
+side_effect=read-only
+exports=optional_cycle_app_loaded
+updates=
+load=modules/optional_cycle_app.sh

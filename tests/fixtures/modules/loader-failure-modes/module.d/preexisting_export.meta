@@ -1,0 +1,9 @@
+name=preexisting_export
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=printf
+updates=
+load=modules/preexisting_export.sh

@@ -1,0 +1,29 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install extended shell runtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y fish zsh ksh busybox
+      - name: Run release check
+        shell: bash
+        run: |
+          set +e
+          make check 2>&1 | tee "$RUNNER_TEMP/valise-check.log"
+          result=${PIPESTATUS[0]}
+          if [ "$result" -ne 0 ]; then
+            summary=$(tail -n 40 "$RUNNER_TEMP/valise-check.log" | sed 's/%/%25/g; s/\r/%0D/g' | awk '{ printf "%s%%0A", $0 }')
+            printf '::error title=Release check log tail::%s\n' "$summary"
+            exit "$result"
+          fi

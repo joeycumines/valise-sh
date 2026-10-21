@@ -1,0 +1,9 @@
+name=duplicate_export_first
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=duplicate_shared_loaded
+updates=
+load=modules/duplicate_export_first.sh

@@ -1,0 +1,9 @@
+name=optional_required_cycle_b
+requires=optional_required_cycle_a
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=optional_required_cycle_b_loaded
+updates=
+load=modules/optional_required_cycle_b.sh

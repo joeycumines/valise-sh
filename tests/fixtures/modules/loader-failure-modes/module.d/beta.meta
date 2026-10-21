@@ -1,0 +1,9 @@
+name=beta
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=beta_loaded
+updates=
+load=modules/beta.sh

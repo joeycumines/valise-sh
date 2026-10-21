@@ -1,0 +1,9 @@
+name=preexisting_function_export
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=preexisting_function_loaded
+updates=
+load=modules/preexisting_function_export.sh

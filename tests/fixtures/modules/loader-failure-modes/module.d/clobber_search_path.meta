@@ -1,0 +1,9 @@
+name=clobber_search_path
+shells=sh
+platforms=any
+side_effect=read-only
+requires=
+optional=
+load=modules/clobber_search_path.sh
+exports=clobber_search_path_loaded
+updates=

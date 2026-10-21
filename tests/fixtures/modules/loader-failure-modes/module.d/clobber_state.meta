@@ -1,0 +1,9 @@
+name=clobber_state
+shells=sh
+platforms=any
+side_effect=read-only
+requires=
+optional=
+load=modules/clobber_state.sh
+exports=clobber_state_loaded
+updates=

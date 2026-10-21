@@ -1,0 +1,11 @@
+# path_pattern	class	parsers	requirement	notes
+entrypoints/profile.sh	posix	sh,dash,ksh,busybox-ash,bash	required	Portable profile entrypoint must parse with POSIX-family shells and Bash when those parsers are available.
+entrypoints/fish/*.fish	fish	fish	required	Generic Fish entrypoint adapter requires the Fish parser, not POSIX shells.
+lib/*.sh	posix	sh,dash,ksh,busybox-ash,bash	required	Library files are portable core unless a narrower shell-specific path owns them.
+lib/*.awk	non-shell	none	required	Awk compiler is not a shell script; excluded from shell parser validation.
+lib/fish/*.fish	fish	fish	required	Fish-native library files require Fish parser, not POSIX shells.
+modules/system/*.sh	posix	sh,dash,ksh,busybox-ash,bash	required	System utility modules use portable syntax plus capability gates.
+modules/platform/posix.sh	posix	sh,dash,ksh,busybox-ash,bash	required	Generic platform capability module must stay POSIX-parse-clean.
+modules/platform/macos/*.sh	posix	sh,dash,ksh,busybox-ash,bash	required	macOS modules are platform-gated at runtime but must remain POSIX-parse-clean.
+modules/platform/linux/*.sh	posix	sh,dash,ksh,busybox-ash,bash	required	Linux modules are platform-gated at runtime but must remain POSIX-parse-clean.
+modules/platform/bsd/*.sh	posix	sh,dash,ksh,busybox-ash,bash	required	BSD modules are platform-gated at runtime but must remain POSIX-parse-clean.

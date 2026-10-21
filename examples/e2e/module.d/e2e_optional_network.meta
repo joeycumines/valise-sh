@@ -1,0 +1,9 @@
+name=e2e_optional_network
+requires=
+optional=e2e_env_setup
+shells=sh bash zsh ksh
+platforms=any
+side_effect=read-only
+exports=e2e_net_available
+updates=
+load=modules/e2e/optional_network.sh

@@ -1,0 +1,9 @@
+name=platform_darwin_only
+requires=
+optional=
+shells=sh
+platforms=darwin
+side_effect=read-only
+exports=platform_darwin_only_loaded
+updates=
+load=modules/platform_darwin_only.sh

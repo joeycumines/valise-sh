@@ -1,0 +1,10 @@
+name=contrib_xdg
+requires=
+optional=
+shells=sh bash zsh ksh
+platforms=any
+side_effect=path-env
+exports=contrib_xdg_defaults
+updates=
+version=1.0.0
+load=modules/system/contrib_xdg.sh

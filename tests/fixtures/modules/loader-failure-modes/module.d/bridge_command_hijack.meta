@@ -1,0 +1,9 @@
+name=bridge_command_hijack
+shells=sh bash
+platforms=any
+side_effect=read-only
+requires=
+optional=
+load_hook=_shell_module_bridge_command_hijack
+exports=bridge_command_hijack_loaded
+updates=

@@ -1,0 +1,40 @@
+{
+  "name": "valise-sh",
+  "version": "0.1.0",
+  "description": "Pure POSIX shell profile engine and CLI",
+  "bin": {
+    "valise": "./bin/valise"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "modules/",
+    "entrypoints/",
+    "module.d/",
+    "manifests/",
+    "docs/",
+    "examples/",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "shell",
+    "profile",
+    "posix",
+    "bash",
+    "zsh",
+    "ksh",
+    "fish",
+    "dotfiles"
+  ],
+  "author": "joeycumines",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joeycumines/valise-sh.git"
+  },
+  "dependencies": {},
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

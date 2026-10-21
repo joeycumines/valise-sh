@@ -1,0 +1,9 @@
+name=clobber_expected
+shells=sh
+platforms=any
+side_effect=read-only
+requires=
+optional=
+load=modules/clobber_expected.sh
+exports=clobber_expected_loaded
+updates=

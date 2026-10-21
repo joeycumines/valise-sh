@@ -1,0 +1,9 @@
+name=bad/name
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=invalid_module_name_loaded
+updates=
+load=modules/invalid_module_name.sh
