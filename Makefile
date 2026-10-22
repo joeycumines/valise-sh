@@ -10,7 +10,7 @@ VALISE_REQUIRE_TOOLING ?= $(if $(filter true TRUE 1 yes YES,$(CI) $(GITHUB_ACTIO
 comma := ,
 VALISE_REQUIRED_PARSERS ?= $(if $(filter 1,$(VALISE_REQUIRE_TOOLING)),sh$(comma)dash$(comma)ksh$(comma)busybox-ash$(comma)bash$(comma)fish,)
 
-.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e
+.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-compile-assemble test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e
 .NOTPARALLEL: check test
 
 TEST_ENV_PATH = /usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
@@ -64,6 +64,7 @@ test: test-runner-quarantine
 	@$(MAKE) test-contrib-modules
 	@$(MAKE) test-non-macos-runtime
 	@$(MAKE) test-cli-posix
+	@$(MAKE) test-compile-assemble
 	@$(MAKE) test-compiler-benchmark
 	@$(MAKE) test-fish-runtime
 	@$(MAKE) test-doc-links
@@ -189,6 +190,9 @@ test-non-macos-runtime: tests/non-macos-runtime.test.sh manifests/parser-support
 	@$(RUNTIME_TEST_RUNNER)
 
 test-cli-posix: tests/cli-posix.test.sh bin/valise
+	@$(TEST_RUNNER)
+
+test-compile-assemble: tests/compile-assemble.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
 test-compiler-benchmark: tests/compiler-benchmark.test.sh lib/compiler.awk

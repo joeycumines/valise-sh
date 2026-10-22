@@ -22,13 +22,14 @@ usage() {
     "Usage: valise <command> [options]" \
     "" \
     "Commands:" \
-    "  init [bash|zsh|ksh|fish]   Output shell integration snippet" \
-    "  install                    Install or update the active release" \
+    "  init [bash|zsh|ksh|sh|profile|fish] [--compiled]  Output shell integration snippet" \
+    "  install [--no-shell-integration]  Install or update the active release" \
     "  verify-active [--print-root] Verify the sealed active release" \
     "  doctor                     Run environment diagnostics" \
     "  variant [list|use <sha>]   List installed releases / switch active release" \
     "  make-manifest <tree> [--output <file>]  Write a release manifest for a tree" \
     "  compile [--bundle=<name>] [--variant=<name>] <output-dir>  (consuming project)" \
+    "  assemble [--bundle=<name>] [--variant=<name>] <out-dir>  Compile and build a release tree (consuming project)" \
     "  explain-variant [name]     Show variant details and per-shell impact (consuming project)" \
     "  explain-bundles            Explain installed bundle roots and closure (consuming project)" \
     "  layer-lint <name>          Validate a contribution layer structure (consuming project)" \
@@ -49,8 +50,56 @@ info() {
   printf 'valise: %s\n' "$*"
 }
 
-# POSIX shell path parent extraction avoids ambient dirname resolution in
-# manifest discovery and every subsequent source/destination validation path.
+# Lexically normalize an absolute path: collapse repeated slashes, drop "."
+# segments, and resolve ".." against the preceding component. Relative paths
+# are resolved against the physical working directory first.
+path_normalize() {
+  _path_norm_value=$1
+  case "$_path_norm_value" in
+    /*) ;;
+    *) _path_norm_value=$(pwd -P)/$_path_norm_value ;;
+  esac
+  _path_norm_out=
+  if [ "${IFS+x}" = x ]; then
+    _path_norm_ifs_was_set=1
+    _path_norm_old_ifs=${IFS-}
+  else
+    _path_norm_ifs_was_set=0
+    _path_norm_old_ifs=
+  fi
+  case $- in
+    *f*) _path_norm_glob_was_set=1 ;;
+    *) _path_norm_glob_was_set=0 ;;
+  esac
+  set -f
+  IFS=/
+  for _path_norm_part in $_path_norm_value; do
+    case "$_path_norm_part" in
+      ''|.) continue ;;
+      ..)
+        case "$_path_norm_out" in
+          '') ;;
+          */*) _path_norm_out=${_path_norm_out%/*} ;;
+          *) _path_norm_out= ;;
+        esac
+        continue
+        ;;
+    esac
+    _path_norm_out=${_path_norm_out:+$_path_norm_out/}$_path_norm_part
+  done
+  if [ "$_path_norm_ifs_was_set" -eq 1 ]; then
+    IFS=$_path_norm_old_ifs
+  else
+    unset IFS
+  fi
+  if [ "$_path_norm_glob_was_set" -eq 0 ]; then
+    set +f
+  fi
+  printf '/%s\n' "$_path_norm_out"
+}
+
+# POSIX path parent extraction avoids ambient dirname resolution in manifest
+# discovery and every subsequent source/destination validation path.
 path_parent() {
   _path_parent_value=$1
   # Strip trailing slashes so "out/" and "out" share one parent (".").
@@ -69,6 +118,20 @@ path_parent() {
     *) _path_parent_value=. ;;
   esac
   printf '%s\n' "$_path_parent_value"
+}
+
+# Directory of this script with symlinks resolved, so package installs that
+# expose bin/valise through a symlink (bun, npm) still find ../lib.
+valise_script_dir() {
+  _vsd_path=$0
+  while [ -L "$_vsd_path" ]; do
+    _vsd_target=$(readlink "$_vsd_path") || return 1
+    case "$_vsd_target" in
+      /*) _vsd_path=$_vsd_target ;;
+      *) _vsd_path=$(path_parent "$_vsd_path")/$_vsd_target ;;
+    esac
+  done
+  (cd "$(path_parent "$_vsd_path")" && pwd -P)
 }
 
 # Emit a single-quoted literal for generated POSIX shell code. The generated
@@ -527,7 +590,7 @@ prepare_manifest_rows() {
 }
 
 locate_manifest() {
-  _loc_script_dir=$(cd "$(path_parent "$0")" && pwd -P) || return 1
+  _loc_script_dir=$(valise_script_dir) || return 1
   _loc_repo_root="$_loc_script_dir/.."
   for _loc_candidate in     "$_loc_repo_root/../shell/install/profile-release.manifest"     "$_loc_repo_root/shell/install/profile-release.manifest"     "./shell/install/profile-release.manifest"
   do
@@ -2321,15 +2384,18 @@ print_fish_integration() {
 }
 
 cmd_init() {
-  _shell="${1:-}"
-  if [ "$#" -gt 0 ]; then
-    shift
-  fi
+  _shell=""
   _fish_source_tree_mode=0
+  _init_compiled=0
   for _arg do
     case "$_arg" in
       --source-tree) _fish_source_tree_mode=1 ;;
-      *) die "unknown init option: $_arg" ;;
+      --compiled) _init_compiled=1 ;;
+      -*) die "unknown init option: $_arg" ;;
+      *)
+        [ -z "$_shell" ] || die "usage: valise init [shell] [--source-tree] [--compiled]"
+        _shell=$_arg
+        ;;
     esac
   done
   if [ -z "$_shell" ]; then
@@ -2343,8 +2409,38 @@ cmd_init() {
     esac
   fi
 
+  if [ "$_init_compiled" -eq 1 ]; then
+    # Source the plan `valise compile` generated for the shell from the active
+    # release: generated/installed-modules.<shell>. A shell-specific startup
+    # file (.bash_profile, .zprofile, .kshrc) is only read by that shell, so
+    # its plan is fixed now. ~/.profile is read by several shells (bash when
+    # no .bash_profile/.bash_login exists, ksh, sh, and zsh only if sourced),
+    # so the `profile` target detects the running shell when the snippet runs
+    # and loads nothing for shells without a plan.
+    case "$_shell" in
+      bash|zsh|ksh) _init_plan_select="_valise_plan=$_shell" ;;
+      sh|profile) _init_plan_select='if [ -n "${BASH_VERSION-}" ]; then _valise_plan=bash; elif [ -n "${ZSH_VERSION-}" ]; then _valise_plan=zsh; elif [ -n "${KSH_VERSION-}" ]; then _valise_plan=ksh; else _valise_plan=; fi' ;;
+      *) die "--compiled supports bash, zsh, ksh, sh and profile (compile emits no $_shell plan)" ;;
+    esac
+    _shell_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
+    printf '%s\n' \
+      "# valise shell integration (compiled plan)" \
+      "_valise_active_link=${_shell_active_literal}" \
+      "$_init_plan_select" \
+      "if [ -n \"\$_valise_plan\" ] && _valise_active=\$(cd \"\$_valise_active_link\" 2>/dev/null && pwd -P) &&" \
+      "  [ -f \"\$_valise_active/generated/installed-modules.\$_valise_plan\" ]; then" \
+      "  VALISE_MODULE_ROOT=\"\$_valise_active\"" \
+      "  . \"\$_valise_active/generated/installed-modules.\$_valise_plan\"" \
+      "  unset VALISE_MODULE_ROOT" \
+      "fi" \
+      "unset _valise_active _valise_active_link _valise_plan"
+    return 0
+  fi
+
   case "$_shell" in
-    bash|zsh|ksh|sh)
+    bash|zsh|ksh|sh|profile)
+      # The loader snippet is POSIX, so `profile` (for ~/.profile) and `sh`
+      # share it; the entrypoint detects the running shell itself.
       # shell_quote() returns a POSIX single-quoted literal (e.g.
       # '/home/u/.config/valise/active'). Embed that literal directly
       # into the generated snippet as the right-hand side of an
@@ -2369,7 +2465,7 @@ cmd_init() {
       print_fish_integration
       ;;
     *)
-      die "unsupported shell: $_shell (use bash, zsh, ksh, or fish)"
+      die "unsupported shell: $_shell (use bash, zsh, ksh, sh, profile, or fish)"
       ;;
   esac
 }
@@ -2513,7 +2609,7 @@ cmd_variant() {
         for _rel in "$VALISE_RELEASES_DIR"/*/; do
           [ -d "$_rel" ] || continue
           _name=$(basename "$_rel")
-          if [ -L "$VALISE_ACTIVE_LINK" ] && [ "$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null)" = "$_rel" ]; then
+          if [ -L "$VALISE_ACTIVE_LINK" ] && [ "$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null)" = "${_rel%/}" ]; then
             printf '* %s (active)\n' "$_name"
           else
             printf '  %s\n' "$_name"
@@ -2568,10 +2664,12 @@ cmd_variant() {
 }
 
 cmd_install() {
+  _install_integration=1
   for _arg do
     case "$_arg" in
       --help|-h) usage; return 0 ;;
-      --*) die "unknown install option: $_arg (usage: valise install)" ;;
+      --no-shell-integration) _install_integration=0 ;;
+      --*) die "unknown install option: $_arg (usage: valise install [--no-shell-integration])" ;;
     esac
   done
 
@@ -2726,7 +2824,7 @@ cmd_install() {
   # currently expose the generated Fish plan; older releases may expose the
   # project Fish entrypoint, so the emitted integration handles both.
   _fish_path=$(trusted_utility_path fish 2>/dev/null || :)
-  if [ -n "$_fish_path" ]; then
+  if [ "$_install_integration" -eq 1 ] && [ -n "$_fish_path" ]; then
     _fish_conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
     _fish_hook="$_fish_conf_dir/valise.fish"
     _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
@@ -2776,7 +2874,7 @@ cmd_install() {
     */zsh|zsh)   _posix_shell_name=zsh ;;
     */ksh|ksh)   _posix_shell_name=ksh ;;
   esac
-  if [ -n "$_posix_shell_name" ] && [ -n "${HOME:-}" ]; then
+  if [ "$_install_integration" -eq 1 ] && [ -n "$_posix_shell_name" ] && [ -n "${HOME:-}" ]; then
     _posix_platform=$(trusted_uname -s 2>/dev/null || echo unknown)
     _posix_profile=""
     case "$_posix_platform" in
@@ -2959,6 +3057,30 @@ _MM_SORTED_EOF
   info "manifest written: $_mm_out ($_mm_count files)"
 }
 
+# release_bundle_roots <src-root> <release-compiler> <shell> [bundle]
+# Print the seed modules for <shell>. Uses the consumer's Python release
+# compiler when present; otherwise reads shell/release/bundle-roots, a
+# tab-separated file of: bundle, shell, space-separated roots ("default" is
+# the bundle used when none is requested). A bundle with no rows is an error;
+# a shell with no row has no roots.
+release_bundle_roots() {
+  if [ -f "$2" ]; then
+    if [ -n "${4:-}" ]; then
+      python3 "$2" --root "$1" --bundle-roots "$3" --bundle "$4"
+    else
+      python3 "$2" --root "$1" --bundle-roots "$3"
+    fi
+    return
+  fi
+  _rbr_file="$1/shell/release/bundle-roots"
+  [ -f "$_rbr_file" ] || { printf 'valise: error: need %s or %s\n' "$2" "$_rbr_file" >&2; return 1; }
+  awk -F '\t' -v b="${4:-default}" -v s="$3" '
+    /^[[:space:]]*#/ || NF == 0 { next }
+    $1 == b { known = 1; if ($2 == s && $3 != "") print $3 }
+    END { if (!known) { print "valise: error: unknown bundle: " b > "/dev/stderr"; exit 1 } }
+  ' "$_rbr_file"
+}
+
 cmd_compile() {
   _out_dir=""
   _variant="workstation-full"
@@ -2973,13 +3095,18 @@ cmd_compile() {
     esac
   done
   [ -n "$_out_dir" ] || die "usage: valise compile [--bundle=<name>] [--variant=<name>] <output-dir>"
-  _script_dir=$(cd "$(path_parent "$0")" && pwd -P)
+  _out_dir=$(path_normalize "$_out_dir")
+  [ "$_out_dir" != "/" ] || die "output directory must not be /"
+  _script_dir=$(valise_script_dir)
   _awk_compiler="$_script_dir/../lib/compiler.awk"
   [ -f "$_awk_compiler" ] || die "compiler.awk not found at $_awk_compiler"
 
   # Find source tree root (look for shell/release/ relative to script or cwd)
   _src_root=""
-  for _candidate in "$_script_dir/../../.." "$_script_dir/../.." "$_script_dir/.." "."; do
+  # A project invoking the CLI from its root must win over a source tree that
+  # happens to contain the package. Assemble resolves its prelude from the
+  # working tree, so compile and assemble must agree on this root.
+  for _candidate in "." "$_script_dir/.." "$_script_dir/../.." "$_script_dir/../../.."; do
     if [ -f "$_candidate/shell/release/module-registry.tsv" ]; then
       _src_root=$(cd "$_candidate" && pwd -P)
       break
@@ -2990,8 +3117,8 @@ cmd_compile() {
   _registry="$_src_root/shell/release/module-registry.tsv"
   _roots_json="$_src_root/shell/release/profile-release.json"
   _release_compiler="$_src_root/hack/compile-shell-profile-release.py"
-  [ -f "$_release_compiler" ] || die "release compiler not found: $_release_compiler"
   _prelude="$_src_root/submodule/valise-sh/lib/capabilities.sh"
+  [ -r "$_prelude" ] || _prelude="$_script_dir/../lib/capabilities.sh"
   _variants_file="$_src_root/shell/release/install-variants"
   _variant_matches=$(awk -F'\t' -v v="$_variant" '$1 == v { count++ } END { print count + 0 }' "$_variants_file")
   [ "$_variant_matches" -eq 1 ] || die "unknown or ambiguous variant: $_variant"
@@ -2999,7 +3126,7 @@ cmd_compile() {
   # Extract sp_cap_ functions matching Python SHELL_FUNCTION_DEFINITION regex
   # Pattern: ^name() { (file-appearance order, no sorting)
   [ -r "$_prelude" ] || die "capabilities prelude not found: $_prelude"
-  _prelude_fns=$(sed -n 's/^\([a-z_][a-zA-Z0-9_]*\)()[[:space:]]*{.*/\1/p' "$_prelude" | grep '^sp_cap_' | tr '\n' ' ')
+  _prelude_fns=$(sed -n 's/^\([a-z_][a-zA-Z0-9_]*\)()[[:space:]]*[({].*/\1/p' "$_prelude" | grep '^sp_cap_' | tr '\n' ' ')
   [ -n "$_prelude_fns" ] || die "capabilities prelude contains no sp_cap_ functions"
 
   # Extract exclusion list and validate each exclusion against the identity
@@ -3029,7 +3156,7 @@ cmd_compile() {
   if [ "$_bundle_requested" -eq 1 ]; then
     [ -n "$_bundle" ] || die "bundle name must not be empty"
     # Validate bundle identity before creating the output transaction.
-    python3 "$_release_compiler" --root "$_src_root" --bundle-roots bash --bundle "$_bundle" >/dev/null ||
+    release_bundle_roots "$_src_root" "$_release_compiler" bash "$_bundle" >/dev/null ||
       die "failed to resolve bundle roots for bash"
   fi
 
@@ -3037,11 +3164,8 @@ cmd_compile() {
   # rejected before any plan is generated, so a failed compile can never leave
   # a partially replaced output tree. An empty existing directory is supported
   # for callers that pre-create their destination; it is replaced only after
-  # every plan has compiled successfully. Trailing slashes are normalized so
-  # "out/" and "out" are the same destination (see path_parent).
-  while [ "$_out_dir" != "/" ] && [ "${_out_dir%/}" != "$_out_dir" ]; do
-    _out_dir=${_out_dir%/}
-  done
+  # every plan has compiled successfully. Dot segments and trailing slashes
+  # were normalized above so one destination always has one staging path.
   _out_parent=$(path_parent "$_out_dir")
   _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
   if [ ! -d "$_out_parent" ]; then
@@ -3069,9 +3193,9 @@ cmd_compile() {
   for _shell in bash zsh ksh wrapper_lifecycle; do
     # Extract roots for this shell from JSON using POSIX tools
     if [ "$_bundle_requested" -eq 1 ]; then
-      _roots=$(python3 "$_release_compiler" --root "$_src_root" --bundle-roots "$_shell" --bundle "$_bundle") || die "failed to resolve bundle roots for $_shell"
+      _roots=$(release_bundle_roots "$_src_root" "$_release_compiler" "$_shell" "$_bundle") || die "failed to resolve bundle roots for $_shell"
     else
-      _roots=$(python3 "$_release_compiler" --root "$_src_root" --bundle-roots "$_shell") || die "failed to resolve bundle roots for $_shell"
+      _roots=$(release_bundle_roots "$_src_root" "$_release_compiler" "$_shell") || die "failed to resolve bundle roots for $_shell"
     fi
 
     [ -n "$_roots" ] || continue
@@ -3099,6 +3223,8 @@ cmd_compile() {
           esac
           [ "$_excluded" -eq 1 ] && break
         done
+        # Bare seed names are project modules, as for exclusions above.
+        case "$_seed" in *@*) ;; *) _seed="$_seed@shell/module.d" ;; esac
         [ "$_excluded" -eq 1 ] || _filtered_roots="$_filtered_roots $_seed"
       done
       _filtered_roots="${_filtered_roots# }"
@@ -3157,7 +3283,12 @@ cmd_compile() {
               req = req (req == "" ? "" : " ") resolved
             }
             load_path = row_load[identity]
-            if (source == "shell/layers/contrib/module.d") load_path = "layers/contrib/" load_path
+            if (source ~ /^shell\/layers\/[^\/]+\/module\.d$/) {
+              layer = source
+              sub(/^shell\/layers\//, "", layer)
+              sub(/\/module\.d$/, "", layer)
+              load_path = "layers/" layer "/" load_path
+            }
             printf "MOD:%s\t%s\t%s\n", identity, req, load_path
           }
         }
@@ -3182,9 +3313,143 @@ cmd_compile() {
 }
 
 
+# valise assemble [--variant=<name>] [--bundle=<name>] <out-dir>
+# Build a release tree for compiled plans from the consuming project in the
+# current directory. The tree holds exactly what the plans source, at the paths
+# they source it from:
+#   generated/installed-modules.<shell>       valise compile output
+#   vendor/shell-profile/lib/capabilities.sh  the engine capability prelude
+#   <load> and layers/<provider>/<load>        every registry module body, with
+#                                             its .meta beside it in module.d/
+#   shell/release/                            the registry, roots and variants
+cmd_assemble() {
+  _as_out=""
+  _as_variant=""
+  _as_bundle=""
+  _as_variant_set=0
+  _as_bundle_set=0
+  for _as_arg do
+    case "$_as_arg" in
+      --variant=*) [ "$_as_variant_set" -eq 0 ] || die "duplicate --variant option"; _as_variant=${_as_arg#--variant=}; _as_variant_set=1 ;;
+      --bundle=*) [ "$_as_bundle_set" -eq 0 ] || die "duplicate --bundle option"; _as_bundle=${_as_arg#--bundle=}; _as_bundle_set=1 ;;
+      --help|-h) printf '%s\n' "usage: valise assemble [--variant=<name>] [--bundle=<name>] <out-dir>"; return 0 ;;
+      --*) die "unknown assemble option: $_as_arg" ;;
+      *) [ -z "$_as_out" ] || die "usage: valise assemble [--variant=<name>] [--bundle=<name>] <out-dir>"; _as_out=$_as_arg ;;
+    esac
+  done
+  [ -n "$_as_out" ] || die "usage: valise assemble [--variant=<name>] [--bundle=<name>] <out-dir>"
+  [ "$_as_variant_set" -eq 0 ] || [ -n "$_as_variant" ] || die "variant name must not be empty"
+  [ "$_as_bundle_set" -eq 0 ] || [ -n "$_as_bundle" ] || die "bundle name must not be empty"
+  _as_src=$(pwd -P) || die "cannot resolve working directory"
+  _as_registry="$_as_src/shell/release/module-registry.tsv"
+  [ -f "$_as_registry" ] || die "run from the consuming project root (need shell/release/module-registry.tsv)"
+  _as_out=$(path_normalize "$_as_out")
+  [ "$_as_out" != "/" ] || die "output directory must not be /"
+  _as_output_existed=0
+  if [ -e "$_as_out" ] || [ -L "$_as_out" ]; then
+    [ -d "$_as_out" ] && [ ! -L "$_as_out" ] || die "output path is not a directory: $_as_out"
+    for _as_entry in "$_as_out"/* "$_as_out"/.[!.]* "$_as_out"/..?*; do
+      if [ -e "$_as_entry" ] || [ -L "$_as_entry" ]; then
+        die "output directory must be empty: $_as_out"
+      fi
+    done
+    _as_output_existed=1
+  fi
+  _as_script_dir=$(valise_script_dir) || die "cannot locate the valise engine"
+  # Compile prefers a consumer-supplied submodule prelude over the engine's.
+  # Assemble must package the same file the generated plans were built against.
+  _as_prelude="$_as_src/submodule/valise-sh/lib/capabilities.sh"
+  [ -r "$_as_prelude" ] || _as_prelude="$_as_script_dir/../lib/capabilities.sh"
+  [ -r "$_as_prelude" ] || die "capabilities prelude not found: $_as_prelude"
+  _as_parent=$(path_parent "$_as_out")
+  _as_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  _as_cp=$(trusted_utility_path cp) || die "no trusted cp utility available"
+  _as_find=$(trusted_utility_path find) || die "no trusted find utility available"
+  _as_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+  _as_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+  [ -d "$_as_parent" ] || "$_as_mkdir" -p "$_as_parent" || die "cannot create output parent: $_as_parent"
+  # Build beside the destination and publish only after the complete tree and
+  # manifest exist, so a failed compile or copy never leaves a partial release.
+  _stage=$(trusted_mktemp_at "$_as_parent" dir "$_as_parent/.valise-assemble.XXXXXX") ||
+    die "cannot create assemble staging directory"
+
+  if [ -n "$_as_variant" ] && [ -n "$_as_bundle" ]; then
+    "$0" compile --variant="$_as_variant" --bundle="$_as_bundle" "$_stage/generated" || die "valise compile failed"
+  elif [ -n "$_as_variant" ]; then
+    "$0" compile --variant="$_as_variant" "$_stage/generated" || die "valise compile failed"
+  elif [ -n "$_as_bundle" ]; then
+    "$0" compile --bundle="$_as_bundle" "$_stage/generated" || die "valise compile failed"
+  else
+    "$0" compile "$_stage/generated" || die "valise compile failed"
+  fi
+  "$_as_mkdir" -p "$_stage/vendor/shell-profile/lib" "$_stage/shell" || die "cannot create release tree"
+  "$_as_cp" "$_as_prelude" "$_stage/vendor/shell-profile/lib/capabilities.sh" || die "cannot copy prelude"
+  "$_as_cp" -R "$_as_src/shell/release" "$_stage/shell/release" || die "cannot copy shell/release"
+
+  # Registry columns: 1 name, 9 load, 11 source (the directory holding the
+  # .meta). A primary module resolves against the parent of its source
+  # directory; a layer module under shell/layers/<provider>/module.d lands at
+  # layers/<provider>/ in the release, matching the compiled plan paths.
+  _as_tab=$(printf '\t')
+  _as_rows="$_stage/.registry-rows"
+  "$_as_awk" -F "$_as_tab" 'NR > 1 && $1 != "" && $11 != "shell/helpers" { print $1 "\t" $9 "\t" $11 }' \
+    "$_as_registry" >"$_as_rows" || die "cannot read module registry"
+  while IFS="$_as_tab" read -r _as_name _as_load _as_source; do
+    [ -n "$_as_name" ] || continue
+    # Module names index both source and destination paths. Reject anything
+    # that is not a metadata identifier before either path is constructed.
+    case "$_as_name" in
+      [abcdefghijklmnopqrstuvwxyz_]*) ;;
+      *) die "invalid module name in registry: $_as_name" ;;
+    esac
+    case "$_as_name" in
+      *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*) die "invalid module name in registry: $_as_name" ;;
+    esac
+    case "$_as_source" in
+      shell/module.d) _as_prefix= ;;
+      shell/layers/*/module.d)
+        _as_layer=${_as_source#shell/layers/}
+        _as_layer=${_as_layer%/module.d}
+        case "$_as_layer" in
+          ""|*/*|.*) die "invalid layer source in registry: $_as_source" ;;
+        esac
+        _as_prefix="layers/$_as_layer/"
+        ;;
+      *) die "unsupported registry source: $_as_source (expected shell/module.d or shell/layers/<provider>/module.d)" ;;
+    esac
+    case "$_as_load" in
+      ""|/*|.|..|./*|../*|*/.|*/..|*/./*|*/../*|*//*) die "invalid load path in registry for $_as_name: $_as_load" ;;
+    esac
+    _as_root=${_as_source%/module.d}
+    for _as_pair in "$_as_source/$_as_name.meta:${_as_prefix}module.d/$_as_name.meta" "$_as_root/$_as_load:$_as_prefix$_as_load"; do
+      _as_from="$_as_src/${_as_pair%%:*}"
+      _as_to="$_stage/${_as_pair#*:}"
+      source_path_is_physical "$_as_src" "${_as_pair%%:*}" ||
+        die "registry file path contains a symlink: ${_as_pair%%:*}"
+      [ -f "$_as_from" ] && [ ! -L "$_as_from" ] ||
+        die "registry file missing or a symlink: ${_as_pair%%:*}"
+      [ ! -e "$_as_to" ] && [ ! -L "$_as_to" ] || die "release path collision: ${_as_pair#*:}"
+      "$_as_mkdir" -p "$(path_parent "$_as_to")" &&
+        "$_as_cp" "$_as_from" "$_as_to" || die "cannot copy ${_as_pair%%:*}"
+    done
+  done <"$_as_rows"
+  _as_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
+  "$_as_rm" -f "$_as_rows" || die "cannot remove assemble scratch file"
+  "$_as_find" "$_stage" -type f -exec "$_as_chmod" 0644 {} + || die "cannot normalise file modes"
+  "$0" make-manifest "$_stage" || die "valise make-manifest failed"
+
+  _as_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
+  if [ "$_as_output_existed" -eq 1 ]; then
+    _as_rmdir=$(trusted_utility_path rmdir) || die "no trusted rmdir utility available"
+    "$_as_rmdir" "$_as_out" || die "cannot clear empty output directory"
+  fi
+  "$_as_mv" "$_stage" "$_as_out" || die "cannot publish assembled release"
+  _stage=""
+}
+
 cmd_explain_variant() {
   _variant="${1:-workstation-full}"
-  _script_dir=$(cd "$(path_parent "$0")" && pwd -P)
+  _script_dir=$(valise_script_dir)
   _src_root=""
   for _candidate in "$_script_dir/../../.." "$_script_dir/../.." "$_script_dir/.." "."; do
     if [ -f "$_candidate/shell/release/install-variants" ]; then
@@ -3198,7 +3463,6 @@ cmd_explain_variant() {
   [ -f "$_variants_file" ] || die "install-variants file not found"
 
   _release_compiler="$_src_root/hack/compile-shell-profile-release.py"
-  [ -f "$_release_compiler" ] || die "release compiler not found: $_release_compiler"
 
   _exclude_list=$(awk -F'	' -v v="$_variant" '$1 == v { print $3 }' "$_variants_file")
   _desc=$(awk -F'	' -v v="$_variant" '$1 == v { print $2 }' "$_variants_file")
@@ -3214,7 +3478,7 @@ Per-shell impact:
 '
 
   for _shell in bash zsh ksh wrapper_lifecycle fish; do
-    _roots=$(python3 "$_release_compiler" --root "$_src_root" --bundle-roots "$_shell") || continue
+    _roots=$(release_bundle_roots "$_src_root" "$_release_compiler" "$_shell") || continue
 
     _count=0
     _excluded=0
@@ -3242,7 +3506,7 @@ Per-shell impact:
 }
 
 cmd_explain_bundles() {
-  _script_dir=$(cd "$(path_parent "$0")" && pwd -P)
+  _script_dir=$(valise_script_dir)
   _src_root=""
   for _candidate in "$_script_dir/../../.." "$_script_dir/../.." "$_script_dir/.." "."; do
     if [ -f "$_candidate/shell/release/bundles.json" ] && [ -f "$_candidate/shell/release/profile-release.json" ]; then
@@ -3263,7 +3527,7 @@ cmd_layer_lint() {
   _layer_name="${1:-}"
   [ -n "$_layer_name" ] || die "usage: valise layer-lint <layer-name>"
 
-  _script_dir=$(cd "$(path_parent "$0")" && pwd -P)
+  _script_dir=$(valise_script_dir)
   _src_root=""
   for _candidate in "$_script_dir/../../.." "$_script_dir/../.." "$_script_dir/.." "."; do
     if [ -d "$_candidate/shell/layers" ]; then
@@ -3298,6 +3562,7 @@ case "$_cmd" in
   variant) cmd_variant "$@" ;;
   make-manifest) cmd_make_manifest "$@" ;;
   compile) cmd_compile "$@" ;;
+  assemble) cmd_assemble "$@" ;;
   explain-variant) cmd_explain_variant "$@" ;;
   explain-bundles) cmd_explain_bundles ;;
   layer-lint)  cmd_layer_lint "$@" ;;
