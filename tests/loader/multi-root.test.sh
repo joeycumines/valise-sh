@@ -316,7 +316,7 @@ _leak_check=$(
     . "$METADATA_SH"
     . "$LOADER_SH"
     sp_loader_load_modules "$PRIMARY_ROOT" contrib_dep strict ordinary >/dev/null 2>&1
-    _leaked_spl_vars=$(compgen -A variable _spl_ 2>/dev/null | tr "\n" " ")
+    _leaked_spl_vars=$(compgen -A variable _spl 2>/dev/null | tr "\n" " ")
     _leaked_internal_funcs=$(compgen -A function _sp_loader_ 2>/dev/null | tr "\n" " ")
     printf "LEAKED=[%s][%s]\n" "$_leaked_spl_vars" "$_leaked_internal_funcs"
   '

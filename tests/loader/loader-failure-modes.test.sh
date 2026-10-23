@@ -92,6 +92,7 @@ for _fixture in \
   module.d/clobber_shell_state.meta \
   module.d/clobber_expected.meta \
   module.d/clobber_wrapper_state.meta \
+  module.d/clobber_word_state.meta \
   module.d/clobber_state.meta \
   module.d/clobber_search_path.meta \
   module.d/clobber_unset.meta \
@@ -151,6 +152,7 @@ for _fixture in \
   modules/clobber_shell_state.sh \
   modules/clobber_expected.sh \
   modules/clobber_wrapper_state.sh \
+  modules/clobber_word_state.sh \
   modules/clobber_search_path.sh \
   modules/clobber_state.sh \
   modules/clobber_unset.sh \
@@ -297,7 +299,7 @@ run_loader() {
       ;;
     esac
     _leaked_upper_vars=$(compgen -A variable _SP_LOADER_ 2>/dev/null | tr '\n' ' ')
-    _leaked_spl_vars=$(compgen -A variable _spl_ 2>/dev/null | tr '\n' ' ')
+    _leaked_spl_vars=$(compgen -A variable _spl 2>/dev/null | tr '\n' ' ')
     _leaked_lower_vars=$(compgen -A variable _sp_loader_ 2>/dev/null | tr '\n' ' ')
     _leaked_internal_funcs=$(compgen -A function _sp_loader_ 2>/dev/null | tr '\n' ' ')
     if [ -n "$_leaked_upper_vars" ]; then
@@ -621,6 +623,12 @@ assert_eq 'module clobbering wrapper and cwd trust state fails closed' 1 "$_stat
 assert_contains 'wrapper/cwd guard clobber diagnostic names loader namespace' "$_err" 'loader private namespace modified'
 assert_eq 'wrapper/cwd guard clobber attempts module body before detection' 'clobber_wrapper_state_started' "$_trace_out"
 assert_no_loader_leaks_with_output 'wrapper/cwd guard clobber restores trusted state and caller cwd' "$(printf 'LOADER_RETURNED=%s\nPWD_AFTER=/tmp\nOLDPWD_AFTER=/var' "$_status")"
+
+run_loader clobber_word_state clobber_word_state strict ordinary
+assert_eq 'module clobbering loader word-state membership fails closed' 1 "$_status"
+assert_contains 'word-state clobber diagnostic names loader namespace' "$_err" 'loader private namespace modified'
+assert_eq 'word-state clobber attempts module body before detection' 'clobber_word_state_started' "$_trace_out"
+assert_no_loader_leaks 'word-state clobber restores loader membership words'
 
 run_loader private_state_clobber clobber_state strict ordinary
 assert_eq 'module clobbering loader non-cleanup private state fails closed' 1 "$_status"
