@@ -661,6 +661,30 @@ sp_loader_load_modules() {
     _spl_return=1
   fi
 
+  if [ "$_spl_return" -eq 0 ] && [ "${VALISE_RELOAD:-}" = 1 ]; then
+    while IFS= read -r _spl_mod || [ -n "$_spl_mod" ]; do
+      [ -n "$_spl_mod" ] || continue
+      _spl_record=$_spl_tmp/meta/$_spl_mod
+      _spl_exports=$(command sed -n 's/^exports=//p' "$_spl_record")
+      if [ "${IFS+x}" = x ]; then
+        _spl_reload_ifs_was_set=1
+        _spl_reload_old_ifs=${IFS-}
+      else
+        _spl_reload_ifs_was_set=0
+        _spl_reload_old_ifs=
+      fi
+      IFS=' '
+      for _spl_export in $_spl_exports; do
+        unset -f "$_spl_export" 2>/dev/null || :
+      done
+      if [ "$_spl_reload_ifs_was_set" -eq 1 ]; then
+        IFS=$_spl_reload_old_ifs
+      else
+        unset IFS
+      fi
+    done <"$_spl_tmp/order"
+  fi
+
   if [ "$_spl_return" -eq 0 ]; then
     while IFS= read -r _spl_mod || [ -n "$_spl_mod" ]; do
       [ -n "$_spl_mod" ] || continue
@@ -698,6 +722,7 @@ sp_loader_load_modules() {
       _spl_load_hook=$(command sed -n 's/^load_hook=//p' "$_spl_record")
       _spl_exports=$(command sed -n 's/^exports=//p' "$_spl_record")
       _spl_exports_to_cleanup=
+      _spl_wrapper_exports=
       _spl_load_status=0
       if [ "${IFS+x}" = x ]; then
         _spl_export_ifs_was_set=1
@@ -708,7 +733,20 @@ sp_loader_load_modules() {
       fi
       IFS=' '
       for _spl_export in $_spl_exports; do
-        if command -v "$_spl_export" >/dev/null 2>&1; then
+        _spl_export_conflict=0
+        if command alias "$_spl_export" >/dev/null 2>&1; then
+          _spl_export_conflict=1
+        fi
+        if _spl_export_lookup=$(command -v "$_spl_export" 2>/dev/null); then
+          case $_spl_export_lookup in
+          alias\ *) _spl_export_conflict=1 ;;
+          */*) _spl_wrapper_exports=${_spl_wrapper_exports:+$_spl_wrapper_exports }$_spl_export ;;
+          *) _spl_export_conflict=1 ;;
+          esac
+        else
+          _spl_export_lookup=
+        fi
+        if [ "$_spl_export_conflict" -ne 0 ]; then
           command printf 'loader: %s\n' "$_spl_mod: declared export already exists before load: $_spl_export" >&2
           _spl_load_status=1
         else
@@ -766,8 +804,27 @@ sp_loader_load_modules() {
       _spl_guard_load_hook=$_spl_expected_load_hook
       _spl_guard_exports=$_spl_expected_exports
       _spl_guard_exports_to_cleanup=$_spl_expected_exports_to_cleanup
-      _spl_expected_pwd=$(command pwd -P 2>/dev/null)
+      _spl_guard_wrapper_exports=$_spl_wrapper_exports
+      _spl_expected_pwd_was_set=0
+      _spl_expected_pwd=
+      if [ "${PWD+x}" = x ]; then
+        _spl_expected_pwd_was_set=1
+        _spl_expected_pwd=${PWD-}
+      fi
+      _spl_expected_oldpwd_was_set=0
+      _spl_expected_oldpwd=
+      if [ "${OLDPWD+x}" = x ]; then
+        _spl_expected_oldpwd_was_set=1
+        _spl_expected_oldpwd=${OLDPWD-}
+      fi
+      _spl_expected_pwd_physical=$(command pwd -P 2>/dev/null)
       _spl_expected_pwd_status=$?
+      _spl_guard_expected_pwd_was_set=$_spl_expected_pwd_was_set
+      _spl_guard_expected_pwd=$_spl_expected_pwd
+      _spl_guard_expected_oldpwd_was_set=$_spl_expected_oldpwd_was_set
+      _spl_guard_expected_oldpwd=$_spl_expected_oldpwd
+      _spl_guard_expected_pwd_physical=$_spl_expected_pwd_physical
+      _spl_guard_expected_pwd_status=$_spl_expected_pwd_status
       if [ "${IFS+x}" = x ]; then
         _spl_expected_ifs_was_set=1
         _spl_expected_ifs=${IFS-}
@@ -803,7 +860,7 @@ sp_loader_load_modules() {
       *x*) _spl_expected_xtrace_was_set=1 ;;
       *) _spl_expected_xtrace_was_set=0 ;;
       esac
-      _spl_reserved_utility_pattern='^[[:space:]]*(((function[[:space:]]+)?(command|unset|readonly|return|eval)[[:space:]]*[(][)][[:space:]]*[{])|(function[[:space:]]+(command|unset|readonly|return|eval)([[:space:]]|$))|(readonly[[:space:]].*-f[[:space:]].*(command|unset|readonly|return|eval)([[:space:]]|$)))'
+      _spl_reserved_utility_pattern='^[[:space:]]*(((function[[:space:]]+)?(command|unset|readonly|return|eval|builtin)[[:space:]]*[(][)][[:space:]]*[{])|(function[[:space:]]+(command|unset|readonly|return|eval|builtin)([[:space:]]|$))|(readonly[[:space:]].*-f[[:space:]].*(command|unset|readonly|return|eval|builtin)([[:space:]]|$)))'
       if [ "$_spl_load_status" -eq 0 ] && [ -n "$_spl_load_hook" ]; then
         if command -v "$_spl_load_hook" >/dev/null 2>&1; then
           _spl_hook_body=$_spl_tmp/hook-body
@@ -823,7 +880,7 @@ sp_loader_load_modules() {
           command printf 'loader: %s\n' "$_spl_mod: load hook not found: $_spl_load_hook" >&2
           _spl_load_status=127
         fi
-      elif [ "$_spl_load_status" -eq 0 ]; then
+      elif [ "$_spl_load_status" -eq 0 ] && [ -n "$_spl_load" ]; then
         if [ ! -f "$_spl_tmp/roots/$_spl_mod" ]; then
           command printf 'loader: %s\n' "$_spl_mod: providing module root was not recorded during discovery" >&2
           _spl_load_status=126
@@ -845,7 +902,7 @@ sp_loader_load_modules() {
           fi
         fi
       fi
-      unset -f command 2>/dev/null || :
+      unset -f command builtin 2>/dev/null || :
       case $- in
       *u*)
         _spl_after_nounset_was_set=1
@@ -854,7 +911,7 @@ sp_loader_load_modules() {
       *) _spl_after_nounset_was_set=0 ;;
       esac
       _spl_private_modified=0
-      if [ "${_spl_expected_tmp-}" != "${_spl_guard_tmp-}" ] || [ "${_spl_expected_cleanup_tmp-}" != "${_spl_guard_cleanup_tmp-}" ] || [ "${_spl_expected_tmp_parent-}" != "${_spl_guard_tmp_parent-}" ] || [ "${_spl_expected_tmp_sentinel-}" != "${_spl_guard_tmp_sentinel-}" ] || [ "${_spl_expected_root-}" != "${_spl_guard_root-}" ] || [ "${_spl_expected_wanted-}" != "${_spl_guard_wanted-}" ] || [ "${_spl_expected_mode-}" != "${_spl_guard_mode-}" ] || [ "${_spl_expected_phase-}" != "${_spl_guard_phase-}" ] || [ "${_spl_expected_return-}" != "${_spl_guard_return-}" ] || [ "${_spl_expected_strict_error-}" != "${_spl_guard_strict_error-}" ] || [ "${_spl_expected_current_shell-}" != "${_spl_guard_current_shell-}" ] || [ "${_spl_expected_current_platform-}" != "${_spl_guard_current_platform-}" ] || [ "${_spl_expected_mod-}" != "${_spl_guard_mod-}" ] || [ "${_spl_expected_record-}" != "${_spl_guard_record-}" ] || [ "${_spl_expected_load-}" != "${_spl_guard_load-}" ] || [ "${_spl_expected_load_hook-}" != "${_spl_guard_load_hook-}" ] || [ "${_spl_expected_exports-}" != "${_spl_guard_exports-}" ] || [ "${_spl_expected_exports_to_cleanup-}" != "${_spl_guard_exports_to_cleanup-}" ] || [ "${_spl_expected_search_path-}" != "${_spl_guard_search_path-}" ] || [ "${_spl_expected_meta_file-}" != "${_spl_guard_meta_file-}" ] || [ "${_spl_expected_meta_root-}" != "${_spl_guard_meta_root-}" ] || [ "${_spl_expected_layer-}" != "${_spl_guard_layer-}" ] || [ "${_spl_expected_dep_exists-}" != "${_spl_guard_dep_exists-}" ]; then
+      if [ "${_spl_expected_tmp-}" != "${_spl_guard_tmp-}" ] || [ "${_spl_expected_cleanup_tmp-}" != "${_spl_guard_cleanup_tmp-}" ] || [ "${_spl_expected_tmp_parent-}" != "${_spl_guard_tmp_parent-}" ] || [ "${_spl_expected_tmp_sentinel-}" != "${_spl_guard_tmp_sentinel-}" ] || [ "${_spl_expected_root-}" != "${_spl_guard_root-}" ] || [ "${_spl_expected_wanted-}" != "${_spl_guard_wanted-}" ] || [ "${_spl_expected_mode-}" != "${_spl_guard_mode-}" ] || [ "${_spl_expected_phase-}" != "${_spl_guard_phase-}" ] || [ "${_spl_expected_return-}" != "${_spl_guard_return-}" ] || [ "${_spl_expected_strict_error-}" != "${_spl_guard_strict_error-}" ] || [ "${_spl_expected_current_shell-}" != "${_spl_guard_current_shell-}" ] || [ "${_spl_expected_current_platform-}" != "${_spl_guard_current_platform-}" ] || [ "${_spl_expected_mod-}" != "${_spl_guard_mod-}" ] || [ "${_spl_expected_record-}" != "${_spl_guard_record-}" ] || [ "${_spl_expected_load-}" != "${_spl_guard_load-}" ] || [ "${_spl_expected_load_hook-}" != "${_spl_guard_load_hook-}" ] || [ "${_spl_expected_exports-}" != "${_spl_guard_exports-}" ] || [ "${_spl_expected_exports_to_cleanup-}" != "${_spl_guard_exports_to_cleanup-}" ] || [ "${_spl_wrapper_exports-}" != "${_spl_guard_wrapper_exports-}" ] || [ "${_spl_expected_pwd_was_set-}" != "${_spl_guard_expected_pwd_was_set-}" ] || [ "${_spl_expected_pwd-}" != "${_spl_guard_expected_pwd-}" ] || [ "${_spl_expected_oldpwd_was_set-}" != "${_spl_guard_expected_oldpwd_was_set-}" ] || [ "${_spl_expected_oldpwd-}" != "${_spl_guard_expected_oldpwd-}" ] || [ "${_spl_expected_pwd_physical-}" != "${_spl_guard_expected_pwd_physical-}" ] || [ "${_spl_expected_pwd_status-}" != "${_spl_guard_expected_pwd_status-}" ] || [ "${_spl_expected_search_path-}" != "${_spl_guard_search_path-}" ] || [ "${_spl_expected_meta_file-}" != "${_spl_guard_meta_file-}" ] || [ "${_spl_expected_meta_root-}" != "${_spl_guard_meta_root-}" ] || [ "${_spl_expected_layer-}" != "${_spl_guard_layer-}" ] || [ "${_spl_expected_dep_exists-}" != "${_spl_guard_dep_exists-}" ]; then
         _spl_private_modified=1
         _spl_expected_tmp=$_spl_guard_tmp
         _spl_expected_cleanup_tmp=$_spl_guard_cleanup_tmp
@@ -879,6 +936,13 @@ sp_loader_load_modules() {
         _spl_expected_load_hook=$_spl_guard_load_hook
         _spl_expected_exports=$_spl_guard_exports
         _spl_expected_exports_to_cleanup=$_spl_guard_exports_to_cleanup
+        _spl_wrapper_exports=$_spl_guard_wrapper_exports
+        _spl_expected_pwd_was_set=$_spl_guard_expected_pwd_was_set
+        _spl_expected_pwd=$_spl_guard_expected_pwd
+        _spl_expected_oldpwd_was_set=$_spl_guard_expected_oldpwd_was_set
+        _spl_expected_oldpwd=$_spl_guard_expected_oldpwd
+        _spl_expected_pwd_physical=$_spl_guard_expected_pwd_physical
+        _spl_expected_pwd_status=$_spl_guard_expected_pwd_status
       fi
       if [ "$_spl_tmp" != "$_spl_expected_tmp" ] || [ "$_spl_cleanup_tmp" != "$_spl_expected_cleanup_tmp" ] || [ "$_spl_tmp_parent" != "$_spl_expected_tmp_parent" ] || [ "$_spl_tmp_sentinel" != "$_spl_expected_tmp_sentinel" ] || [ "$_spl_root" != "$_spl_expected_root" ] || [ "$_spl_wanted" != "$_spl_expected_wanted" ] || [ "$_spl_mode" != "$_spl_expected_mode" ] || [ "$_spl_phase" != "$_spl_expected_phase" ] || [ "$_spl_return" != "$_spl_expected_return" ] || [ "$_spl_strict_error" != "$_spl_expected_strict_error" ] || [ "$_spl_current_shell" != "$_spl_expected_current_shell" ] || [ "$_spl_current_platform" != "$_spl_expected_current_platform" ] || [ "$_spl_mod" != "$_spl_expected_mod" ] || [ "$_spl_record" != "$_spl_expected_record" ] || [ "$_spl_load" != "$_spl_expected_load" ] || [ "$_spl_load_hook" != "$_spl_expected_load_hook" ] || [ "$_spl_exports" != "$_spl_expected_exports" ] || [ "$_spl_exports_to_cleanup" != "$_spl_expected_exports_to_cleanup" ] || [ "${_spl_search_path-}" != "${_spl_expected_search_path-}" ] || [ "${_spl_meta_file-}" != "${_spl_expected_meta_file-}" ] || [ "${_spl_meta_root-}" != "${_spl_expected_meta_root-}" ] || [ "${_spl_layer-}" != "${_spl_expected_layer-}" ] || [ "${_spl_dep_exists-}" != "${_spl_expected_dep_exists-}" ]; then
         _spl_private_modified=1
@@ -907,12 +971,73 @@ sp_loader_load_modules() {
         _spl_exports_to_cleanup=$_spl_expected_exports_to_cleanup
       fi
       _spl_shell_state_modified=0
+      _spl_after_pwd_physical=$(command pwd -P 2>/dev/null)
+      _spl_after_pwd_physical_status=$?
       if [ "$_spl_expected_pwd_status" -eq 0 ]; then
-        _spl_after_pwd=$(command pwd -P 2>/dev/null)
-        if [ "$_spl_after_pwd" != "$_spl_expected_pwd" ]; then
+        if [ "$_spl_after_pwd_physical_status" -ne 0 ] || [ "$_spl_after_pwd_physical" != "$_spl_expected_pwd_physical" ]; then
           _spl_shell_state_modified=1
         fi
-        CDPATH= command cd "$_spl_expected_pwd" 2>/dev/null || _spl_shell_state_modified=1
+      fi
+      if [ "${PWD+x}" = x ]; then
+        _spl_after_pwd_was_set=1
+      else
+        _spl_after_pwd_was_set=0
+      fi
+      if [ "$_spl_after_pwd_was_set" -ne "$_spl_expected_pwd_was_set" ]; then
+        _spl_shell_state_modified=1
+      elif [ "$_spl_expected_pwd_was_set" -eq 1 ] && [ "${PWD-}" != "$_spl_expected_pwd" ]; then
+        _spl_shell_state_modified=1
+      fi
+      if [ "${OLDPWD+x}" = x ]; then
+        _spl_after_oldpwd_was_set=1
+      else
+        _spl_after_oldpwd_was_set=0
+      fi
+      if [ "$_spl_after_oldpwd_was_set" -ne "$_spl_expected_oldpwd_was_set" ]; then
+        _spl_shell_state_modified=1
+      elif [ "$_spl_expected_oldpwd_was_set" -eq 1 ] && [ "${OLDPWD-}" != "$_spl_expected_oldpwd" ]; then
+        _spl_shell_state_modified=1
+      fi
+      _spl_pwd_cwd_restored=1
+      if [ "$_spl_expected_pwd_status" -eq 0 ]; then
+        if [ "$_spl_after_pwd_physical_status" -ne 0 ] || [ "$_spl_after_pwd_physical" != "$_spl_expected_pwd_physical" ]; then
+          _spl_cwd_restore_attempt=0
+          if [ "$_spl_current_shell" = zsh ]; then
+            if (\builtin cd . >/dev/null 2>&1); then
+              CDPATH= \builtin cd "$_spl_expected_pwd_physical" 2>/dev/null && _spl_cwd_restore_attempt=1
+            fi
+          else
+            CDPATH= command cd "$_spl_expected_pwd_physical" 2>/dev/null && _spl_cwd_restore_attempt=1
+          fi
+          _spl_restored_pwd_physical=$(command pwd -P 2>/dev/null)
+          _spl_restored_pwd_status=$?
+          if [ "$_spl_cwd_restore_attempt" -eq 0 ] || [ "$_spl_restored_pwd_status" -ne 0 ] || [ "$_spl_restored_pwd_physical" != "$_spl_expected_pwd_physical" ]; then
+            _spl_cwd_restore_attempt=0
+            if [ "$_spl_current_shell" != zsh ] && (\builtin cd . >/dev/null 2>&1); then
+              CDPATH= \builtin cd "$_spl_expected_pwd_physical" 2>/dev/null && _spl_cwd_restore_attempt=1
+            fi
+            _spl_restored_pwd_physical=$(command pwd -P 2>/dev/null)
+            _spl_restored_pwd_status=$?
+          fi
+          if [ "$_spl_cwd_restore_attempt" -eq 0 ] || [ "$_spl_restored_pwd_status" -ne 0 ] || [ "$_spl_restored_pwd_physical" != "$_spl_expected_pwd_physical" ]; then
+            _spl_shell_state_modified=1
+            _spl_pwd_cwd_restored=0
+          fi
+        fi
+      else
+        _spl_pwd_cwd_restored=0
+      fi
+      if [ "$_spl_pwd_cwd_restored" -eq 1 ]; then
+        if [ "$_spl_expected_pwd_was_set" -eq 1 ]; then
+          PWD=$_spl_expected_pwd
+        else
+          unset PWD
+        fi
+        if [ "$_spl_expected_oldpwd_was_set" -eq 1 ]; then
+          OLDPWD=$_spl_expected_oldpwd
+        else
+          unset OLDPWD
+        fi
       fi
       if [ "${IFS+x}" = x ]; then
         _spl_after_ifs_was_set=1
@@ -970,9 +1095,20 @@ sp_loader_load_modules() {
         fi
         IFS=' '
         for _spl_export in $_spl_exports; do
-          if ! command -v "$_spl_export" >/dev/null 2>&1; then
+          if ! _spl_export_lookup=$(command -v "$_spl_export" 2>/dev/null); then
             command printf 'loader: %s\n' "$_spl_mod: declared export missing: $_spl_export" >&2
             _spl_load_status=1
+          else
+            case " $_spl_wrapper_exports " in
+            *" $_spl_export "*)
+              case $_spl_export_lookup in
+              */*)
+                command printf 'loader: %s\n' "$_spl_mod: declared export was not provided by module: $_spl_export" >&2
+                _spl_load_status=1
+                ;;
+              esac
+              ;;
+            esac
           fi
         done
         if [ "$_spl_export_ifs_was_set" -eq 1 ]; then
@@ -1032,9 +1168,15 @@ sp_loader_load_modules() {
       _spl_guard_search_path _spl_guard_meta_file _spl_guard_meta_root _spl_guard_layer _spl_guard_dep_exists \
       _spl_guard_return _spl_guard_strict_error _spl_guard_current_shell _spl_guard_current_platform \
       _spl_guard_mod _spl_guard_record _spl_guard_load _spl_guard_load_hook \
-      _spl_guard_exports _spl_guard_exports_to_cleanup \
-      _spl_expected_pwd _spl_expected_pwd_status _spl_after_pwd \
-      _spl_expected_ifs_was_set _spl_expected_ifs _spl_after_ifs_was_set \
+      _spl_guard_exports _spl_guard_exports_to_cleanup _spl_guard_wrapper_exports \
+      _spl_guard_expected_pwd_was_set _spl_guard_expected_pwd \
+      _spl_guard_expected_oldpwd_was_set _spl_guard_expected_oldpwd \
+      _spl_guard_expected_pwd_physical _spl_guard_expected_pwd_status \
+      _spl_expected_pwd _spl_expected_pwd_status _spl_expected_pwd_physical _spl_expected_pwd_was_set \
+      _spl_expected_oldpwd _spl_expected_oldpwd_was_set _spl_after_pwd_physical _spl_after_pwd_physical_status \
+      _spl_after_pwd_was_set _spl_after_oldpwd_was_set _spl_pwd_cwd_restored \
+    _spl_cwd_restore_attempt _spl_restored_pwd_physical _spl_restored_pwd_status \
+    _spl_expected_ifs_was_set _spl_expected_ifs _spl_after_ifs_was_set \
       _spl_expected_allexport_was_set _spl_expected_noclobber_was_set _spl_expected_errexit_was_set \
       _spl_expected_glob_was_set _spl_expected_nounset_was_set _spl_expected_verbose_was_set _spl_expected_xtrace_was_set \
       _spl_after_allexport_was_set _spl_after_noclobber_was_set _spl_after_errexit_was_set \
@@ -1047,7 +1189,8 @@ sp_loader_load_modules() {
       _spl_dep_ifs_was_set _spl_dep_old_ifs _spl_dep _spl_progress _spl_ready \
       _spl_blocked_by _spl_topo_ifs_was_set _spl_topo_old_ifs _spl_runtime_skip \
       _spl_run_ifs_was_set _spl_run_old_ifs _spl_load _spl_load_hook \
-      _spl_exports _spl_exports_to_cleanup _spl_export_ifs_was_set _spl_export_old_ifs _spl_export \
+      _spl_exports _spl_exports_to_cleanup _spl_wrapper_exports _spl_export_ifs_was_set _spl_export_old_ifs _spl_export \
+      _spl_export_lookup _spl_export_conflict _spl_reload_ifs_was_set _spl_reload_old_ifs \
       _spl_load_status _spl_load_path _spl_hook_body _spl_reserved_utility_pattern \
       _spl_search_path _spl_layer _spl_meta_file _spl_meta_root _spl_dep_exists _spl_existing_load _spl_layer_load _spl_conflict _spl_layer_ifs_was_set _spl_layer_old_ifs _spl_existing_version _spl_layer_version _spl_existing_version_display _spl_layer_version_display _spl_layer_glob_was_set
     unset -f _sp_loader_path_is_physical 2>/dev/null || :
@@ -1067,8 +1210,14 @@ sp_loader_load_modules() {
       _spl_guard_search_path _spl_guard_meta_file _spl_guard_meta_root _spl_guard_layer _spl_guard_dep_exists \
     _spl_guard_return _spl_guard_strict_error _spl_guard_current_shell _spl_guard_current_platform \
     _spl_guard_mod _spl_guard_record _spl_guard_load _spl_guard_load_hook \
-    _spl_guard_exports _spl_guard_exports_to_cleanup \
-    _spl_expected_pwd _spl_expected_pwd_status _spl_after_pwd \
+    _spl_guard_exports _spl_guard_exports_to_cleanup _spl_guard_wrapper_exports \
+    _spl_guard_expected_pwd_was_set _spl_guard_expected_pwd \
+    _spl_guard_expected_oldpwd_was_set _spl_guard_expected_oldpwd \
+    _spl_guard_expected_pwd_physical _spl_guard_expected_pwd_status \
+    _spl_expected_pwd _spl_expected_pwd_status _spl_expected_pwd_physical _spl_expected_pwd_was_set \
+      _spl_expected_oldpwd _spl_expected_oldpwd_was_set _spl_after_pwd_physical _spl_after_pwd_physical_status \
+      _spl_after_pwd_was_set _spl_after_oldpwd_was_set _spl_pwd_cwd_restored \
+    _spl_cwd_restore_attempt _spl_restored_pwd_physical _spl_restored_pwd_status \
     _spl_expected_ifs_was_set _spl_expected_ifs _spl_after_ifs_was_set \
     _spl_expected_allexport_was_set _spl_expected_noclobber_was_set _spl_expected_errexit_was_set \
     _spl_expected_glob_was_set _spl_expected_nounset_was_set _spl_expected_verbose_was_set _spl_expected_xtrace_was_set \
@@ -1082,7 +1231,8 @@ sp_loader_load_modules() {
     _spl_dep_ifs_was_set _spl_dep_old_ifs _spl_dep _spl_progress _spl_ready \
     _spl_blocked_by _spl_topo_ifs_was_set _spl_topo_old_ifs _spl_runtime_skip \
     _spl_run_ifs_was_set _spl_run_old_ifs _spl_load _spl_load_hook \
-    _spl_exports _spl_exports_to_cleanup _spl_export_ifs_was_set _spl_export_old_ifs _spl_export \
+    _spl_exports _spl_exports_to_cleanup _spl_wrapper_exports _spl_export_ifs_was_set _spl_export_old_ifs _spl_export \
+      _spl_export_lookup _spl_export_conflict _spl_reload_ifs_was_set _spl_reload_old_ifs \
     _spl_load_status _spl_load_path _spl_hook_body _spl_reserved_utility_pattern \
       _spl_search_path _spl_layer _spl_meta_file _spl_meta_root _spl_dep_exists _spl_existing_load _spl_layer_load _spl_conflict _spl_layer_ifs_was_set _spl_layer_old_ifs _spl_existing_version _spl_layer_version _spl_existing_version_display _spl_layer_version_display _spl_layer_glob_was_set
   unset -f _sp_loader_path_is_physical 2>/dev/null || :

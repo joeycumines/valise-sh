@@ -122,6 +122,53 @@ assert_contains 'valid metadata emits update registrations' "$_out" 'updates=get
 assert_contains 'valid metadata emits load path' "$_out" 'load=modules/core/path_utilities.sh'
 assert_contains 'unversioned metadata emits empty version' "$_out" 'version='
 
+printf '\n=== Metadata meta-module records ===\n'
+_meta_module="$_tmp/meta_module.meta"
+cat >"$_meta_module" <<'META'
+name=meta_module
+requires=core_environment
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=
+updates=
+META
+run_read "$_meta_module"
+assert_exit 'metadata accepts a dependency-only meta module without a load target' 0 "$_status"
+assert_contains 'meta module emits its dependency closure' "$_out" 'requires=core_environment'
+assert_contains 'meta module emits an empty load target' "$_out" 'load='
+
+_no_body_no_deps="$_tmp/no_body_no_deps.meta"
+cat >"$_no_body_no_deps" <<'META'
+name=no_body_no_deps
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=
+updates=
+META
+run_read "$_no_body_no_deps"
+assert_exit 'metadata rejects a module with no body and no dependencies' 1 "$_status"
+assert_contains 'missing load target diagnostic names the alternatives' "$_out" 'load, load_hook, or requires'
+
+_optional_only_no_load="$_tmp/optional_only_no_load.meta"
+cat >"$_optional_only_no_load" <<'META'
+name=optional_only_no_load
+requires=
+optional=core_environment
+shells=sh
+platforms=any
+side_effect=read-only
+exports=
+updates=
+META
+run_read "$_optional_only_no_load"
+assert_exit 'metadata rejects an optional-only module without a load target' 1 "$_status"
+assert_contains 'optional-only diagnostic names the load-target alternatives' "$_out" 'load, load_hook, or requires'
+
 printf '\n=== Metadata version field ===\n'
 _versioned="$_tmp/versioned.meta"
 cat >"$_versioned" <<'META'
@@ -464,6 +511,9 @@ assert_exit 'ordinary source permits read-only side-effect class' 0 "$_status"
 _out=$(sp_metadata_validate_source_side_effect path-env 2>&1)
 _status=$?
 assert_exit 'ordinary source permits path-env side-effect class' 0 "$_status"
+_out=$(sp_metadata_validate_source_side_effect local-state 2>&1)
+_status=$?
+assert_exit 'ordinary source permits local-state side-effect class' 0 "$_status"
 _out=$(sp_metadata_validate_source_side_effect generated-file 2>&1)
 _status=$?
 assert_exit 'ordinary source rejects generated-file side-effect class' 1 "$_status"

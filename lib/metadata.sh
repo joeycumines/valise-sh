@@ -229,7 +229,7 @@ sp_metadata_validate_version() {
 
 sp_metadata_validate_side_effect() {
   case "$1" in
-  read-only | path-env | generated-file | update-network | install-time | local-secret | work-only) return 0 ;;
+  read-only | path-env | generated-file | update-network | install-time | local-secret | local-state | work-only) return 0 ;;
   *)
     sp_metadata_error "invalid side_effect: $1"
     return 1
@@ -272,22 +272,23 @@ sp_metadata_validate_relative_path() {
 sp_metadata_validate_load_target() {
   _spm_target_load=$1
   _spm_target_load_hook=$2
+  _spm_target_requires=${3-}
   if [ -n "$_spm_target_load" ] && [ -n "$_spm_target_load_hook" ]; then
     sp_metadata_error 'metadata fields load and load_hook are mutually exclusive'
-    unset _spm_target_load _spm_target_load_hook
+    unset _spm_target_load _spm_target_load_hook _spm_target_requires
     return 1
   fi
-  if [ -z "$_spm_target_load" ] && [ -z "$_spm_target_load_hook" ]; then
-    sp_metadata_error 'missing required metadata field: load or load_hook'
-    unset _spm_target_load _spm_target_load_hook
+  if [ -z "$_spm_target_load" ] && [ -z "$_spm_target_load_hook" ] && [ -z "$_spm_target_requires" ]; then
+    sp_metadata_error 'missing required metadata field: load, load_hook, or requires'
+    unset _spm_target_load _spm_target_load_hook _spm_target_requires
     return 1
   fi
   if [ -n "$_spm_target_load_hook" ] && ! sp_metadata_validate_identifier "$_spm_target_load_hook"; then
     sp_metadata_error "invalid load_hook: $_spm_target_load_hook"
-    unset _spm_target_load _spm_target_load_hook
+    unset _spm_target_load _spm_target_load_hook _spm_target_requires
     return 1
   fi
-  unset _spm_target_load _spm_target_load_hook
+  unset _spm_target_load _spm_target_load_hook _spm_target_requires
   return 0
 }
 
@@ -361,7 +362,6 @@ sp_metadata_read() (
   sp_metadata_require_field shells "$_spm_shells" || return 1
   sp_metadata_require_field platforms "$_spm_platforms" || return 1
   sp_metadata_require_field side_effect "$_spm_side_effect" || return 1
-  sp_metadata_validate_load_target "$_spm_load" "$_spm_load_hook" || return 1
 
   if ! sp_metadata_validate_identifier "$_spm_name"; then
     sp_metadata_error "invalid module name: $_spm_name"
@@ -369,6 +369,7 @@ sp_metadata_read() (
   fi
   sp_metadata_validate_identifier_list "$_spm_requires" dependency || return 1
   sp_metadata_validate_identifier_list "$_spm_optional" optional_dependency || return 1
+  sp_metadata_validate_load_target "$_spm_load" "$_spm_load_hook" "$_spm_requires" || return 1
   sp_metadata_validate_shell_list "$_spm_shells" || return 1
   sp_metadata_validate_platform_list "$_spm_platforms" || return 1
   sp_metadata_validate_side_effect "$_spm_side_effect" || return 1

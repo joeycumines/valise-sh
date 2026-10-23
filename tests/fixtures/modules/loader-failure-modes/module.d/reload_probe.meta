@@ -1,0 +1,9 @@
+name=reload_probe
+requires=core
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=reload_probe_loaded
+updates=
+load=modules/reload_probe.sh

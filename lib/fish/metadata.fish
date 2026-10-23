@@ -128,7 +128,7 @@ end
 
 function sp_fish_metadata_validate_side_effect --description 'Validate side_effect value'
     switch "$argv[1]"
-        case read-only path-env generated-file update-network install-time local-secret work-only
+        case read-only path-env generated-file update-network install-time local-secret local-state work-only
             return 0
         case '*'
             sp_fish_metadata_error "invalid side_effect: $argv[1]"
@@ -239,8 +239,8 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
     # Match the generic metadata ABI before the Fish loader applies its
     # shell/body selection. Generic POSIX records must parse successfully so
     # the loader can skip them when their shells do not include Fish.
-    if test -z "$m_load"; and test -z "$m_load_hook"
-        sp_fish_metadata_error 'missing required metadata field: load or load_hook'
+    if test -z "$m_load"; and test -z "$m_load_hook"; and test -z "$m_requires"
+        sp_fish_metadata_error 'missing required metadata field: load, load_hook, or requires'
         return 1
     end
     if test -n "$m_load"; and test -n "$m_load_hook"

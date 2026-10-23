@@ -83,6 +83,12 @@ _meta "$_fixture/module.d/gated_app.meta" gated_app fish any read-only gated_app
 # permissive must report and continue, and the body must never run.
 _meta "$_fixture/module.d/posix_only_seed.meta" posix_only_seed "sh bash zsh ksh" any read-only posix_only_seed_loaded modules/fish/posix_only_seed.fish
 _body "$_fixture/modules/fish/posix_only_seed.fish" 'set -g posix_only_sourced 1; function posix_only_seed_loaded; end'
+# The shared ABI parses POSIX local-state and dependency-only meta records
+# before the shell gate skips them. A native Fish module can depend on both.
+_meta "$_fixture/module.d/local_state_skip.meta" local_state_skip "sh bash zsh ksh" any local-state '' modules/fish/local_state_skip.sh
+_meta "$_fixture/module.d/meta_only.meta" meta_only "sh bash zsh ksh" any read-only '' '' local_state_skip
+_meta "$_fixture/module.d/meta_dependent.meta" meta_dependent fish any read-only meta_dependent_loaded modules/fish/meta_dependent.fish meta_only
+_body "$_fixture/modules/fish/meta_dependent.fish" 'function meta_dependent_loaded; end'
 # An optional-only cycle pins the native Fish ordering contract: the
 # single-pass Kahn sort has no optional-relaxed fallback (unlike the POSIX
 # loader's two-pass sort), so a stall quarantines its members — strict mode
@@ -1693,6 +1699,10 @@ bootstrap strict gated_app
 or exit 1
 functions -q gated_app_loaded; or exit 1
 set -q shell_skip_sourced; and exit 1
+# POSIX local-state and dependency-only meta nodes are valid graph records.
+bootstrap strict meta_dependent
+or exit 1
+functions -q meta_dependent_loaded; or exit 1
 
 # Directly-requested non-Fish seeds follow the ABI mode contract, aligned
 # with the POSIX loader's strict-required failure for shell-mismatched

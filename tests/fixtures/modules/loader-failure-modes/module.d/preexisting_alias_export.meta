@@ -1,0 +1,9 @@
+name=preexisting_alias_export
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=preexisting_alias_loaded
+updates=
+load=modules/preexisting_alias_export.sh

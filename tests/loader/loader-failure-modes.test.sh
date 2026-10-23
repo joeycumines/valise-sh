@@ -60,8 +60,12 @@ assert_file() {
 printf '\n=== Loader failure-mode fixture presence ===\n'
 for _fixture in \
   module.d/core.meta \
+  module.d/aggregator.meta \
   module.d/alpha.meta \
   module.d/beta.meta \
+  module.d/cwd_mover.meta \
+  module.d/cwd_readonly_builtin.meta \
+  module.d/local_state.meta \
   module.d/missing_required_user.meta \
   module.d/missing_optional_user.meta \
   module.d/optional_failed_user.meta \
@@ -87,6 +91,7 @@ for _fixture in \
   module.d/clobber_utility.meta \
   module.d/clobber_shell_state.meta \
   module.d/clobber_expected.meta \
+  module.d/clobber_wrapper_state.meta \
   module.d/clobber_state.meta \
   module.d/clobber_search_path.meta \
   module.d/clobber_unset.meta \
@@ -98,8 +103,13 @@ for _fixture in \
   module.d/invalid_dependency.meta \
   module.d/failed_hook.meta \
   module.d/export_missing.meta \
+  module.d/preexisting_alias_export.meta \
   module.d/preexisting_export.meta \
+  module.d/builtin_hijack.meta \
   module.d/preexisting_function_export.meta \
+  module.d/reload_probe.meta \
+  module.d/wrapper_export.meta \
+  module.d/wrapper_export_missing.meta \
   module.d/duplicate_export_first.meta \
   module.d/duplicate_export_second.meta \
   module.d/generated_writer.meta \
@@ -112,6 +122,9 @@ for _fixture in \
   modules/core.sh \
   modules/alpha.sh \
   modules/beta.sh \
+  modules/cwd_mover.sh \
+  modules/cwd_readonly_builtin.sh \
+  modules/local_state.sh \
   modules/missing_required_user.sh \
   modules/missing_optional_user.sh \
   modules/optional_failed_user.sh \
@@ -137,6 +150,7 @@ for _fixture in \
   modules/clobber_utility.sh \
   modules/clobber_shell_state.sh \
   modules/clobber_expected.sh \
+  modules/clobber_wrapper_state.sh \
   modules/clobber_search_path.sh \
   modules/clobber_state.sh \
   modules/clobber_unset.sh \
@@ -148,8 +162,13 @@ for _fixture in \
   modules/invalid_dependency.sh \
   modules/failed_hook.sh \
   modules/export_missing.sh \
+  modules/preexisting_alias_export.sh \
   modules/preexisting_export.sh \
+  modules/builtin_hijack.sh \
   modules/preexisting_function_export.sh \
+  modules/reload_probe.sh \
+  modules/wrapper_export.sh \
+  modules/wrapper_export_missing.sh \
   modules/duplicate_export_first.sh \
   modules/duplicate_export_second.sh \
   modules/generated_writer.sh \
@@ -210,6 +229,28 @@ run_loader() {
     }
     if [ "$_case" = preexisting_function_export ]; then
       preexisting_function_loaded() { :; }
+    fi
+    if [ "$_case" = preexisting_alias_export ]; then
+      alias preexisting_alias_loaded=/bin/true
+    fi
+    if [ "$_case" = wrapper_export ] || [ "$_case" = wrapper_export_missing ] || [ "$_case" = clobber_wrapper_state ]; then
+      mkdir -p "$_tmp/bin" || exit 97
+      printf '%s\n' '#!/bin/sh' 'exit 0' >"$_tmp/bin/mvn" || exit 97
+      chmod +x "$_tmp/bin/mvn" || exit 97
+      PATH="$_tmp/bin:$PATH"
+      export PATH
+    fi
+    if [ "$_case" = local_state ]; then
+      XDG_STATE_HOME="$_tmp/xdg-state"
+      export XDG_STATE_HOME
+    fi
+    if [ "$_case" = cwd_mover ] || [ "$_case" = clobber_wrapper_state ] || [ "$_case" = cwd_readonly_builtin ]; then
+      SP_LOADER_TEST_STATE_CWD="$_tmp/cwd-mover-target"
+      mkdir -p "$SP_LOADER_TEST_STATE_CWD" || exit 97
+      export SP_LOADER_TEST_STATE_CWD
+      cd /tmp || exit 97
+      OLDPWD=/var
+      export OLDPWD
     fi
     if [ "$_case" = wanted_glob_invalid ]; then
       mkdir -p "$_tmp/hostile-cwd" || exit 97
@@ -334,6 +375,24 @@ run_loader() {
       else
         printf 'PREEXISTING_EXPORT_PRESENT=no\n'
       fi
+      ;;
+    wrapper_export)
+      if [ "$(command -v mvn 2>/dev/null)" = mvn ]; then
+        printf 'WRAPPER_EXPORT_FUNCTION=yes\n'
+      else
+        printf 'WRAPPER_EXPORT_FUNCTION=no\n'
+      fi
+      ;;
+    local_state)
+      if [ -d "$XDG_STATE_HOME/shell-profile" ]; then
+        printf 'LOCAL_STATE_DIR=present\n'
+      else
+        printf 'LOCAL_STATE_DIR=missing\n'
+      fi
+      ;;
+    cwd_mover | clobber_wrapper_state | cwd_readonly_builtin)
+      printf 'PWD_AFTER=%s\n' "${PWD-}"
+      printf 'OLDPWD_AFTER=%s\n' "${OLDPWD-}"
       ;;
     duplicate_export_permissive | duplicate_export_strict)
       if command -v duplicate_shared_loaded >/dev/null 2>&1; then
@@ -557,6 +616,12 @@ assert_contains 'expected-state clobber diagnostic names loader namespace' "$_er
 assert_eq 'expected-state clobber attempts module body before detection' 'clobber_expected_started' "$_trace_out"
 assert_no_loader_leaks 'expected-state clobber restores strict mode and failed-export cleanup'
 
+run_loader clobber_wrapper_state clobber_wrapper_state strict ordinary
+assert_eq 'module clobbering wrapper and cwd trust state fails closed' 1 "$_status"
+assert_contains 'wrapper/cwd guard clobber diagnostic names loader namespace' "$_err" 'loader private namespace modified'
+assert_eq 'wrapper/cwd guard clobber attempts module body before detection' 'clobber_wrapper_state_started' "$_trace_out"
+assert_no_loader_leaks_with_output 'wrapper/cwd guard clobber restores trusted state and caller cwd' "$(printf 'LOADER_RETURNED=%s\nPWD_AFTER=/tmp\nOLDPWD_AFTER=/var' "$_status")"
+
 run_loader private_state_clobber clobber_state strict ordinary
 assert_eq 'module clobbering loader non-cleanup private state fails closed' 1 "$_status"
 assert_contains 'state clobber diagnostic names loader namespace' "$_err" 'loader private namespace modified'
@@ -633,6 +698,52 @@ assert_eq 'strict module with pre-existing shell-function export fails closed' 1
 assert_contains 'pre-existing shell-function export diagnostic names export' "$_err" 'preexisting_function_loaded'
 assert_eq 'pre-existing shell-function export prevents module body execution' '' "$_trace_out"
 assert_no_loader_leaks_with_output 'pre-existing shell-function export failure preserves caller function' "$(printf 'LOADER_RETURNED=%s\nPREEXISTING_EXPORT_PRESENT=yes' "$_status")"
+
+run_loader preexisting_alias_export preexisting_alias_export strict ordinary
+assert_eq 'strict module with pre-existing alias export fails closed' 1 "$_status"
+assert_contains 'pre-existing alias export diagnostic names export' "$_err" 'preexisting_alias_loaded'
+assert_eq 'pre-existing alias export prevents module body execution' '' "$_trace_out"
+assert_no_loader_leaks 'pre-existing alias export failure'
+
+run_loader wrapper_export wrapper_export strict ordinary
+assert_eq 'strict module may wrap an existing external command export' 0 "$_status"
+assert_eq 'external-command wrapper module body executes' 'wrapper_export' "$_trace_out"
+assert_no_loader_leaks_with_output 'external-command wrapper replaces PATH resolution with a function' "$(printf 'LOADER_RETURNED=%s\nWRAPPER_EXPORT_FUNCTION=yes' "$_status")"
+
+run_loader wrapper_export_missing wrapper_export_missing strict ordinary
+assert_eq 'external-command export not provided by the module fails closed' 1 "$_status"
+assert_contains 'unprovided wrapper export diagnostic names the export' "$_err" 'declared export was not provided by module: mvn'
+assert_eq 'unprovided wrapper export still attempts the module body' 'wrapper_export_missing' "$_trace_out"
+assert_no_loader_leaks 'unprovided wrapper export failure'
+
+run_loader builtin_hijack builtin_hijack strict ordinary
+assert_eq 'module defining the builtin utility fails closed' 1 "$_status"
+assert_contains 'builtin utility hijack diagnostic is explicit' "$_err" 'reserved shell utility'
+assert_eq 'builtin utility hijack prevents module body execution' '' "$_trace_out"
+assert_no_loader_leaks 'builtin utility hijack failure'
+
+run_loader aggregator aggregator strict ordinary
+assert_eq 'meta module with only dependencies loads successfully' 0 "$_status"
+assert_eq 'meta module loads its dependency closure without a body' 'core' "$_trace_out"
+assert_eq 'meta module emits no diagnostic' '' "$_err"
+assert_no_loader_leaks 'meta module success'
+
+run_loader local_state local_state strict ordinary
+assert_eq 'ordinary source permits local-state module' 0 "$_status"
+assert_eq 'local-state module body executes' 'local_state_started' "$_trace_out"
+assert_no_loader_leaks_with_output 'local-state module creates its state directory' "$(printf 'LOADER_RETURNED=%s\nLOCAL_STATE_DIR=present' "$_status")"
+
+run_loader cwd_mover cwd_mover strict ordinary
+assert_eq 'module changing cwd fails closed' 1 "$_status"
+assert_contains 'cwd change diagnostic names caller shell state' "$_err" 'caller shell state modified'
+assert_eq 'cwd change attempts module body before detection' 'cwd_mover_started' "$_trace_out"
+assert_no_loader_leaks_with_output 'cwd change preserves logical PWD and OLDPWD' "$(printf 'LOADER_RETURNED=%s\nPWD_AFTER=/tmp\nOLDPWD_AFTER=/var' "$_status")"
+
+run_loader cwd_readonly_builtin cwd_readonly_builtin strict ordinary
+assert_eq 'dynamic readonly builtin hijack fails closed' 1 "$_status"
+assert_contains 'dynamic readonly builtin diagnostic names caller shell state' "$_err" 'caller shell state modified'
+assert_eq 'dynamic readonly builtin attempts module body before detection' 'cwd_readonly_builtin_started' "$_trace_out"
+assert_no_loader_leaks_with_output 'dynamic readonly builtin cannot prevent physical cwd restoration' "$(printf 'LOADER_RETURNED=%s\nPWD_AFTER=/tmp\nOLDPWD_AFTER=/var' "$_status")"
 
 run_loader duplicate_export_permissive 'duplicate_export_first duplicate_export_second' permissive ordinary
 assert_eq 'permissive duplicate export skips second module without failing' 0 "$_status"
@@ -728,6 +839,34 @@ assert_eq 'strict reserved-utility load_hook fails before invocation' 1 "$_statu
 assert_contains 'reserved-utility load_hook diagnostic names reserved shell utility' "$_err" 'reserved shell utility'
 assert_eq 'reserved-utility load_hook body never executes' '' "$_trace_out"
 assert_no_loader_leaks 'reserved-utility load_hook leaves no command function or failed export'
+
+printf '\n=== Loader reload contract ===\n'
+_reload_trace="$_tmp/reload.trace"
+: >"$_reload_trace"
+_reload_out=$(
+  . "$METADATA_SH" || exit 91
+  . "$LOADER_SH" || exit 92
+  SP_LOADER_TEST_TRACE=$_reload_trace
+  SP_LOADER_TEST_RELOAD_STAGE=first
+  export SP_LOADER_TEST_TRACE SP_LOADER_TEST_RELOAD_STAGE
+  sp_loader_load_modules "$FIXTURE_ROOT" 'core reload_probe' strict ordinary || exit 1
+  _reload_first=$(reload_probe_loaded 2>/dev/null) || _reload_first=missing
+  SP_LOADER_TEST_RELOAD_STAGE=second
+  export SP_LOADER_TEST_RELOAD_STAGE
+  VALISE_RELOAD=1
+  export VALISE_RELOAD
+  . "$LOADER_SH" || exit 2
+  sp_loader_load_modules "$FIXTURE_ROOT" 'core reload_probe' strict ordinary || exit 3
+  _reload_second=$(reload_probe_loaded 2>/dev/null) || _reload_second=missing
+  printf 'RELOAD_FIRST=%s\nRELOAD_SECOND=%s\n' "$_reload_first" "$_reload_second"
+) 2>"$_tmp/reload.stderr"
+_reload_status=$?
+_reload_err=$(cat "$_tmp/reload.stderr")
+assert_eq 'VALISE_RELOAD=1 re-sources an already loaded closure' 0 "$_reload_status"
+assert_eq 'VALISE_RELOAD=1 replaces declared exports from the closure' \
+  $'RELOAD_FIRST=first\nRELOAD_SECOND=second' "$_reload_out"
+assert_eq 'VALISE_RELOAD=1 re-load emits no diagnostic' '' "$_reload_err"
+unset _reload_trace _reload_out _reload_status _reload_err
 
 printf '\n=== loader-failure-modes summary ===\n'
 printf 'Total: %d  Pass: %d  XFail: %d  Fail: %d\n' "$_total" "$_pass" "$_xfail" "$_fail"
