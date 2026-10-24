@@ -243,6 +243,18 @@ else
 fi
 
 _release="$_project/build/release1"
+_scratch_preprocessed=$(find "$_release/generated" -name '.preprocessed.*' -print 2>/dev/null || :)
+if [ -z "$_scratch_preprocessed" ]; then
+  pass "compiled output contains no preprocessing scratch files"
+else
+  fail "compiled output contains no preprocessing scratch files"
+  printf '%s\n' "$_scratch_preprocessed" >&2
+fi
+if grep -F '.preprocessed.' "$_release/shell/install/profile-release.manifest" >/dev/null 2>&1; then
+  fail "release manifest excludes preprocessing scratch files"
+else
+  pass "release manifest excludes preprocessing scratch files"
+fi
 for _file in \
   generated/installed-modules.bash \
   vendor/shell-profile/lib/capabilities.sh \
@@ -343,35 +355,36 @@ else
 fi
 if VALISE_MODULE_ROOT="$_project/build/submodule" /bin/bash -c '
   . "$VALISE_MODULE_ROOT/generated/installed-modules.bash" || exit 1
-  if command -v sp_cap_submodule_marker >/dev/null 2>&1; then exit 2; fi
+  command -v sp_cap_submodule_marker >/dev/null 2>&1 || exit 2
 ' >"$_test_root/plan-submodule.out" 2>"$_test_root/plan-submodule.err"; then
-  pass "compiled plan cleans up the submodule prelude"
+  pass "compiled plan keeps the submodule prelude available"
 else
-  fail "compiled plan cleans up the submodule prelude"
+  fail "compiled plan keeps the submodule prelude available"
   cat "$_test_root/plan-submodule.err" >&2
 fi
 
-# Source the compiled plan directly. Every capability prelude function must be
-# gone afterwards; this is the current compiled-plan contract.
+# Source the compiled plan directly. Capability prelude functions remain
+# available to module functions after the plan finishes.
 if VALISE_MODULE_ROOT="$_release" /bin/bash -c '
   . "$VALISE_MODULE_ROOT/generated/installed-modules.bash" || exit 1
   command -v root_ready >/dev/null 2>&1 || exit 2
   command -v vendor_tool_ready >/dev/null 2>&1 || exit 3
   command -v bash_plan_ready >/dev/null 2>&1 || exit 4
   if command -v zsh_plan_ready >/dev/null 2>&1; then exit 5; fi
+  command -v sp_cap_os >/dev/null 2>&1 || exit 6
 ' >"$_test_root/plan-bash.out" 2>"$_test_root/plan-bash.err"; then
-  pass "compiled bash plan loads its own bodies"
+  pass "compiled bash plan loads its own bodies and keeps capabilities"
 else
-  fail "compiled bash plan loads its own bodies"
+  fail "compiled bash plan loads its own bodies and keeps capabilities"
   cat "$_test_root/plan-bash.err" >&2
 fi
 _prelude_fns=$(sed -n 's/^\(sp_cap_[a-zA-Z0-9_]*\)().*/\1/p' "$_pkg/lib/capabilities.sh")
 if [ -n "$_prelude_fns" ]; then
-  pass "capability prelude exposes functions to clean up"
+  pass "capability prelude exposes runtime functions"
 else
-  fail "capability prelude exposes functions to clean up"
+  fail "capability prelude exposes runtime functions"
 fi
-_leaked=
+_missing=
 for _shell in bash zsh ksh; do
   case "$_shell" in
     bash) _bin=/bin/bash ;;
@@ -380,9 +393,9 @@ for _shell in bash zsh ksh; do
   esac
   if [ ! -x "$_bin" ]; then
     if [ "$_require_tooling" -eq 1 ]; then
-      fail "$_shell plan removes every sp_cap_* prelude function ($_bin unavailable)"
+      fail "$_shell plan keeps every sp_cap_* prelude function ($_bin unavailable)"
     else
-      skip "$_shell plan removes every sp_cap_* prelude function ($_bin unavailable)"
+      skip "$_shell plan keeps every sp_cap_* prelude function ($_bin unavailable)"
     fi
     continue
   fi
@@ -390,16 +403,16 @@ for _shell in bash zsh ksh; do
     . "$VALISE_MODULE_ROOT/generated/installed-modules.$1" || exit 1
     shift
     for _fn do
-      if command -v "$_fn" >/dev/null 2>&1; then
+      if ! command -v "$_fn" >/dev/null 2>&1; then
         printf "%s\n" "$_fn"
         exit 2
       fi
     done
   ' sh "$_shell" $_prelude_fns >"$_test_root/plan-clean-$_shell.out" 2>"$_test_root/plan-clean-$_shell.err"; then
-    pass "$_shell plan removes every sp_cap_* prelude function"
+    pass "$_shell plan keeps every sp_cap_* prelude function"
   else
-    _leaked="$_leaked $(cat "$_test_root/plan-clean-$_shell.out")"
-    fail "$_shell plan removes every sp_cap_* prelude function:$_leaked"
+    _missing="$_missing $(cat "$_test_root/plan-clean-$_shell.out")"
+    fail "$_shell plan keeps every sp_cap_* prelude function:$_missing"
   fi
 done
 

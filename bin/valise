@@ -3207,7 +3207,10 @@ cmd_compile() {
     _plan_file="installed-modules.$_shell"
     [ "$_shell" != "wrapper_lifecycle" ] || _plan_file="wrapper-lifecycle.bash"
 
-    # Filter registry for modules matching this shell and build input stream
+    # Filter registry for modules matching this shell and build the compiler's
+    # input stream. The preprocessor runs to a file first so a validation
+    # failure is not hidden by the following compiler stage.
+    _preprocessed="$_stage/.preprocessed.$_shell"
     {
       # Filter seeds through exclusion list
       _filtered_roots=""
@@ -3248,12 +3251,54 @@ cmd_compile() {
         {
           name = $1; msrc = $11
           if (name == "" || msrc == "shell/helpers" || !shell_matches($6, shell)) next
+          if (name !~ /^[a-z_][a-zA-Z0-9_]*$/) {
+            print "valise: error: invalid module name in registry: " name > "/dev/stderr"
+            exit 1
+          }
+          if ($7 == "") {
+            print "valise: error: missing platforms for registry module: " name > "/dev/stderr"
+            exit 1
+          }
+          platform_count = split($7, platform_values, " ")
+          for (platform_i = 1; platform_i <= platform_count; platform_i++) {
+            if (platform_values[platform_i] !~ /^(any|darwin|linux|bsd|freebsd|openbsd|netbsd)$/) {
+              print "valise: error: invalid platform for registry module " name ": " platform_values[platform_i] > "/dev/stderr"
+              exit 1
+            }
+          }
+          if ($3 !~ /^(read-only|path-env|generated-file|update-network|install-time|local-secret|local-state|work-only)$/) {
+            print "valise: error: invalid side_effect for registry module " name ": " $3 > "/dev/stderr"
+            exit 1
+          }
+          if (msrc != "shell/module.d") {
+            if (msrc !~ /^shell\/layers\/[^\/]+\/module\.d$/) {
+              print "valise: error: invalid registry source for module " name ": " msrc > "/dev/stderr"
+              exit 1
+            }
+            layer = msrc
+            sub(/^shell\/layers\//, "", layer)
+            sub(/\/module\.d$/, "", layer)
+            if (layer == "" || layer ~ /[\/.]/) {
+              print "valise: error: invalid layer source in registry for module " name ": " msrc > "/dev/stderr"
+              exit 1
+            }
+          }
+          export_count = split($8, export_values, " ")
+          for (export_i = 1; export_i <= export_count; export_i++) {
+            if (export_values[export_i] !~ /^[a-z_][a-zA-Z0-9_]*$/) {
+              print "valise: error: invalid export for registry module " name ": " export_values[export_i] > "/dev/stderr"
+              exit 1
+            }
+          }
           identity = name "@" msrc
           row_exists[identity] = 1
           row_name[identity] = name
           row_source[identity] = msrc
           row_req[identity] = $4
           row_load[identity] = $9
+          row_platforms[identity] = $7
+          row_side_effect[identity] = $3
+          row_exports[identity] = $8
         }
         END {
           for (identity in row_exists) {
@@ -3289,11 +3334,16 @@ cmd_compile() {
               sub(/\/module\.d$/, "", layer)
               load_path = "layers/" layer "/" load_path
             }
-            printf "MOD:%s\t%s\t%s\n", identity, req, load_path
+            printf "MOD:%s\t%s\t%s\t%s\t%s\t%s\n", identity, req, load_path, row_platforms[identity], row_side_effect[identity], row_exports[identity]
           }
         }
       ' "$_registry"
-    } | awk -v target_shell="$_effective_shell" -v plan_name="$_shell" -f "$_awk_compiler" > "$_stage/$_plan_file"
+    } >"$_preprocessed" || die "cannot preprocess registry for $_shell"
+    awk -v target_shell="$_effective_shell" -v plan_name="$_shell" -f "$_awk_compiler" \
+      "$_preprocessed" >"$_stage/$_plan_file" || die "cannot compile plan for $_shell"
+    _rm_path=$(trusted_utility_path rm) || die "no trusted rm utility available"
+    "$_rm_path" -f "$_preprocessed" || die "cannot remove compiler preprocessing file"
+    _preprocessed=""
 
     info "compiled plan for $_shell"
   done
@@ -3392,9 +3442,9 @@ cmd_assemble() {
   # layers/<provider>/ in the release, matching the compiled plan paths.
   _as_tab=$(printf '\t')
   _as_rows="$_stage/.registry-rows"
-  "$_as_awk" -F "$_as_tab" 'NR > 1 && $1 != "" && $11 != "shell/helpers" { print $1 "\t" $9 "\t" $11 }' \
+  "$_as_awk" -F "$_as_tab" 'NR > 1 && $1 != "" && $11 != "shell/helpers" { print $1 "|" $9 "|" $11 }' \
     "$_as_registry" >"$_as_rows" || die "cannot read module registry"
-  while IFS="$_as_tab" read -r _as_name _as_load _as_source; do
+  while IFS='|' read -r _as_name _as_load _as_source; do
     [ -n "$_as_name" ] || continue
     # Module names index both source and destination paths. Reject anything
     # that is not a metadata identifier before either path is constructed.
@@ -3418,10 +3468,14 @@ cmd_assemble() {
       *) die "unsupported registry source: $_as_source (expected shell/module.d or shell/layers/<provider>/module.d)" ;;
     esac
     case "$_as_load" in
-      ""|/*|.|..|./*|../*|*/.|*/..|*/./*|*/../*|*//*) die "invalid load path in registry for $_as_name: $_as_load" ;;
+      /*|.|..|./*|../*|*/.|*/..|*/./*|*/../*|*//*) die "invalid load path in registry for $_as_name: $_as_load" ;;
     esac
     _as_root=${_as_source%/module.d}
-    for _as_pair in "$_as_source/$_as_name.meta:${_as_prefix}module.d/$_as_name.meta" "$_as_root/$_as_load:$_as_prefix$_as_load"; do
+    _as_pairs="$_as_source/$_as_name.meta:${_as_prefix}module.d/$_as_name.meta"
+    if [ -n "$_as_load" ]; then
+      _as_pairs="$_as_pairs $_as_root/$_as_load:$_as_prefix$_as_load"
+    fi
+    for _as_pair in $_as_pairs; do
       _as_from="$_as_src/${_as_pair%%:*}"
       _as_to="$_stage/${_as_pair#*:}"
       source_path_is_physical "$_as_src" "${_as_pair%%:*}" ||

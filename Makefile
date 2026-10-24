@@ -10,7 +10,7 @@ VALISE_REQUIRE_TOOLING ?= $(if $(filter true TRUE 1 yes YES,$(CI) $(GITHUB_ACTIO
 comma := ,
 VALISE_REQUIRED_PARSERS ?= $(if $(filter 1,$(VALISE_REQUIRE_TOOLING)),sh$(comma)dash$(comma)ksh$(comma)busybox-ash$(comma)bash$(comma)fish,)
 
-.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-compile-assemble test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e
+.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-compile-assemble test-compiler-plan test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e
 .NOTPARALLEL: check test
 
 TEST_ENV_PATH = /usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
@@ -66,6 +66,7 @@ test: test-runner-quarantine
 	@$(MAKE) test-non-macos-runtime
 	@$(MAKE) test-cli-posix
 	@$(MAKE) test-compile-assemble
+	@$(MAKE) test-compiler-plan
 	@$(MAKE) test-compiler-benchmark
 	@$(MAKE) test-fish-runtime
 	@$(MAKE) test-doc-links
@@ -199,6 +200,9 @@ test-cli-posix: tests/cli-posix.test.sh bin/valise
 test-compile-assemble: tests/compile-assemble.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
+test-compiler-plan: tests/compiler-plan.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
+	@$(TEST_RUNNER)
+
 test-compiler-benchmark: tests/compiler-benchmark.test.sh lib/compiler.awk
 	@$(TEST_RUNNER)
 
@@ -232,4 +236,4 @@ test-e2e: tests/e2e.test.sh bin/valise examples/e2e/build-manifest.sh
 	@echo "=== valise end-to-end test ==="
 	@VALISE_REQUIRE_TOOLING="$(VALISE_REQUIRE_TOOLING)" /bin/bash tests/e2e.test.sh
 
-check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-contrib-modules test-docs test-doc-links
+check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-contrib-modules test-docs test-doc-links
