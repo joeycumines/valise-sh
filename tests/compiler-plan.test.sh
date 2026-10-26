@@ -86,7 +86,18 @@ return 1'
 _module later_ok '' later_ok_loaded any read-only 'later_ok_loaded() { :; }'
 _module missing_export '' missing_export_loaded any read-only 'printf "no export\n" >/dev/null'
 _module meta_child '' meta_child_loaded any read-only 'meta_child_loaded() { :; }'
-_module meta_parent meta_child '' any read-only ''
+cat >"$_project/shell/module.d/meta_parent.meta" <<'EOF'
+name=meta_parent
+version=
+side_effect=read-only
+requires=meta_child
+optional=
+shells=bash
+platforms=any
+exports=
+updates=
+load=
+EOF
 rm -f "$_project/shell/modules/meta_parent.sh"
 _module platform_other '' platform_other_loaded "$_other_platform" read-only 'platform_other_loaded() { :; }'
 _module capability_user '' capability_user_loaded any read-only 'capability_user_loaded() { sp_cap_os; }'

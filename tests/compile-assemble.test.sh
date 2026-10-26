@@ -42,6 +42,7 @@ mkdir -p "$_project/shell/module.d" "$_project/shell/modules" \
 cp "$_repo/bin/valise" "$_pkg/bin/valise"
 cp "$_repo/lib/compiler.awk" "$_pkg/lib/compiler.awk"
 cp "$_repo/lib/capabilities.sh" "$_pkg/lib/capabilities.sh"
+cp "$_repo/lib/metadata.sh" "$_pkg/lib/metadata.sh"
 chmod 0755 "$_pkg/bin/valise"
 ln -s "$_pkg/bin/valise" "$_link"
 
@@ -277,13 +278,10 @@ else
   fail "repeated assemble produces a byte-identical manifest"
 fi
 
-# Registry names index paths. A traversal name must fail before any copy can
-# write outside the staged release.
-cp "$_project/shell/release/module-registry.tsv" "$_test_root/registry.saved"
-# Make the traversal target real, so only name validation can prevent it from
-# being copied outside the release.
-cat >"$_project/pwned.meta" <<'EOF'
-name=pwned
+# Metadata is the source of truth. An invalid module name must fail before any
+# copy can write outside the staged release.
+cat >"$_project/shell/module.d/pwned.meta" <<'EOF'
+name=../pwned
 version=
 side_effect=read-only
 requires=
@@ -294,21 +292,23 @@ exports=
 updates=
 load=modules/root.sh
 EOF
-printf '../../pwned\t\tread-only\t\t\tbash\tany\tpwned\tpwned.meta\t\tshell/module.d\n' \
-  >>"$_project/shell/release/module-registry.tsv"
 if (cd "$_project" && "$_link" assemble --bundle=default build/escape) \
   >"$_test_root/assemble-escape.out" 2>"$_test_root/assemble-escape.err"; then
-  fail "assemble rejects a registry module name containing path traversal"
-elif ! grep -F 'invalid module name in registry: ../../pwned' \
+  fail "assemble rejects an invalid metadata module name"
+elif ! grep -F 'metadata: invalid module name: ../pwned' \
+  "$_test_root/assemble-escape.err" >/dev/null 2>&1 ||
+  ! grep -F 'valise: error: shell/module.d/pwned.meta: invalid metadata' \
   "$_test_root/assemble-escape.err" >/dev/null 2>&1; then
-  fail "assemble rejects a registry module name containing path traversal (wrong diagnostic)"
+  fail "assemble rejects an invalid metadata module name (wrong diagnostic)"
   cat "$_test_root/assemble-escape.err" >&2
-elif [ -e "$_project/build/escape" ] || [ -e "$_project/build/pwned.meta" ]; then
-  fail "assemble rejects a registry module name containing path traversal (published output)"
+elif [ -e "$_project/build/escape" ]; then
+  fail "assemble rejects an invalid metadata module name (published output)"
 else
-  pass "assemble rejects a registry module name containing path traversal"
+  pass "assemble rejects an invalid metadata module name"
 fi
-cp "$_test_root/registry.saved" "$_project/shell/release/module-registry.tsv"
+rm -f "$_project/shell/module.d/pwned.meta"
+
+# A load path with a parent segment must fail before the release can copy it.
 cat >"$_project/shell/module.d/trav.meta" <<'EOF'
 name=trav
 version=
@@ -319,24 +319,25 @@ shells=bash
 platforms=any
 exports=
 updates=
-load=modules/evil.sh
+load=modules/../evil.sh
 EOF
 cat >"$_project/shell/modules/evil.sh" <<'EOF'
 evil_loaded() { :; }
 EOF
-printf 'trav\t\tread-only\t\t\tbash\tany\t\tmodules/../evil.sh\t\tshell/module.d\n' \
-  >>"$_project/shell/release/module-registry.tsv"
 if (cd "$_project" && "$_link" assemble --bundle=default build/load-escape) \
   >"$_test_root/assemble-load-escape.out" 2>"$_test_root/assemble-load-escape.err"; then
-  fail "assemble rejects a registry load path containing a parent segment"
-elif ! grep -F 'invalid load path in registry for trav: modules/../evil.sh' \
+  fail "assemble rejects a metadata load path containing a parent segment"
+elif ! grep -F 'metadata: invalid relative path: modules/../evil.sh' \
+  "$_test_root/assemble-load-escape.err" >/dev/null 2>&1 ||
+  ! grep -F 'valise: error: shell/module.d/trav.meta: invalid metadata' \
   "$_test_root/assemble-load-escape.err" >/dev/null 2>&1; then
-  fail "assemble rejects a registry load path containing a parent segment (wrong diagnostic)"
+  fail "assemble rejects a metadata load path containing a parent segment (wrong diagnostic)"
   cat "$_test_root/assemble-load-escape.err" >&2
 else
-  pass "assemble rejects a registry load path containing a parent segment"
+  pass "assemble rejects a metadata load path containing a parent segment"
 fi
-cp "$_test_root/registry.saved" "$_project/shell/release/module-registry.tsv"
+rm -f "$_project/shell/module.d/trav.meta"
+rm -f "$_project/shell/modules/evil.sh"
 
 # A consumer may vendor the prelude as a submodule. Compile uses it, so
 # assemble must package that same file rather than the engine copy.
