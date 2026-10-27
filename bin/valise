@@ -29,6 +29,11 @@ usage() {
     "  variant [list|use <sha>]   List installed releases / switch active release" \
     "  make-manifest <tree> [--output <file>]  Write a release manifest for a tree" \
     "  registry [--check] [path]  Generate or verify module-registry.tsv from metadata (consuming project)" \
+    "  new [dir]                 Scaffold a new valise project" \
+    "  module <new|list|remove>  Create, list, or remove project modules" \
+    "  build [--variant=<name>] [--bundle=<name>] [out]  Assemble a release (consuming project)" \
+    "  apply [--variant=<name>] [--bundle=<name>] [--target=<file>]  Build, install, and integrate the project" \
+    "  status                    Show project, active release, integration, and drift" \
     "  compile [--bundle=<name>] [--variant=<name>] <output-dir>  (consuming project)" \
     "  assemble [--bundle=<name>] [--variant=<name>] <out-dir>  Compile and build a release tree (consuming project)" \
     "  explain-variant [name]     Show variant details and per-shell impact (consuming project)" \
@@ -407,6 +412,21 @@ release_lock() {
     [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_manifest_parse" 2>/dev/null || :
     if [ -e "$_manifest_parse" ] || [ -L "$_manifest_parse" ]; then _cleanup_failed=1; fi
     _manifest_parse=""
+  fi
+  if [ -n "${_pm_tmp:-}" ]; then
+    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_pm_tmp" 2>/dev/null || :
+    if [ -e "$_pm_tmp" ] || [ -L "$_pm_tmp" ]; then _cleanup_failed=1; fi
+    _pm_tmp=""
+  fi
+  if [ -n "${_pi_tmp:-}" ]; then
+    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_pi_tmp" 2>/dev/null || :
+    if [ -e "$_pi_tmp" ] || [ -L "$_pi_tmp" ]; then _cleanup_failed=1; fi
+    _pi_tmp=""
+  fi
+  if [ -n "${_module_list_tmp:-}" ]; then
+    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_module_list_tmp" 2>/dev/null || :
+    if [ -e "$_module_list_tmp" ] || [ -L "$_module_list_tmp" ]; then _cleanup_failed=1; fi
+    _module_list_tmp=""
   fi
   if [ -n "${_rg_tmp:-}" ]; then
     [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_rg_tmp" 2>/dev/null || :
@@ -2432,12 +2452,15 @@ cmd_init() {
     printf '%s\n' \
       "# valise shell integration (compiled plan)" \
       "_valise_active_link=${_shell_active_literal}" \
-      "$_init_plan_select" \
-      "if [ -n \"\$_valise_plan\" ] && _valise_active=\$(cd \"\$_valise_active_link\" 2>/dev/null && pwd -P) &&" \
-      "  [ -f \"\$_valise_active/generated/installed-modules.\$_valise_plan\" ]; then" \
-      "  VALISE_MODULE_ROOT=\"\$_valise_active\"" \
-      "  . \"\$_valise_active/generated/installed-modules.\$_valise_plan\"" \
-      "  unset VALISE_MODULE_ROOT" \
+      "if [ -z \"\${_valise_compiled_profile_loaded:-}\" ]; then" \
+      "  _valise_compiled_profile_loaded=1" \
+      "  $_init_plan_select" \
+      "  if [ -n \"\$_valise_plan\" ] && _valise_active=\$(cd \"\$_valise_active_link\" 2>/dev/null && pwd -P) &&" \
+      "    [ -f \"\$_valise_active/generated/installed-modules.\$_valise_plan\" ]; then" \
+      "    VALISE_MODULE_ROOT=\"\$_valise_active\"" \
+      "    . \"\$_valise_active/generated/installed-modules.\$_valise_plan\"" \
+      "    unset VALISE_MODULE_ROOT" \
+      "  fi" \
       "fi" \
       "unset _valise_active _valise_active_link _valise_plan"
     return 0
@@ -2957,6 +2980,7 @@ cmd_install() {
     fi
   fi
 
+  release_lock
   info "installation complete"
   info "run 'valise init' to print the shell integration snippet for manual setup"
 }
@@ -3536,6 +3560,519 @@ cmd_registry() {
 }
 
 
+project_config_load() {
+  _pc_root=$(pwd -P) || die "cannot resolve working directory"
+  [ -d "$_pc_root/shell/module.d" ] || die "run from the consuming project root (need shell/module.d)"
+  _project_root=$_pc_root
+  _project_variant=workstation-full
+  _project_bundle=default
+  [ -n "${HOME:-}" ] || die "HOME is required for project commands"
+  _project_integration_target=$HOME/.profile
+  _project_conf="$_project_root/shell/release/project.conf"
+  if [ -f "$_project_conf" ]; then
+    [ ! -L "$_project_conf" ] || die "project.conf must not be a symlink: $_project_conf"
+    while IFS= read -r _pc_line || [ -n "$_pc_line" ]; do
+      case "$_pc_line" in
+      '' | '#'*) continue ;;
+      variant=*) _project_variant=${_pc_line#variant=} ;;
+      bundle=*) _project_bundle=${_pc_line#bundle=} ;;
+      integration_target=*) _project_integration_target=${_pc_line#integration_target=} ;;
+      *) die "invalid project.conf line: $_pc_line" ;;
+      esac
+    done <"$_project_conf"
+  fi
+  [ -n "$_project_variant" ] || die "project variant must not be empty"
+  [ -n "$_project_bundle" ] || die "project bundle must not be empty"
+  case "$_project_integration_target" in
+  '~'/*) _project_integration_target=$HOME/${_project_integration_target#"~"/} ;;
+  esac
+  case "$_project_integration_target" in
+  /*) ;;
+  *) die "integration target must be absolute: $_project_integration_target" ;;
+  esac
+  unset _pc_root _pc_line _project_conf
+}
+
+project_meta_add_require() {
+  _pm_meta=$1
+  _pm_module=$2
+  [ -f "$_pm_meta" ] && [ ! -L "$_pm_meta" ] || die "seed metadata file is missing or unsafe: $_pm_meta"
+  _pm_parent=$(path_parent "$_pm_meta")
+  _pm_tmp=$(trusted_mktemp_at "$_pm_parent" file "$_pm_parent/.valise-meta.XXXXXX") ||
+    die "cannot create seed metadata staging file"
+  _pm_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+  "$_pm_awk" -v module="$_pm_module" '
+    BEGIN { have = 0 }
+    /^requires=/ {
+      value = substr($0, 10)
+      count = split(value, parts, " ")
+      output = ""
+      seen = 0
+      for (i = 1; i <= count; i++) {
+        if (parts[i] == "") continue
+        if (parts[i] == module) seen = 1
+        output = output (output == "" ? "" : " ") parts[i]
+      }
+      if (!seen) output = output (output == "" ? "" : " ") module
+      print "requires=" output
+      have = 1
+      next
+    }
+    { print }
+    END { if (!have) print "requires=" module }
+  ' "$_pm_meta" >"$_pm_tmp" || {
+    _pm_rm=$(trusted_utility_path rm) || _pm_rm=""
+    [ -z "$_pm_rm" ] || "$_pm_rm" -f "$_pm_tmp" 2>/dev/null || :
+    die "cannot update seed metadata: $_pm_meta"
+  }
+  _pm_mode=$(file_mode "$_pm_meta")
+  [ -n "$_pm_mode" ] || die "cannot read seed metadata mode: $_pm_meta"
+  _pm_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+  "$_pm_chmod" "$_pm_mode" "$_pm_tmp" || die "cannot preserve seed metadata mode"
+  _pm_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
+  "$_pm_mv" "$_pm_tmp" "$_pm_meta" || die "cannot publish seed metadata: $_pm_meta"
+  _pm_tmp=""
+  unset _pm_meta _pm_module _pm_parent _pm_awk _pm_mode _pm_chmod _pm_mv _pm_rm
+}
+
+project_meta_remove_module() {
+  _pm_meta=$1
+  _pm_module=$2
+  [ -f "$_pm_meta" ] && [ ! -L "$_pm_meta" ] || die "metadata file is missing or unsafe: $_pm_meta"
+  _pm_parent=$(path_parent "$_pm_meta")
+  _pm_tmp=$(trusted_mktemp_at "$_pm_parent" file "$_pm_parent/.valise-meta.XXXXXX") ||
+    die "cannot create metadata staging file"
+  _pm_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+  "$_pm_awk" -v module="$_pm_module" '
+    /^requires=/ {
+      value = substr($0, 10)
+      count = split(value, parts, " ")
+      output = ""
+      for (i = 1; i <= count; i++) {
+        if (parts[i] == "" || parts[i] == module) continue
+        output = output (output == "" ? "" : " ") parts[i]
+      }
+      print "requires=" output
+      next
+    }
+    /^optional=/ {
+      value = substr($0, 10)
+      count = split(value, parts, " ")
+      output = ""
+      for (i = 1; i <= count; i++) {
+        if (parts[i] == "" || parts[i] == module) continue
+        output = output (output == "" ? "" : " ") parts[i]
+      }
+      print "optional=" output
+      next
+    }
+    { print }
+  ' "$_pm_meta" >"$_pm_tmp" || {
+    _pm_rm=$(trusted_utility_path rm) || _pm_rm=""
+    [ -z "$_pm_rm" ] || "$_pm_rm" -f "$_pm_tmp" 2>/dev/null || :
+    die "cannot update metadata: $_pm_meta"
+  }
+  _pm_mode=$(file_mode "$_pm_meta")
+  [ -n "$_pm_mode" ] || die "cannot read metadata mode: $_pm_meta"
+  _pm_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+  "$_pm_chmod" "$_pm_mode" "$_pm_tmp" || die "cannot preserve metadata mode"
+  _pm_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
+  "$_pm_mv" "$_pm_tmp" "$_pm_meta" || die "cannot publish metadata: $_pm_meta"
+  _pm_tmp=""
+  unset _pm_meta _pm_module _pm_parent _pm_awk _pm_mode _pm_chmod _pm_mv _pm_rm
+}
+
+project_write_integration() {
+  _pi_target=$1
+  _pi_snippet=$2
+  [ "$_pi_target" != "/" ] || die "integration target must not be /"
+  [ ! -L "$_pi_target" ] || die "integration target must not be a symlink: $_pi_target"
+  _pi_parent=$(path_parent "$_pi_target")
+  _pi_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  [ -d "$_pi_parent" ] || "$_pi_mkdir" -p "$_pi_parent" || die "cannot create integration target parent: $_pi_parent"
+  _pi_tmp=$(trusted_mktemp_at "$_pi_parent" file "$_pi_parent/.valise-integration.XXXXXX") ||
+    die "cannot create integration staging file"
+  if [ -f "$_pi_target" ]; then
+    _pi_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+    "$_pi_awk" '
+      BEGIN { skip = 0 }
+      /^# BEGIN valise managed block$/ { skip = 1; next }
+      /^# END valise managed block$/ { skip = 0; next }
+      !skip { print }
+    ' "$_pi_target" >"$_pi_tmp" || die "cannot read existing integration target: $_pi_target"
+  fi
+  printf '%s\n' '# BEGIN valise managed block' >>"$_pi_tmp"
+  printf '%s\n' "$_pi_snippet" >>"$_pi_tmp"
+  printf '%s\n' '# END valise managed block' >>"$_pi_tmp"
+  if [ -f "$_pi_target" ]; then
+    _pi_cmp=$(trusted_utility_path cmp) || die "no trusted cmp utility available"
+    if "$_pi_cmp" -s "$_pi_tmp" "$_pi_target"; then
+      _pi_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
+      "$_pi_rm" -f "$_pi_tmp" || die "cannot remove unchanged integration staging file"
+      _pi_tmp=""
+      unset _pi_target _pi_snippet _pi_parent _pi_mkdir _pi_awk _pi_cmp _pi_rm
+      return 0
+    fi
+    _pi_mode=$(file_mode "$_pi_target")
+  else
+    _pi_mode=0644
+  fi
+  [ -n "$_pi_mode" ] || die "cannot read integration target mode: $_pi_target"
+  _pi_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+  "$_pi_chmod" "$_pi_mode" "$_pi_tmp" || die "cannot set integration target mode"
+  _pi_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
+  "$_pi_mv" "$_pi_tmp" "$_pi_target" || die "cannot publish integration target: $_pi_target"
+  _pi_tmp=""
+  unset _pi_target _pi_snippet _pi_parent _pi_mkdir _pi_awk _pi_cmp _pi_rm _pi_mode _pi_chmod _pi_mv
+}
+
+cmd_new() {
+  _new_target=
+  for _new_arg do
+    case "$_new_arg" in
+      --help|-h) printf '%s\n' "usage: valise new [dir]"; return 0 ;;
+      --*) die "unknown new option: $_new_arg" ;;
+      *) [ -z "$_new_target" ] || die "usage: valise new [dir]"; _new_target=$_new_arg ;;
+    esac
+  done
+  [ -n "$_new_target" ] || _new_target=.
+  _new_target=$(path_normalize "$_new_target") || die "cannot resolve new project path"
+  [ "$_new_target" != "/" ] || die "new project path must not be /"
+  if [ -e "$_new_target" ] || [ -L "$_new_target" ]; then
+    [ -d "$_new_target" ] && [ ! -L "$_new_target" ] || die "new project path is not a directory: $_new_target"
+    for _new_entry in "$_new_target"/* "$_new_target"/.[!.]* "$_new_target"/..?*; do
+      if [ -e "$_new_entry" ] || [ -L "$_new_entry" ]; then
+        die "new project directory must be empty: $_new_target"
+      fi
+    done
+  fi
+  _new_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  "$_new_mkdir" -p "$_new_target/shell/module.d" "$_new_target/shell/modules" "$_new_target/shell/release" ||
+    die "cannot create project directories: $_new_target"
+  printf '%s\n' \
+    'name=profile_main' \
+    'version=' \
+    'side_effect=read-only' \
+    'requires=' \
+    'optional=' \
+    'shells=bash zsh ksh' \
+    'platforms=any' \
+    'exports=profile_main_loaded' \
+    'updates=' \
+    'load=modules/profile_main.sh' \
+    >"$_new_target/shell/module.d/profile_main.meta"
+  printf '%s\n' \
+    '# Shared project initialization. Add shell functions or exports here.' \
+    'profile_main_loaded() { :; }' \
+    >"$_new_target/shell/modules/profile_main.sh"
+  printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll project modules\t\n' \
+    >"$_new_target/shell/release/install-variants"
+  printf '# bundle\tshell\troots\ndefault\tbash\tprofile_main\ndefault\tzsh\tprofile_main\ndefault\tksh\tprofile_main\n' \
+    >"$_new_target/shell/release/bundle-roots"
+  printf 'variant=workstation-full\nbundle=default\nintegration_target=~/.profile\n' \
+    >"$_new_target/shell/release/project.conf"
+  printf '%s\n' \
+    "created valise project: $_new_target" \
+    "next steps:" \
+    "  cd ${_new_target#"$(pwd -P)"/}" \
+    "  valise module new hello --exports=hello" \
+    "  valise apply"
+  unset _new_target _new_arg _new_entry _new_mkdir
+}
+
+cmd_module() {
+  _module_subcmd=${1:-}
+  [ -n "$_module_subcmd" ] || die "usage: valise module <new|list|remove> [args]"
+  case "$_module_subcmd" in
+  new)
+    shift
+    _module_name=
+    _module_exports=
+    for _module_arg do
+      case "$_module_arg" in
+        --exports=*) _module_exports=${_module_arg#--exports=} ;;
+        --help|-h) printf '%s\n' "usage: valise module new <name> [--exports=<list>]"; return 0 ;;
+        --*) die "unknown module new option: $_module_arg" ;;
+        *) [ -z "$_module_name" ] || die "usage: valise module new <name> [--exports=<list>]"; _module_name=$_module_arg ;;
+      esac
+    done
+    [ -n "$_module_name" ] || die "module new requires a module name"
+    case "$_module_name" in
+      [abcdefghijklmnopqrstuvwxyz_]*) ;;
+      *) die "invalid module name: $_module_name" ;;
+    esac
+    case "$_module_name" in
+      *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*) die "invalid module name: $_module_name" ;;
+    esac
+    project_config_load
+    _module_meta="$_project_root/shell/module.d/$_module_name.meta"
+    _module_body="$_project_root/shell/modules/$_module_name.sh"
+    [ ! -e "$_module_meta" ] && [ ! -L "$_module_meta" ] || die "module metadata already exists: $_module_name"
+    [ ! -e "$_module_body" ] && [ ! -L "$_module_body" ] || die "module body already exists: $_module_name"
+    _module_export_words=
+    if [ -n "$_module_exports" ]; then
+      _module_old_ifs=${IFS-}
+      IFS=', '
+      for _module_export in $_module_exports; do
+        [ -n "$_module_export" ] || continue
+        case "$_module_export" in
+          [abcdefghijklmnopqrstuvwxyz_]*) ;;
+          *) die "invalid export name: $_module_export" ;;
+        esac
+        case "$_module_export" in
+          *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*) die "invalid export name: $_module_export" ;;
+        esac
+        _module_export_words="$_module_export_words $_module_export"
+      done
+      if [ "${_module_old_ifs+x}" = x ]; then
+        IFS=$_module_old_ifs
+      else
+        unset IFS
+      fi
+    fi
+    _module_export_words=${_module_export_words# }
+    _module_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+    for _module_export in $_module_export_words; do
+      for _module_candidate in "$_project_root"/shell/module.d/*.meta "$_project_root"/shell/layers/*/module.d/*.meta; do
+        [ -f "$_module_candidate" ] || continue
+        if "$_module_awk" -F= -v wanted="$_module_export" '
+          $1 == "exports" {
+            count = split(substr($0, length($1) + 2), words, " ")
+            for (i = 1; i <= count; i++) {
+              if (words[i] == wanted) found = 1
+            }
+          }
+          END { exit found ? 0 : 1 }
+        ' "$_module_candidate" >/dev/null 2>&1; then
+          die "export already exists in another module: $_module_export"
+        fi
+      done
+    done
+    printf '%s\n' \
+      "name=$_module_name" \
+      'version=' \
+      'side_effect=read-only' \
+      'requires=' \
+      'optional=' \
+      'shells=sh' \
+      'platforms=any' \
+      "exports=$_module_export_words" \
+      'updates=' \
+      "load=modules/$_module_name.sh" \
+      >"$_module_meta"
+    {
+      printf '%s\n' "# Edit this module body; valise apply reloads it."
+      if [ -n "$_module_export_words" ]; then
+        _module_old_ifs=${IFS-}
+        IFS=' '
+        for _module_export in $_module_export_words; do
+          printf '%s() {\n  printf "%%s\\n" "hello from %s"\n}\n\n' "$_module_export" "$_module_name"
+        done
+        if [ "${_module_old_ifs+x}" = x ]; then
+          IFS=$_module_old_ifs
+        else
+          unset IFS
+        fi
+      else
+        printf '%s\n' "# This module has no declared exports."
+      fi
+    } >"$_module_body"
+    project_meta_add_require "$_project_root/shell/module.d/profile_main.meta" "$_module_name"
+    info "created module $_module_name and wired it into profile_main"
+    ;;
+  list)
+    shift
+    [ "$#" -eq 0 ] || die "usage: valise module list"
+    project_config_load
+    _module_list_tmp=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-module-list.XXXXXX") ||
+      die "cannot create module list staging file"
+    registry_generate "$_project_root" "$_module_list_tmp"
+    _module_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+    "$_module_awk" -F '\t' 'NR > 1 { print $1 }' "$_module_list_tmp"
+    _module_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
+    "$_module_rm" -f "$_module_list_tmp" || die "cannot remove module list staging file"
+    _module_list_tmp=""
+    ;;
+  remove)
+    shift
+    _module_name=${1:-}
+    [ -n "$_module_name" ] || die "module remove requires a module name"
+    project_config_load
+    _module_meta=
+    _module_source=
+    for _module_candidate in "$_project_root"/shell/module.d/*.meta "$_project_root"/shell/layers/*/module.d/*.meta; do
+      [ -f "$_module_candidate" ] || continue
+      _module_candidate_name=${_module_candidate##*/}
+      _module_candidate_name=${_module_candidate_name%.meta}
+      if [ "$_module_candidate_name" = "$_module_name" ]; then
+        _module_meta=$_module_candidate
+        _module_source=${_module_candidate%/*}
+        break
+      fi
+    done
+    [ -n "$_module_meta" ] || die "module not found: $_module_name"
+    _module_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+    _module_load=$("$_module_awk" -F= '$1 == "load" { print substr($0, length($1) + 2); exit }' "$_module_meta")
+    _module_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
+    if [ -n "$_module_load" ]; then
+      case "$_module_load" in
+      ''|/*|.|..|./*|../*|*/.|*/..|*/./*|*/../*|*//*)
+        die "invalid module load path: $_module_load"
+        ;;
+      esac
+      _module_root=${_module_source%/module.d}
+      source_path_is_physical "$_module_root" "$_module_load" ||
+        die "module load path contains a symlink: $_module_load"
+      [ ! -d "$_module_root/$_module_load" ] || die "module load path is a directory: $_module_load"
+      "$_module_rm" -f "$_module_root/$_module_load" || die "cannot remove module body: $_module_load"
+    fi
+    "$_module_rm" -f "$_module_meta" || die "cannot remove module metadata: $_module_name"
+    for _module_candidate in "$_project_root"/shell/module.d/*.meta "$_project_root"/shell/layers/*/module.d/*.meta; do
+      [ -f "$_module_candidate" ] || continue
+      project_meta_remove_module "$_module_candidate" "$_module_name"
+    done
+    registry_generate "$_project_root" "$_project_root/shell/release/module-registry.tsv"
+    info "removed module $_module_name"
+    ;;
+  *)
+    die "unknown module subcommand: $_module_subcmd (use new, list, or remove)"
+    ;;
+  esac
+}
+
+cmd_build() {
+  _build_out=
+  _build_variant=
+  _build_bundle=
+  for _build_arg do
+    case "$_build_arg" in
+      --variant=*) _build_variant=${_build_arg#--variant=} ;;
+      --bundle=*) _build_bundle=${_build_arg#--bundle=} ;;
+      --help|-h) printf '%s\n' "usage: valise build [--variant=<name>] [--bundle=<name>] [out]"; return 0 ;;
+      --*) die "unknown build option: $_build_arg" ;;
+      *) [ -z "$_build_out" ] || die "usage: valise build [--variant=<name>] [--bundle=<name>] [out]"; _build_out=$_build_arg ;;
+    esac
+  done
+  project_config_load
+  [ -n "$_build_variant" ] || _build_variant=$_project_variant
+  [ -n "$_build_bundle" ] || _build_bundle=$_project_bundle
+  [ -n "$_build_out" ] || _build_out=$_project_root/build/release
+  _build_out=$(path_normalize "$_build_out") || die "cannot resolve build output path"
+  if [ "$_build_out" = "$_project_root/build/release" ] && { [ -e "$_build_out" ] || [ -L "$_build_out" ]; }; then
+    remove_tree "$_build_out" || die "cannot clear previous build output: $_build_out"
+  fi
+  cmd_assemble --variant="$_build_variant" --bundle="$_build_bundle" "$_build_out"
+  unset _build_out _build_arg _build_variant _build_bundle
+}
+
+cmd_apply() {
+  _apply_variant=
+  _apply_bundle=
+  _apply_target=
+  for _apply_arg do
+    case "$_apply_arg" in
+      --variant=*) _apply_variant=${_apply_arg#--variant=} ;;
+      --bundle=*) _apply_bundle=${_apply_arg#--bundle=} ;;
+      --target=*) _apply_target=${_apply_arg#--target=} ;;
+      --help|-h) printf '%s\n' "usage: valise apply [--variant=<name>] [--bundle=<name>] [--target=<file>]"; return 0 ;;
+      --*) die "unknown apply option: $_apply_arg" ;;
+    esac
+  done
+  project_config_load
+  [ -n "$_apply_variant" ] || _apply_variant=$_project_variant
+  [ -n "$_apply_bundle" ] || _apply_bundle=$_project_bundle
+  [ -n "$_apply_target" ] || _apply_target=$_project_integration_target
+  case "$_apply_target" in
+  '~'/*) _apply_target=$HOME/${_apply_target#"~"/} ;;
+  esac
+  case "$_apply_target" in
+  /*) ;;
+  *) die "integration target must be absolute: $_apply_target" ;;
+  esac
+  _apply_target=$(path_normalize "$_apply_target") || die "cannot resolve integration target"
+  cmd_build --variant="$_apply_variant" --bundle="$_apply_bundle"
+  _apply_build_out=$_project_root/build/release
+  _apply_old_pwd=$(pwd -P) || die "cannot resolve current directory"
+  cd "$_apply_build_out" || die "cannot enter build output: $_apply_build_out"
+  cmd_install --no-shell-integration || die "valise install failed"
+  cd "$_apply_old_pwd" || die "cannot restore project directory: $_apply_old_pwd"
+  _apply_snippet=$(cmd_init profile --compiled) || die "cannot generate compiled integration snippet"
+  project_write_integration "$_apply_target" "$_apply_snippet"
+  if [ "$_apply_target" = "$HOME/.profile" ] && command -v zsh >/dev/null 2>&1; then
+    project_write_integration "$HOME/.zprofile" '. "$HOME/.profile"'
+  fi
+  cmd_verify_active
+  info "applied project: $_project_root"
+  info "integration target: $_apply_target"
+  unset _apply_arg _apply_variant _apply_bundle _apply_target _apply_build_out _apply_snippet _apply_old_pwd
+}
+
+cmd_status() {
+  [ "$#" -eq 0 ] || die "usage: valise status"
+  project_config_load
+  printf 'project: %s\n' "$_project_root"
+  printf 'variant: %s\n' "$_project_variant"
+  printf 'bundle: %s\n' "$_project_bundle"
+  printf 'integration target: %s\n' "$_project_integration_target"
+  if [ -L "$_project_integration_target" ]; then
+    printf 'integration target: symlink (not managed by valise)\n'
+  elif [ -f "$_project_integration_target" ]; then
+    _status_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+    if "$_status_awk" 'index($0, "# BEGIN valise managed block") { found = 1; exit } END { exit !found }' \
+      "$_project_integration_target" 2>/dev/null; then
+      printf 'integration state: managed block present\n'
+    else
+      printf 'integration state: managed block missing\n'
+    fi
+  else
+    printf 'integration state: target missing\n'
+  fi
+  if (registry_generate "$_project_root" "$_project_root/shell/release/module-registry.tsv" 1) >/dev/null 2>&1; then
+    printf 'registry: up to date\n'
+  else
+    printf 'registry: out of date\n'
+  fi
+  if [ -L "$VALISE_ACTIVE_LINK" ]; then
+    _status_active_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
+    if [ -n "$_status_active_target" ] && [ -d "$_status_active_target" ]; then
+      _status_active_id=${_status_active_target##*/}
+      printf 'active release: %s\n' "$_status_active_id"
+    else
+      printf 'active release: broken symlink\n'
+    fi
+  else
+    printf 'active release: none\n'
+  fi
+  _status_build_manifest="$_project_root/build/release/shell/install/profile-release.manifest"
+  if [ -f "$_status_build_manifest" ]; then
+    _status_build_hash=$(file_sha256 "$_status_build_manifest") || die "cannot hash build manifest"
+    printf 'build output: %s\n' "$_project_root/build/release"
+    if [ -n "${_status_active_target:-}" ] && [ -d "$_status_active_target" ]; then
+      if [ -f "$_status_active_target/.valise-manifest" ]; then
+        _status_active_manifest="$_status_active_target/.valise-manifest"
+      else
+        _status_active_manifest="$_status_active_target/shell/install/profile-release.manifest"
+      fi
+      if [ -f "$_status_active_manifest" ]; then
+        _status_active_hash=$(file_sha256 "$_status_active_manifest") || die "cannot hash active manifest"
+        if [ "$_status_build_hash" = "$_status_active_hash" ]; then
+          printf 'drift: active release matches build output\n'
+        else
+          printf 'drift: active release differs from build output\n'
+        fi
+      else
+        printf 'drift: active manifest missing\n'
+      fi
+    else
+      printf 'drift: no active release to compare\n'
+    fi
+  else
+    printf 'build output: not built\n'
+  fi
+  unset _status_awk _status_active_target _status_active_id _status_build_manifest _status_build_hash _status_active_manifest _status_active_hash
+}
+
+
 # valise assemble [--variant=<name>] [--bundle=<name>] <out-dir>
 # Build a release tree for compiled plans from the consuming project in the
 # current directory. The tree holds exactly what the plans source, at the paths
@@ -3790,6 +4327,11 @@ case "$_cmd" in
   variant) cmd_variant "$@" ;;
   make-manifest) cmd_make_manifest "$@" ;;
   registry) cmd_registry "$@" ;;
+  new) cmd_new "$@" ;;
+  module) cmd_module "$@" ;;
+  build) cmd_build "$@" ;;
+  apply) cmd_apply "$@" ;;
+  status) cmd_status "$@" ;;
   compile) cmd_compile "$@" ;;
   assemble) cmd_assemble "$@" ;;
   explain-variant) cmd_explain_variant "$@" ;;
