@@ -23,7 +23,7 @@ usage() {
     "" \
     "Commands:" \
     "  init [bash|zsh|ksh|sh|profile|fish] [--compiled]  Output shell integration snippet" \
-    "  install [--no-shell-integration]  Install or update the active release" \
+    "  install [--integration=<auto|profile|none>] [--no-shell-integration]  Install or update the active release" \
     "  verify-active [--print-root] Verify the sealed active release" \
     "  doctor                     Run environment diagnostics" \
     "  variant [list|use <sha>]   List installed releases / switch active release" \
@@ -2409,6 +2409,69 @@ print_fish_integration() {
     "end"
 }
 
+# Emit a POSIX shell integration snippet for the active release.
+#
+# print_posix_integration <shell|profile> <compiled|loader> <header>
+#
+# The snippet works with either release shape the CLI produces. A compiled
+# release carries generated/installed-modules.<shell>; an engine release
+# carries entrypoints/profile.sh and the loader behind it. The preferred
+# mechanism is tried first and the other one is the fallback, so installing a
+# release can never leave a startup file that loads nothing. "profile" picks
+# the plan for the running shell; a named shell pins that shell's plan.
+print_posix_integration() {
+  _pix_shell=$1
+  _pix_prefer=$2
+  _pix_header=$3
+  case "$_pix_prefer" in
+    compiled | loader) ;;
+    *) return 1 ;;
+  esac
+  case "$_pix_shell" in
+    bash|zsh|ksh) _pix_select="_valise_plan=$_pix_shell" ;;
+    profile|sh)
+      _pix_select='if [ -n "${BASH_VERSION-}" ]; then _valise_plan=bash; elif [ -n "${ZSH_VERSION-}" ]; then _valise_plan=zsh; elif [ -n "${KSH_VERSION-}" ]; then _valise_plan=ksh; else _valise_plan=; fi'
+      ;;
+    *) return 1 ;;
+  esac
+  _pix_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
+  printf '%s\n' \
+    "$_pix_header" \
+    "_valise_active_link=$_pix_active_literal" \
+    'if [ -z "${_valise_profile_loaded:-}" ] || [ "${VALISE_RELOAD:-}" = 1 ]; then' \
+    '  _valise_profile_loaded=1' \
+    "  $_pix_select" \
+    '  _valise_active=$(cd "$_valise_active_link" 2>/dev/null && pwd -P)' \
+    '  if [ -n "$_valise_active" ]; then'
+  if [ "$_pix_prefer" = compiled ]; then
+    printf '%s\n' \
+      '    if [ -n "$_valise_plan" ] && [ -f "$_valise_active/generated/installed-modules.$_valise_plan" ]; then' \
+      '      VALISE_MODULE_ROOT="$_valise_active"' \
+      '      . "$_valise_active/generated/installed-modules.$_valise_plan"' \
+      '      unset VALISE_MODULE_ROOT' \
+      '    elif [ -f "$_valise_active/entrypoints/profile.sh" ]; then' \
+      '      VALISE_ROOT="$_valise_active"' \
+      '      . "$_valise_active/entrypoints/profile.sh"' \
+      '    fi'
+  else
+    printf '%s\n' \
+      '    if [ -f "$_valise_active/entrypoints/profile.sh" ]; then' \
+      '      VALISE_ROOT="$_valise_active"' \
+      '      . "$_valise_active/entrypoints/profile.sh"' \
+      '    elif [ -n "$_valise_plan" ] && [ -f "$_valise_active/generated/installed-modules.$_valise_plan" ]; then' \
+      '      VALISE_MODULE_ROOT="$_valise_active"' \
+      '      . "$_valise_active/generated/installed-modules.$_valise_plan"' \
+      '      unset VALISE_MODULE_ROOT' \
+      '    fi'
+  fi
+  printf '%s\n' \
+    '  fi' \
+    '  unset _valise_active _valise_plan' \
+    'fi' \
+    'unset _valise_active_link'
+  unset _pix_shell _pix_prefer _pix_header _pix_select _pix_active_literal
+}
+
 cmd_init() {
   _shell=""
   _fish_source_tree_mode=0
@@ -2436,59 +2499,24 @@ cmd_init() {
   fi
 
   if [ "$_init_compiled" -eq 1 ]; then
-    # Source the plan `valise compile` generated for the shell from the active
-    # release: generated/installed-modules.<shell>. A shell-specific startup
-    # file (.bash_profile, .zprofile, .kshrc) is only read by that shell, so
-    # its plan is fixed now. ~/.profile is read by several shells (bash when
-    # no .bash_profile/.bash_login exists, ksh, sh, and zsh only if sourced),
-    # so the `profile` target detects the running shell when the snippet runs
-    # and loads nothing for shells without a plan.
+    # A compiled release carries generated/installed-modules.<shell>; an
+    # engine release carries entrypoints/profile.sh. The snippet prefers the
+    # compiled plan and falls back to the loader entrypoint, so it loads
+    # whichever mechanism the installed release actually provides.
     case "$_shell" in
-      bash|zsh|ksh) _init_plan_select="_valise_plan=$_shell" ;;
-      sh|profile) _init_plan_select='if [ -n "${BASH_VERSION-}" ]; then _valise_plan=bash; elif [ -n "${ZSH_VERSION-}" ]; then _valise_plan=zsh; elif [ -n "${KSH_VERSION-}" ]; then _valise_plan=ksh; else _valise_plan=; fi' ;;
+      bash|zsh|ksh|sh|profile) ;;
       *) die "--compiled supports bash, zsh, ksh, sh and profile (compile emits no $_shell plan)" ;;
     esac
-    _shell_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
-    printf '%s\n' \
-      "# valise shell integration (compiled plan)" \
-      "_valise_active_link=${_shell_active_literal}" \
-      "if [ -z \"\${_valise_compiled_profile_loaded:-}\" ]; then" \
-      "  _valise_compiled_profile_loaded=1" \
-      "  $_init_plan_select" \
-      "  if [ -n \"\$_valise_plan\" ] && _valise_active=\$(cd \"\$_valise_active_link\" 2>/dev/null && pwd -P) &&" \
-      "    [ -f \"\$_valise_active/generated/installed-modules.\$_valise_plan\" ]; then" \
-      "    VALISE_MODULE_ROOT=\"\$_valise_active\"" \
-      "    . \"\$_valise_active/generated/installed-modules.\$_valise_plan\"" \
-      "    unset VALISE_MODULE_ROOT" \
-      "  fi" \
-      "fi" \
-      "unset _valise_active _valise_active_link _valise_plan"
+    print_posix_integration "$_shell" compiled "# valise shell integration (compiled plan preferred)" || return 1
     return 0
   fi
 
   case "$_shell" in
     bash|zsh|ksh|sh|profile)
       # The loader snippet is POSIX, so `profile` (for ~/.profile) and `sh`
-      # share it; the entrypoint detects the running shell itself.
-      # shell_quote() returns a POSIX single-quoted literal (e.g.
-      # '/home/u/.config/valise/active'). Embed that literal directly
-      # into the generated snippet as the right-hand side of an
-      # assignment to _valise_active_link. Every later use references
-      # "$_valise_active_link" in double quotes — no visually-unquoted
-      # shell_quote output remains in the emitted text.
-      _shell_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
-      printf '%s\n' \
-        "# valise shell integration" \
-        "_valise_active_link=${_shell_active_literal}" \
-        "if [ -L \"\$_valise_active_link/entrypoints/profile.sh\" ] || [ -f \"\$_valise_active_link/entrypoints/profile.sh\" ]; then" \
-        "  _valise_active=\$(cd \"\$_valise_active_link\" 2>/dev/null && pwd -P)" \
-        "  if [ -n \"\$_valise_active\" ]; then" \
-        "    VALISE_ROOT=\"\$_valise_active\"" \
-        "    . \"\$_valise_active/entrypoints/profile.sh\"" \
-        "  fi" \
-        "  unset _valise_active" \
-        "fi" \
-        "unset _valise_active_link"
+      # share it; the entrypoint detects the running shell itself. It also
+      # falls back to a compiled plan when the release carries one instead.
+      print_posix_integration "$_shell" loader "# valise shell integration" || return 1
       ;;
     fish)
       print_fish_integration
@@ -2550,6 +2578,31 @@ cmd_doctor() {
     _status=1
   else
     printf '  info: no active release configured\n'
+  fi
+
+  # Report the shared POSIX integration file and whether valise owns a block
+  # in it. A .bash_profile shadow is informational because bash stops reading
+  # ~/.profile once it exists.
+  if [ -n "${HOME:-}" ]; then
+    _doctor_profile=$HOME/.profile
+    printf '  integration file: %s\n' "$_doctor_profile"
+    if [ -L "$_doctor_profile" ]; then
+      printf '  warn: integration file is a symlink: %s\n' "$_doctor_profile"
+    elif [ -f "$_doctor_profile" ]; then
+      _doctor_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+      if "$_doctor_awk" 'index($0, "# BEGIN valise managed block") { found = 1; exit } END { exit !found }' \
+        "$_doctor_profile" 2>/dev/null; then
+        printf '  ok: integration file contains the valise managed block\n'
+      else
+        printf '  warn: integration file exists but has no valise managed block\n'
+      fi
+      if [ -f "$HOME/.bash_profile" ]; then
+        printf '  warn: .bash_profile exists and prevents bash from reading %s\n' "$_doctor_profile"
+      fi
+    else
+      printf '  info: integration file is not present\n'
+    fi
+    unset _doctor_profile _doctor_awk
   fi
 
   # Platform check (informational only; install and variant use are portable
@@ -2693,12 +2746,16 @@ cmd_variant() {
 }
 
 cmd_install() {
-  _install_integration=1
+  _install_integration=auto
   for _arg do
     case "$_arg" in
       --help|-h) usage; return 0 ;;
-      --no-shell-integration) _install_integration=0 ;;
-      --*) die "unknown install option: $_arg (usage: valise install [--no-shell-integration])" ;;
+      --no-shell-integration) _install_integration=none ;;
+      --integration=auto|--integration=profile|--integration=none)
+        _install_integration=${_arg#--integration=}
+        ;;
+      --integration=*) die "unknown install integration mode: ${_arg#--integration=} (use auto, profile, or none)" ;;
+      --*) die "unknown install option: $_arg (usage: valise install [--integration=<auto|profile|none>] [--no-shell-integration])" ;;
     esac
   done
 
@@ -2853,7 +2910,7 @@ cmd_install() {
   # currently expose the generated Fish plan; older releases may expose the
   # project Fish entrypoint, so the emitted integration handles both.
   _fish_path=$(trusted_utility_path fish 2>/dev/null || :)
-  if [ "$_install_integration" -eq 1 ] && [ -n "$_fish_path" ]; then
+  if [ "$_install_integration" = auto ] && [ -n "$_fish_path" ]; then
     _fish_conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
     _fish_hook="$_fish_conf_dir/valise.fish"
     _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
@@ -2889,6 +2946,7 @@ cmd_install() {
     _hook_actual=$("$_cat_path" "$_fish_hook") || die "cannot read published Fish hook"
     [ "$_hook_actual" = "$_hook_expected" ] || die "published Fish hook contents mismatch"
     info "Fish hook deployed: $_fish_hook"
+    info "remove this file to uninstall the Fish integration"
   fi
 
   # Deploy POSIX shell integration to the platform-appropriate profile file.
@@ -2903,7 +2961,15 @@ cmd_install() {
     */zsh|zsh)   _posix_shell_name=zsh ;;
     */ksh|ksh)   _posix_shell_name=ksh ;;
   esac
-  if [ "$_install_integration" -eq 1 ] && [ -n "$_posix_shell_name" ] && [ -n "${HOME:-}" ]; then
+  if [ "$_install_integration" = profile ] && [ -n "${HOME:-}" ]; then
+    _install_profile_target=$HOME/.profile
+    _install_profile_snippet=$(cmd_init profile --compiled) || die "cannot generate profile integration snippet"
+    project_write_integration "$_install_profile_target" "$_install_profile_snippet"
+    info "profile integration deployed: $_install_profile_target"
+    info "remove the valise managed block to uninstall this integration"
+    unset _install_profile_target _install_profile_snippet
+  fi
+  if [ "$_install_integration" = auto ] && [ -n "$_posix_shell_name" ] && [ -n "${HOME:-}" ]; then
     _posix_platform=$(trusted_uname -s 2>/dev/null || echo unknown)
     _posix_profile=""
     case "$_posix_platform" in
@@ -2937,7 +3003,6 @@ cmd_install() {
         if [ "$_posix_already" -eq 1 ]; then
           info "shell integration already present: $_posix_profile"
         else
-          _posix_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || die "cannot quote active link path"
           _posix_profile_dir=$(path_parent "$_posix_profile")
           if [ ! -d "$_posix_profile_dir" ]; then
             _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
@@ -2950,19 +3015,10 @@ cmd_install() {
             "$_cat_path" "$_posix_profile" > "$_posix_tmp" || die "cannot copy existing profile"
             printf '\n' >> "$_posix_tmp"
           fi
-          {
-            printf '%s\n' "# valise shell integration — $_posix_marker"
-            printf '%s\n' "_valise_active_link=${_posix_active_literal}"
-            printf '%s\n' "if [ -L \"\$_valise_active_link/entrypoints/profile.sh\" ] || [ -f \"\$_valise_active_link/entrypoints/profile.sh\" ]; then"
-            printf '%s\n' "  _valise_active=\$(cd \"\$_valise_active_link\" 2>/dev/null && pwd -P)"
-            printf '%s\n' "  if [ -n \"\$_valise_active\" ]; then"
-            printf '%s\n' "    VALISE_ROOT=\"\$_valise_active\""
-            printf '%s\n' "    . \"\$_valise_active/entrypoints/profile.sh\""
-            printf '%s\n' "  fi"
-            printf '%s\n' "  unset _valise_active"
-            printf '%s\n' "fi"
-            printf '%s\n' "unset _valise_active_link"
-          } >> "$_posix_tmp" || die "cannot write profile snippet"
+          _posix_snippet=$(print_posix_integration "$_posix_shell_name" loader \
+            "# valise shell integration — $_posix_marker") || die "cannot generate profile snippet"
+          printf '%s\n' "$_posix_snippet" >> "$_posix_tmp" || die "cannot write profile snippet"
+          unset _posix_snippet
           _chmod_path=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
           if [ -f "$_posix_profile" ]; then
             _posix_existing_mode=$(file_mode "$_posix_profile")
@@ -2975,6 +3031,7 @@ cmd_install() {
           "$_mv_path" -f "$_posix_tmp" "$_posix_profile" || die "cannot publish profile snippet"
           _posix_tmp=""
           info "shell integration deployed: $_posix_profile"
+          info "remove the valise-managed lines to uninstall this integration"
         fi
       fi
     fi

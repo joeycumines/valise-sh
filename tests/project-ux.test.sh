@@ -130,6 +130,28 @@ if [ ! -e "$_home/.local/state/valise/lock" ] && [ ! -L "$_home/.local/state/val
 else
   fail "apply leaves no state lock behind"
 fi
+# The default apply payload is the shared profile plus the one-line zsh
+# pointer zsh needs; nothing else may appear in the home directory.
+if [ ! -e "$_home/.bash_profile" ] &&
+  [ ! -e "$_home/.bashrc" ] &&
+  [ ! -e "$_home/.kshrc" ] &&
+  [ ! -e "$_home/.zshrc" ] &&
+  [ ! -e "$_home/.config/fish/conf.d/valise.fish" ]; then
+  pass "apply creates no shell-specific or Fish startup file"
+else
+  fail "apply creates no shell-specific or Fish startup file"
+fi
+if [ -f "$_home/.zprofile" ] &&
+  [ "$(awk '/^# BEGIN valise managed block$/{f=1;next} /^# END valise managed block$/{f=0} f' \
+    "$_home/.zprofile" | grep -c .)" -eq 1 ] &&
+  awk '/^# BEGIN valise managed block$/{f=1;next} /^# END valise managed block$/{f=0} f' \
+    "$_home/.zprofile" | grep -Fx '. "$HOME/.profile"' >/dev/null; then
+  pass "apply zprofile managed block is the one-line profile pointer"
+else
+  fail "apply zprofile managed block is the one-line profile pointer"
+  printf '%s\n' '--- .zprofile ---' >&2
+  cat "$_home/.zprofile" >&2
+fi
 if HOME="$_home" /bin/bash -lc 'hello' 2>"$_test_home/bash.err" | grep -F 'project ux hello' >/dev/null; then
   pass "bash login shell loads the applied module"
 else
@@ -153,6 +175,24 @@ elif HOME="$_home" /bin/zsh -lc 'hello' 2>"$_test_home/zsh.err" | grep -F 'proje
 else
   fail "zsh login shell loads the applied module"
   cat "$_test_home/zsh.err" >&2
+fi
+if [ ! -x /bin/dash ]; then
+  if [ "${VALISE_REQUIRE_TOOLING:-0}" = 1 ]; then
+    fail "dash loads nothing from the applied profile (/bin/dash unavailable)"
+  else
+    skip "dash loads nothing from the applied profile (/bin/dash unavailable)"
+  fi
+elif HOME="$_home" /bin/dash -c '. "$HOME/.profile"' \
+  2>"$_test_home/dash-source.err"; then
+  if HOME="$_home" /bin/dash -c '. "$HOME/.profile"; command -v hello >/dev/null 2>&1' \
+    2>"$_test_home/dash.err"; then
+    fail "dash loads nothing from the applied profile"
+  else
+    pass "dash loads nothing from the applied profile"
+  fi
+else
+  fail "applied profile sources cleanly in dash"
+  cat "$_test_home/dash-source.err" >&2
 fi
 
 _status=$(cd "$_project" && _env status 2>"$_test_home/status.err")

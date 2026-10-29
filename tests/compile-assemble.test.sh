@@ -439,6 +439,138 @@ else
   pass "install --no-shell-integration writes no startup file or Fish hook"
 fi
 
+# The explicit none mode is equivalent to the legacy opt-out.
+_mode_none_home="$_test_root/home-mode-none"
+mkdir -p "$_mode_none_home"
+if (cd "$_release" && HOME="$_mode_none_home" XDG_DATA_HOME="$_mode_none_home/.local/share" \
+  XDG_CONFIG_HOME="$_mode_none_home/.config" XDG_STATE_HOME="$_mode_none_home/.local/state" \
+  SHELL=/bin/bash "$_link" install --integration=none) \
+  >"$_test_root/install-mode-none.out" 2>"$_test_root/install-mode-none.err" &&
+  [ ! -e "$_mode_none_home/.profile" ] &&
+  [ ! -e "$_mode_none_home/.bash_profile" ] &&
+  [ ! -e "$_mode_none_home/.config/fish/conf.d/valise.fish" ]; then
+  pass "install --integration=none writes no startup file or Fish hook"
+else
+  fail "install --integration=none writes no startup file or Fish hook"
+  cat "$_test_root/install-mode-none.err" >&2
+fi
+
+# Explicit profile integration writes the shared profile and no shell-specific
+# POSIX startup file.
+_mode_profile_home="$_test_root/home-mode-profile"
+mkdir -p "$_mode_profile_home"
+if (cd "$_release" && HOME="$_mode_profile_home" XDG_DATA_HOME="$_mode_profile_home/.local/share" \
+  XDG_CONFIG_HOME="$_mode_profile_home/.config" XDG_STATE_HOME="$_mode_profile_home/.local/state" \
+  SHELL=/bin/bash "$_link" install --integration=profile) \
+  >"$_test_root/install-mode-profile.out" 2>"$_test_root/install-mode-profile.err" &&
+  [ -f "$_mode_profile_home/.profile" ] &&
+  grep -F '# BEGIN valise managed block' "$_mode_profile_home/.profile" >/dev/null &&
+  [ ! -e "$_mode_profile_home/.bash_profile" ] &&
+  [ ! -e "$_mode_profile_home/.bashrc" ] &&
+  [ ! -e "$_mode_profile_home/.zprofile" ] &&
+  [ ! -e "$_mode_profile_home/.zshrc" ] &&
+  [ ! -e "$_mode_profile_home/.kshrc" ] &&
+  [ ! -e "$_mode_profile_home/.config/fish/conf.d/valise.fish" ]; then
+  pass "install --integration=profile writes only the shared profile"
+else
+  fail "install --integration=profile writes only the shared profile"
+  cat "$_test_root/install-mode-profile.err" >&2
+fi
+
+# Doctor reports the shared profile, its managed block, and .bash_profile
+# shadowing without failing merely because integration is absent.
+_doctor_profile_out=$(HOME="$_mode_profile_home" XDG_DATA_HOME="$_mode_profile_home/.local/share" \
+  XDG_CONFIG_HOME="$_mode_profile_home/.config" XDG_STATE_HOME="$_mode_profile_home/.local/state" \
+  "$_link" doctor 2>"$_test_root/doctor-profile.err")
+if printf '%s\n' "$_doctor_profile_out" | grep -F 'integration file:' >/dev/null &&
+  printf '%s\n' "$_doctor_profile_out" | grep -F 'integration file contains the valise managed block' >/dev/null; then
+  pass "doctor reports the profile integration file and managed block"
+else
+  fail "doctor reports the profile integration file and managed block"
+  printf '%s\n' "$_doctor_profile_out" >&2
+  cat "$_test_root/doctor-profile.err" >&2
+fi
+unset _doctor_profile_out
+
+# An engine-shaped release carries entrypoints/profile.sh and the loader
+# behind it, but no compiled plans. The integration snippet must fall back
+# to the loader entrypoint so installing it never leaves a startup file that
+# loads nothing.
+_engine_release="$_test_root/engine-release"
+mkdir -p "$_engine_release/entrypoints" "$_engine_release/lib" \
+  "$_engine_release/module.d" "$_engine_release/modules"
+cp "$_repo/entrypoints/profile.sh" "$_engine_release/entrypoints/profile.sh"
+cp "$_repo/lib/metadata.sh" "$_repo/lib/capabilities.sh" "$_repo/lib/loader.sh" \
+  "$_engine_release/lib/"
+cat >"$_engine_release/module.d/engine_root.meta" <<'EOF'
+name=engine_root
+version=1.0.0
+side_effect=read-only
+requires=
+optional=
+shells=bash zsh ksh
+platforms=any
+exports=engine_root_ready
+updates=
+load=modules/engine_root.sh
+EOF
+cat >"$_engine_release/modules/engine_root.sh" <<'EOF'
+engine_root_ready() { :; }
+EOF
+chmod 0644 "$_engine_release/entrypoints/profile.sh" "$_engine_release/lib/"*.sh \
+  "$_engine_release/module.d/engine_root.meta" "$_engine_release/modules/engine_root.sh"
+if (cd "$_engine_release" && "$_link" make-manifest .) >"$_test_root/engine-manifest.out" 2>&1; then
+  pass "engine-shaped release tree is manifestable"
+else
+  fail "engine-shaped release tree is manifestable"
+  cat "$_test_root/engine-manifest.out" >&2
+fi
+
+_engine_home="$_test_root/home-engine-release"
+mkdir -p "$_engine_home"
+if (cd "$_engine_release" && HOME="$_engine_home" XDG_DATA_HOME="$_engine_home/.local/share" \
+  XDG_CONFIG_HOME="$_engine_home/.config" XDG_STATE_HOME="$_engine_home/.local/state" \
+  "$_link" install --integration=profile) >"$_test_root/install-engine.out" 2>&1; then
+  pass "install --integration=profile succeeds for an engine-shaped release"
+else
+  fail "install --integration=profile succeeds for an engine-shaped release"
+  cat "$_test_root/install-engine.out" >&2
+fi
+if HOME="$_engine_home" XDG_CONFIG_HOME="$_engine_home/.config" \
+  VALISE_MODULES=engine_root /bin/bash -c '. "$HOME/.profile"; command -v engine_root_ready' \
+  >"$_test_root/engine-profile-bash.out" 2>"$_test_root/engine-profile-bash.err"; then
+  pass "profile integration falls back to the loader entrypoint for an engine-shaped release"
+else
+  fail "profile integration falls back to the loader entrypoint for an engine-shaped release"
+  cat "$_test_root/engine-profile-bash.err" >&2
+fi
+
+# The same fallback must work in the shell-specific startup file that the
+# default (auto) integration writes.
+_engine_auto_home="$_test_root/home-engine-auto"
+mkdir -p "$_engine_auto_home"
+if (cd "$_engine_release" && HOME="$_engine_auto_home" XDG_DATA_HOME="$_engine_auto_home/.local/share" \
+  XDG_CONFIG_HOME="$_engine_auto_home/.config" XDG_STATE_HOME="$_engine_auto_home/.local/state" \
+  SHELL=/bin/bash "$_link" install) >"$_test_root/install-engine-auto.out" 2>&1; then
+  pass "install succeeds for an engine-shaped release"
+else
+  fail "install succeeds for an engine-shaped release"
+  cat "$_test_root/install-engine-auto.out" >&2
+fi
+case "$(uname -s 2>/dev/null)" in
+  Darwin) _engine_auto_profile="$_engine_auto_home/.bash_profile" ;;
+  *) _engine_auto_profile="$_engine_auto_home/.bashrc" ;;
+esac
+if [ -f "$_engine_auto_profile" ] &&
+  HOME="$_engine_auto_home" XDG_CONFIG_HOME="$_engine_auto_home/.config" \
+  VALISE_MODULES=engine_root /bin/bash -c '. "$1"; command -v engine_root_ready' \
+  sh "$_engine_auto_profile" >"$_test_root/engine-auto-bash.out" 2>"$_test_root/engine-auto-bash.err"; then
+  pass "auto integration loads an engine-shaped release through the loader entrypoint"
+else
+  fail "auto integration loads an engine-shaped release through the loader entrypoint"
+  cat "$_test_root/engine-auto-bash.err" >&2
+fi
+
 # The profile target is shared by several shells. It must select the plan for
 # the running shell and load nothing in dash.
 _int_home="$_test_root/home-profile"
@@ -514,6 +646,33 @@ elif HOME="$_int_home" XDG_CONFIG_HOME="$_int_home/.config" \
 else
   fail "profile snippet sources cleanly in dash"
   cat "$_test_root/profile-dash-source.err" >&2
+fi
+
+# An assembled release carries compiled plans but no loader entrypoint. The
+# shell-specific startup file the default (auto) integration writes must load
+# the compiled plan instead of leaving a file that loads nothing.
+_assembled_auto_home="$_test_root/home-assembled-auto"
+mkdir -p "$_assembled_auto_home"
+if (cd "$_release" && HOME="$_assembled_auto_home" XDG_DATA_HOME="$_assembled_auto_home/.local/share" \
+  XDG_CONFIG_HOME="$_assembled_auto_home/.config" XDG_STATE_HOME="$_assembled_auto_home/.local/state" \
+  SHELL=/bin/bash "$_link" install) >"$_test_root/install-assembled-auto.out" 2>&1; then
+  pass "install succeeds for an assembled release"
+else
+  fail "install succeeds for an assembled release"
+  cat "$_test_root/install-assembled-auto.out" >&2
+fi
+case "$(uname -s 2>/dev/null)" in
+  Darwin) _assembled_auto_profile="$_assembled_auto_home/.bash_profile" ;;
+  *) _assembled_auto_profile="$_assembled_auto_home/.bashrc" ;;
+esac
+if [ -f "$_assembled_auto_profile" ] &&
+  HOME="$_assembled_auto_home" XDG_CONFIG_HOME="$_assembled_auto_home/.config" \
+  /bin/bash -c '. "$1"; command -v root_ready >/dev/null 2>&1; command -v vendor_tool_ready >/dev/null 2>&1' \
+  sh "$_assembled_auto_profile" >"$_test_root/assembled-auto-bash.out" 2>"$_test_root/assembled-auto-bash.err"; then
+  pass "auto integration loads an assembled release through the compiled plan"
+else
+  fail "auto integration loads an assembled release through the compiled plan"
+  cat "$_test_root/assembled-auto-bash.err" >&2
 fi
 
 # variant list must mark the release the active link names, not merely any
