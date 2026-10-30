@@ -37,14 +37,21 @@ load=modules/system/example_tool.sh
 | `name` | Yes | Stable identifier matching `[a-z_][A-Za-z0-9_]*` |
 | `requires` | No | Space-separated hard dependencies (loaded first) |
 | `optional` | No | Space-separated best-effort dependencies |
-| `shells` | Yes | Supported shells: `sh`, `bash`, `zsh`, `ksh`, `fish` |
+| `shells` | Yes | Supported shells: `sh`, `bash`, `zsh`, `ksh`, `fish`. `sh` means every POSIX shell (sh, bash, zsh, ksh, dash) |
 | `platforms` | Yes | `any`, `darwin`, `linux`, or BSD family values |
-| `side_effect` | Yes | One of: `read-only`, `path-env`, `generated-file`, `update-network`, `install-time`, `local-secret`, `work-only` |
+| `side_effect` | Yes | One of: `read-only`, `path-env`, `generated-file`, `update-network`, `install-time`, `local-secret`, `local-state`, `work-only` |
 | `exports` | No | Public functions this module declares |
 | `updates` | No | Update registration identifiers mapped in the project update manifest |
 | `version` | No | Module version (digit-first, digits/letters/`.`/`_`/`-`); different versions of one name across roots fail closed with a skew diagnostic |
-| `load` | Yes | Repository-relative path to the module body (mutually exclusive with `load_hook`; exactly one required) |
-| `load_hook` | No | Shell function hook for bridge-backed records (mutually exclusive with `load`) |
+| `load` | Conditionally | Repository-relative path to the module body (mutually exclusive with `load_hook`) |
+| `load_hook` | Conditionally | Shell function hook for bridge-backed records (mutually exclusive with `load`) |
+
+At least one of `load`, `load_hook`, or `requires` must be present. `load` and
+`load_hook` are mutually exclusive; `load` and `requires` are not — a module
+may declare both and will load its dependencies first, then its own body. A
+module with `requires` and no load target is a **meta module**: it names
+dependencies and has no body. See
+[module-abi.md](module-abi.md#meta-modules).
 
 ### Naming
 
@@ -60,6 +67,13 @@ closed naming both paths.
 Use `sp_cap_*` functions from `lib/capabilities.sh` instead of open-coding
 platform-specific commands. The POSIX entrypoint sources the capability
 library before the loader, so module bodies can call these directly.
+
+**The helpers stay available after the profile loads.** A compiled plan
+sources the capability prelude and leaves it in place, so a function your
+module defines can call `sp_cap_os` or any other helper long after the plan
+finished loading. Both the compiled plan and the loader keep the helpers
+available at runtime.
+
 Available capabilities include:
 
 - `sp_cap_canonical_path <path>` — resolve absolute path through symlinks
@@ -81,6 +95,31 @@ policy plus the curated index lives in
 [shared-modules.md](shared-modules.md).
 
 ## Authoring workflow
+
+### In a consuming project
+
+Inside a project that uses the CLI, the CLI creates the files for you:
+
+```sh
+valise new demo                 # scaffold a project
+cd demo
+valise module new hello --exports=hello
+```
+
+`valise module new` writes `shell/module.d/hello.meta` and
+`shell/modules/hello.sh`, and wires `hello` into the seed aggregator's
+`requires=` so the module is actually reachable. It refuses a duplicate
+export name. Edit the body, then:
+
+```sh
+valise build                    # assemble to build/release
+valise apply                    # build, install, integrate, verify
+```
+
+You never hand-write the registry: `valise build` and `valise apply`
+regenerate `shell/release/module-registry.tsv` from the metadata.
+
+### In the engine repository
 
 1. Write the two files. Start from an existing pair — `module.d/contrib_pager.meta`
    plus `modules/system/contrib_pager.sh` is the smallest real example.
@@ -119,6 +158,12 @@ policy plus the curated index lives in
    make test-parser-support
    ```
 
+   This target belongs to the engine's source repository. The npm package
+   ships the runtime and the docs, not the Makefile or the parser table, so
+   a package consumer checks parser coverage by hand: run every POSIX shell
+   you claim to support over the body (`sh -n`, `bash -n`, `zsh -n`,
+   `ksh -n`) and confirm each one accepts it.
+
 5. Publish a release containing your module tree and prove the whole
    path end to end (make-manifest, install, verify-active):
 
@@ -145,11 +190,14 @@ VALISE_MODE=strict \
 ## Testing checklist
 
 For every new module, run each step and confirm the named behavior. The
-commands all exist in this repository.
+commands in steps 1 to 3 work from a checkout of this repository or from an
+npm-installed package; the `make` targets belong to the source repository
+only.
 
 1. `sp_metadata_read module.d/<name>.meta` prints the normalized record
    (step 2 above) and the load path is covered by a
-   `manifests/parser-support.tsv` row (`make test-parser-support`).
+   `manifests/parser-support.tsv` row (`make test-parser-support` in the
+   source repository).
 2. Source the module in a clean environment — the body prints nothing when
    its prerequisites are absent and defines every name in `exports=`:
 
@@ -166,8 +214,9 @@ commands all exist in this repository.
    (the loader forbids double-definition), and calling an idempotent
    function twice must leave the same state.
 4. The body performs no writes at source time: `side_effect` is
-   `read-only` or `path-env`, and `generated-file`/`update-network`/
-   `install-time` bodies are rejected during ordinary source.
+   `read-only`, `path-env`, or `local-state`, and `generated-file`/
+   `update-network`/`install-time` bodies are rejected during ordinary
+   source.
 5. Every public function appears in `exports=` — the loader verifies each
    declared export exists after the body runs, and cleans them up on
    failure.
@@ -184,10 +233,15 @@ make check-fast
 
 and the full matrix (`make VALISE_REQUIRE_TOOLING=1 check`) before claiming
 release readiness. The extended-runtime lanes are strict in CI and can be
-required locally with the same override.
+required locally with the same override. Both targets live in the source
+repository; the npm package ships the runtime and docs, not the Makefile.
 
 `valise layer-lint <layer-name>` validates a contribution layer's
-structure, namespace compliance, file permissions, and metadata integrity,
-but it requires a consuming project's `shell/layers/` tree and
-`hack/validate-layer.py`, so it does not run from a bare checkout and is
-not part of this workflow.
+structure, namespace compliance, file permissions, metadata integrity, and
+dependency closure. It needs no Python, but it does need a layer tree: a
+provider directory under a consuming project's `shell/layers/`, or a path to
+a layer tree containing `module.d/`. In a consuming project:
+
+```sh
+valise layer-lint <provider-name>
+```
