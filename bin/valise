@@ -7,7 +7,7 @@
 
 set -eu
 
-VALISE_VERSION="0.1.0"
+VALISE_VERSION="0.2.0"
 
 usage() {
   printf '%s\n' \
@@ -4632,6 +4632,13 @@ cmd_apply() {
   *) die "integration target must be absolute: $_apply_target" ;;
   esac
   _apply_target=$(path_normalize "$_apply_target") || die "cannot resolve integration target"
+  # The zsh pointer is only written for the shared ~/.profile target. The
+  # comparison must be between two normalized paths: $HOME is a raw string
+  # that may end in a slash or contain a redundant separator, while
+  # _apply_target is already normalized. Comparing a normalized path with a
+  # raw one silently skipped the pointer for such a HOME.
+  _apply_home_profile=$(path_normalize "$HOME/.profile")
+  _apply_home_zprofile=$(path_normalize "$HOME/.zprofile")
   cmd_build --variant="$_apply_variant" --bundle="$_apply_bundle"
   _apply_build_out=$_project_root/build/release
   _apply_old_pwd=$(pwd -P) || die "cannot resolve current directory"
@@ -4640,13 +4647,14 @@ cmd_apply() {
   cd "$_apply_old_pwd" || die "cannot restore project directory: $_apply_old_pwd"
   _apply_snippet=$(cmd_init profile --compiled) || die "cannot generate compiled integration snippet"
   project_write_integration "$_apply_target" "$_apply_snippet"
-  if [ "$_apply_target" = "$HOME/.profile" ] && command -v zsh >/dev/null 2>&1; then
-    project_write_integration "$HOME/.zprofile" '. "$HOME/.profile"'
+  if [ "$_apply_target" = "$_apply_home_profile" ] && command -v zsh >/dev/null 2>&1; then
+    project_write_integration "$_apply_home_zprofile" '. "$HOME/.profile"'
   fi
   cmd_verify_active
   info "applied project: $_project_root"
   info "integration target: $_apply_target"
-  unset _apply_arg _apply_variant _apply_bundle _apply_target _apply_build_out _apply_snippet _apply_old_pwd
+  unset _apply_arg _apply_variant _apply_bundle _apply_target _apply_build_out _apply_snippet _apply_old_pwd \
+    _apply_home_profile _apply_home_zprofile
 }
 
 cmd_status() {

@@ -251,6 +251,38 @@ else
   cat "$_test_home/build-after-remove.err" >&2
 fi
 
+# A HOME that ends in a slash is a legal HOME. The apply command decides
+# whether to write the zsh pointer by comparing the integration target with
+# ~/.profile; a comparison between a normalized path and the raw HOME string
+# misses the match for such a HOME, and the zsh pointer is silently skipped.
+# A zsh user then gets no profile integration at all.
+_slash_home="$_test_home/slash-home"
+_slash_project="$_test_home/slash-project"
+mkdir -p "$_slash_home"
+(cd "$_test_home" && _env new slash-project) >"$_test_home/slash-new.out" 2>"$_test_home/slash-new.err" || :
+_slash_env() {
+  HOME="$_slash_home/" \
+  XDG_DATA_HOME="$_slash_home/.local/share" \
+  XDG_CONFIG_HOME="$_slash_home/.config" \
+  XDG_STATE_HOME="$_slash_home/.local/state" \
+  "$_valise" "$@"
+}
+if (cd "$_slash_project" && _slash_env apply) \
+  >"$_test_home/slash-apply.out" 2>"$_test_home/slash-apply.err"; then
+  if [ -f "$_slash_home/.zprofile" ] &&
+    grep -F '# BEGIN valise managed block' "$_slash_home/.zprofile" >/dev/null &&
+    grep -F '. "$HOME/.profile"' "$_slash_home/.zprofile" >/dev/null; then
+    pass "apply writes the zsh pointer when HOME ends in a slash"
+  else
+    fail "apply writes the zsh pointer when HOME ends in a slash"
+    cat "$_slash_home/.zprofile" >&2 2>/dev/null || :
+  fi
+else
+  fail "apply writes the zsh pointer when HOME ends in a slash"
+  cat "$_test_home/slash-apply.err" >&2
+fi
+unset _slash_home _slash_project
+
 printf '\n=== valise project UX summary ===\n'
 printf 'Total: %d  Pass: %d  Skip: %d  Fail: %d\n' "$_total" "$_pass" "$_skip" "$_fail"
 [ "$_fail" -eq 0 ] || exit 1

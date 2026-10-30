@@ -128,16 +128,23 @@ if _env; then
 
   # The active pointer must name the release that was just installed, and
   # verify-active must resolve that pointer to a directory that verifies.
+  # The comparison is on the resolved directories, not on their spellings:
+  # the CLI writes a normalized target, so a raw comparison fails whenever
+  # the test's own path spelling differs (a TMPDIR ending in a slash, for
+  # example).
   _active_link="$XDG_CONFIG_HOME/valise/active"
   _active_target=$(readlink "$_active_link" 2>/dev/null || :)
+  _active_resolved=$(cd "$_active_target" 2>/dev/null && pwd -P) || _active_resolved=
   _expected_target=$(find "$XDG_DATA_HOME/valise/releases" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
-  if [ -n "$_active_target" ] && [ "$_active_target" = "$_expected_target" ] &&
+  _expected_resolved=$(cd "$_expected_target" 2>/dev/null && pwd -P) || _expected_resolved=
+  if [ -n "$_active_resolved" ] && [ "$_active_resolved" = "$_expected_resolved" ] &&
     [ -d "$_active_target" ]; then
     pass "the active pointer names the installed release directory"
   else
     fail "the active pointer names the installed release directory" \
       "pointer=$_active_target expected=$_expected_target"
   fi
+  unset _active_resolved _expected_resolved
   if "$_valise" verify-active >"$_test_root/verify-active.out" 2>&1; then
     pass "verify-active resolves the active pointer to a verifying release"
   else

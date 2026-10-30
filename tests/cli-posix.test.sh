@@ -40,6 +40,19 @@ check_output_contains() {
   esac
 }
 
+# Exact whole-output comparison. A version check that only looks for a
+# substring accepts "0.2.0-beta" and "10.2.0" as evidence of "0.2.0",
+# so the version contract is pinned exactly.
+check_output_equals() {
+  _desc=$1; _expected=$2; shift 2
+  _out=$("$@" 2>&1) || true
+  if [ "$_out" = "$_expected" ]; then
+    pass "$_desc"
+  else
+    fail "$_desc (expected '$_expected', got '$_out')"
+  fi
+}
+
 # Setup quarantined home
 _test_home=$(mktemp -d "${TMPDIR:-/tmp}/valise-test.XXXXXX")
 _cleanup_done=0
@@ -76,7 +89,16 @@ printf '  valise: %s\n' "$_valise"
 printf '  home: %s\n\n' "$_test_home"
 
 # --- Version ---
-check_output_contains "version prints version string" "0.1.0" "$_valise" version
+check_output_equals "version prints version string" "0.2.0" "$_valise" version
+
+# The release policy requires package.json and bin/valise to carry the same
+# version. A bump that updates one and forgets the other ships a tarball
+# whose metadata disagrees with its own CLI.
+_pkg_version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "$(dirname "$_valise")/../package.json" | head -1)
+check_output_equals "package.json version matches the CLI version" \
+  "$_pkg_version" "$_valise" version
+unset _pkg_version
 
 # --- Help ---
 check_output_contains "help shows usage" "Usage: valise" "$_valise" help
@@ -88,12 +110,19 @@ check_output_contains "init zsh outputs profile source" ". " "$_valise" init zsh
 check_output_contains "init ksh outputs profile source" ". " "$_valise" init ksh
 check_output_contains "init fish outputs protected Fish loader integration" "loader.fish" "$_valise" init fish
 
-# Verify init output contains active link path
+# Verify init output contains active link path. The CLI prints the
+# normalized path, so the expectation is normalized the same way. A raw
+# comparison fails when TMPDIR ends in a slash, because the CLI collapses
+# the doubled separator and the test's template keeps it.
+_init_expected_active=$XDG_CONFIG_HOME/valise/active
+_init_expected_active=$(printf '%s' "$_init_expected_active" |
+  awk '{ n = split($0, p, "/"); out = ""; for (i = 1; i <= n; i++) { if (p[i] == "" || p[i] == ".") continue; out = out "/" p[i] } print out }')
 _init_out=$("$_valise" init bash 2>&1)
 case "$_init_out" in
-  *"$XDG_CONFIG_HOME/valise/active"*) pass "init bash references XDG active path" ;;
-  *) fail "init bash references XDG active path" ;;
+  *"$_init_expected_active"*) pass "init bash references XDG active path" ;;
+  *) fail "init bash references XDG active path (expected '$_init_expected_active')" ;;
 esac
+unset _init_expected_active _init_out
 
 # Generated shell snippets must quote hostile XDG paths as data. In particular,
 # command substitutions in an environment-provided path must not execute while
@@ -264,7 +293,7 @@ if command -v npm >/dev/null 2>&1; then
   _npm_prefix="$_test_home/npm-prefix"
   if npm install --global --offline --prefix "$_npm_prefix" "$_npm_root/$_npm_tgz" >"$_test_home/npm-install.out" 2>&1; then
     pass "npm installs the packed CLI without a registry"
-    if "$_npm_prefix/bin/valise" version 2>/dev/null | grep '^0.1.0$' >/dev/null 2>&1; then
+    if "$_npm_prefix/bin/valise" version 2>/dev/null | grep '^0.2.0$' >/dev/null 2>&1; then
       pass "installed npm binary runs"
     else
       fail "installed npm binary runs"
@@ -620,9 +649,14 @@ else
   fail "variant use does not modify .profile"
 fi
 
-# Verify symlink actually changed
+# Verify symlink actually changed. The pointer names a release directory;
+# compare the directory each path resolves to, not its spelling. The CLI
+# writes a normalized target, so a raw comparison fails whenever the test's
+# own path spelling differs (a TMPDIR ending in a slash, for example).
 _active_target=$(readlink "$XDG_CONFIG_HOME/valise/active" 2>/dev/null || :)
-if [ "$_active_target" = "$_rel2" ]; then
+_active_resolved=$(cd "$_active_target" 2>/dev/null && pwd -P) || _active_resolved=
+_rel2_resolved=$(cd "$_rel2" 2>/dev/null && pwd -P) || _rel2_resolved=
+if [ -n "$_active_resolved" ] && [ "$_active_resolved" = "$_rel2_resolved" ]; then
   pass "variant use updates active symlink"
 else
   fail "variant use updates active symlink (got: $_active_target)"
@@ -631,11 +665,14 @@ fi
 # Switch back
 (cd "$_test_home/repo" && "$_valise" variant use release_a 2>/dev/null)
 _active_target=$(readlink "$XDG_CONFIG_HOME/valise/active" 2>/dev/null || :)
-if [ "$_active_target" = "$_rel1" ]; then
+_active_resolved=$(cd "$_active_target" 2>/dev/null && pwd -P) || _active_resolved=
+_rel1_resolved=$(cd "$_rel1" 2>/dev/null && pwd -P) || _rel1_resolved=
+if [ -n "$_active_resolved" ] && [ "$_active_resolved" = "$_rel1_resolved" ]; then
   pass "variant use round-trips correctly"
 else
   fail "variant use round-trips correctly"
 fi
+unset _active_target _active_resolved _rel1_resolved _rel2_resolved
 
 # --- Unknown command ---
 _unknown_out=$("$_valise" bogus 2>&1) || true
