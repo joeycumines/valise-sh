@@ -2,8 +2,11 @@
 
 `bin/valise` is a `/bin/sh` CLI. Its normal install and verification commands
 need the platform utilities used by the release manifest and integrity checks
-(for example, a SHA-256 utility). The consuming-project commands `compile`,
-`explain-variant`, `explain-bundles`, and `layer-lint` also require Python 3.
+(for example, a SHA-256 utility). Every documented command runs without
+Python 3. `explain-bundles` and `layer-lint` read the project's metadata
+directly; they fall back to a consumer's own Python validator only for
+projects that still use the older `bundles.json` and `hack/validate-layer.py`
+layout.
 
 ## Install the CLI
 
@@ -94,9 +97,18 @@ file. If verification fails, the hook loads no release code. Fish continues
 starting even if a `conf.d` hook fails, so this does not abort the interactive
 shell.
 
-`valise doctor` reports the integration file (`~/.profile`), whether it
-contains the valise managed block, and warns when a `.bash_profile` would
-prevent bash from reading it.
+`valise doctor` verifies the active release against its own manifest, checks
+the startup files the running shell actually reads for the valise managed
+block, and warns when a `.bash_profile` would prevent bash from reading
+`~/.profile`. It exits nonzero when the active release is missing or fails
+verification, and when no startup file carries the managed block.
+
+Two options adjust its scope:
+
+- `--pre-install` skips the active-release check, so doctor can run before the
+  first install.
+- `--no-integration` skips the startup-file check and reports only the
+  release.
 
 `valise verify-active` runs the release verification without sourcing shell
 code:
@@ -167,6 +179,30 @@ controls.
 | Lock and state | `~/.local/state/valise/` | `$XDG_STATE_HOME/valise/` |
 
 The active path is a symlink to the selected release.
+
+## Managing installed releases
+
+`valise variant list` shows the installed releases and marks the active one.
+`valise variant use <release-id>` points the active symlink at an existing
+release.
+
+`valise variant prune --keep=<n>` removes old releases. It always keeps the
+active release and the `n` newest others, and it never removes a release that
+fails verification against its own manifest — a release that cannot be
+verified is reported and kept, so a damaged tree is not silently discarded.
+The default is `--keep=3`.
+
+## Command usage
+
+Every command prints its own contract:
+
+```sh
+valise compile --help
+valise assemble --help
+valise install --help
+```
+
+`valise help` prints the global command list.
 
 ## Updating and removing
 

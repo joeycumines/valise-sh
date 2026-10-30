@@ -20,6 +20,7 @@ Required fields:
 | `platforms` | Space-separated supported platform identifiers. |
 | `side_effect` | Startup/install/update side-effect class. |
 | `load` or `load_hook` | Exactly one load target: a relative module body path or a validated shell function hook. |
+| `requires` | Required when the module is a **meta module** (see below). |
 
 Optional fields:
 
@@ -30,6 +31,36 @@ Optional fields:
 | `exports` | Space-separated exported command/function identifiers. |
 | `updates` | Space-separated update identifiers registered by the consuming project. |
 | `version` | Optional module version used to reject version skew across roots. |
+
+## Meta modules
+
+A **meta module** declares dependencies and has no body. It is the natural
+way to write an aggregator: instead of an empty shell file whose only job is
+to name a dependency, the aggregator is metadata alone.
+
+A meta module has `requires=` with at least one entry and **no** `load=` and
+**no** `load_hook=`. The loader and the compiler treat it as a dependency-only
+record: the module itself has nothing to source, but its required closure
+loads normally and in the right order.
+
+```text
+name=profile_main
+version=1.0.0
+side_effect=read-only
+requires=contrib_path contrib_editor
+optional=
+shells=bash zsh ksh
+platforms=any
+exports=
+updates=
+```
+
+`load` and `load_hook` are mutually exclusive. At least one of `load`,
+`load_hook`, or `requires` is required: a module with neither a load target
+nor dependencies is malformed.
+
+`load` and `requires` are **not** mutually exclusive. A module that declares
+both loads its own body *and* its dependencies, in dependency-first order.
 
 ## Identifiers and allowed values
 
@@ -45,9 +76,19 @@ rejected before the loader can build function names or compatibility
 bridge hooks.
 
 Accepted `shells` values are `sh`, `bash`, `zsh`, `ksh`, and `fish`.
-`shells=sh` means the module body is POSIX-shell syntax and may be loaded by
-the POSIX core from `sh`, `bash`, `zsh`, or `ksh` adapters. `fish` selects the
-native Fish surface under `lib/fish/`; it never sources POSIX shell bodies.
+`shells=sh` means the module body is POSIX-shell syntax, and it is loaded by
+**every POSIX shell** — `sh`, `bash`, `zsh`, `ksh`, and dash — because those
+shells all run POSIX syntax. The engine classifies a running shell as `bash`,
+`zsh`, or `ksh` when it can prove it, and as `sh` otherwise (dash, BusyBox
+ash, and any other POSIX shell); `shells=sh` matches both the `sh` class and
+the specific classes, so a `shells=sh` module loads in all of them. Write
+portable bodies for `shells=sh` and you cover every POSIX shell at once.
+
+`fish` is the exception: it selects the native Fish surface under
+`lib/fish/`, and the Fish loader never sources POSIX shell bodies. A module
+whose `shells=` list does not contain `fish` is skipped under Fish rather
+than failed — a directly requested module fails closed in strict mode.
+
 The engine ships a generic Fish adapter at `entrypoints/fish/profile.fish` as
 the reference implementation of this handshake: it sets
 `_sp_fish_loader_bootstrap_mode` and `_sp_fish_loader_bootstrap_seeds`, then sources `loader.fish`. The loader
@@ -181,6 +222,7 @@ Supported `side_effect` values are:
 - `update-network` — performs explicit update/check network behavior.
 - `install-time` — belongs only in installer flows.
 - `local-secret` — reads local secret references at runtime only.
+- `local-state` — creates or caches state under the XDG state directory.
 - `work-only` — work/project-specific behavior that must be opt-in.
 
 `requires` dependencies must exist and load before the declaring module. Missing
@@ -238,8 +280,15 @@ engine update mechanism.
 
 The ordinary source phase rejects `generated-file`, `update-network`, and
 `install-time` modules before sourcing their bodies. `read-only`, `path-env`,
-`local-secret`, and `work-only` are permitted by the engine; choosing whether
-to load a `work-only` module is the consuming profile's responsibility.
+`local-secret`, `local-state`, and `work-only` are permitted by the engine;
+choosing whether to load a `work-only` module is the consuming profile's
+responsibility.
+
+`local-state` is the permitted class for a module that creates a cache or
+directory under the XDG state directory at source time (`mkdir -p` under
+`$XDG_STATE_HOME`). It is the only write class the ordinary source phase
+allows. A module that writes anywhere else must declare `generated-file`,
+which the source phase rejects.
 
 The enforcement hook is
 `sp_metadata_validate_source_side_effect <side_effect>`. The loader calls it
@@ -254,6 +303,17 @@ varied in the flat monolith: CPU count, file mtime, temp directories/files, comm
 lookup, OS detection, canonical path containment, symlink-component rejection,
 Homebrew path discovery, secure local-bin permission checks, and background
 process launch.
+
+**The helpers stay available after the profile loads.** A compiled plan
+sources the capability prelude and leaves it in place, so a function defined
+by a module can call `sp_cap_os` or any other `sp_cap_*` helper long after
+the plan finished loading. The compiled plan and the loader agree on this;
+neither cleans the helpers up at the end of a load.
+
+A module that needs a portable operation should call the `sp_cap_*` helper
+rather than reaching for a platform-specific command directly. That keeps the
+module working on every platform the engine supports, and keeps the
+platform-specific code in one reviewed library.
 
 Mutation paths must fail closed when a capability cannot prove safety. Update
 destinations must combine canonical containment with symlink-component rejection
@@ -277,10 +337,15 @@ and phase side-effect checks have passed. The ABI has no unload hook: the loader
 does not implement module rollback or unload semantics.
 
 Bridge-backed records include `load_hook=_shell_module_<name>` instead of a
-`load` path. `load` and `load_hook` are mutually exclusive; at least one is
-required. A `load_hook` value must match the same identifier grammar as exported
-functions. The bridge hook is invoked only after the same identifier, dependency,
-shell/platform, and phase checks that protect file-backed modules.
+`load` path. `load` and `load_hook` are mutually exclusive; at least one of
+`load`, `load_hook`, or `requires` is required. A `load_hook` value must match
+the same identifier grammar as exported functions. The bridge hook is invoked
+only after the same identifier, dependency, shell/platform, and phase checks
+that protect file-backed modules.
+
+A meta module has neither `load` nor `load_hook`; it has `requires` and no
+body. Nothing is sourced for it, but its dependency closure loads and its
+dependencies' export checks still apply.
 
 Module bodies and bridge hooks must treat `_spl_*`, `_sp_loader_*`, and
 `_SP_LOADER_*` names as loader-private reserved namespaces. Native Fish

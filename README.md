@@ -65,6 +65,31 @@ and other modules in
 loader example without installation, use `examples/local/` as described in
 [examples/README.md](examples/README.md).
 
+## Build your own profile
+
+The sample above loads modules that ship with the engine. To build your own,
+start from the project scaffold:
+
+```sh
+export PATH="$PWD/bin:$PATH"
+valise new my-profile
+cd my-profile
+```
+
+That writes a project with a metadata directory, a module body, bundle
+roots, variants, and `project.conf`. Add modules with `valise module new`,
+then build and install:
+
+```sh
+valise build   # assemble a release under build/release/
+valise apply   # install it and write the managed block into ~/.profile
+```
+
+`examples/profile-project/` is a worked version of this: it has two modules,
+a provider layer, two variants, and a bundle. Its
+[README](examples/profile-project/README.md) walks through each step and
+explains what the generated release contains.
+
 ## Repository layout
 
 - `entrypoints/profile.sh` — the portable entrypoint. It is sourced, not
@@ -79,14 +104,16 @@ loader example without installation, use `examples/local/` as described in
   instead of platform-specific commands.
 - `lib/fish/` — native Fish loader and metadata reader. The Fish path never
   sources POSIX shell bodies.
-- `bin/valise` — the CLI: init, install, doctor, variant, make-manifest,
-  compile, verify-active, explain-variant, explain-bundles, layer-lint,
-  version. `init`, `install`, `doctor`, `variant`, `make-manifest`,
-  `verify-active`, and `version` run from a bare checkout; `compile`,
-  `explain-variant`, `explain-bundles`, and `layer-lint` require the
-  consuming project's source tree (see
-  [docs/variants.md](docs/variants.md) and
-  [docs/contrib-modules.md](docs/contrib-modules.md).
+- `bin/valise` — the CLI: init, install, verify-active, doctor, variant,
+  make-manifest, registry, new, module, build, apply, status, compile,
+  assemble, explain-variant, explain-bundles, layer-lint, version.
+  `init`, `install`, `verify-active`, `doctor`, `variant`, `make-manifest`,
+  `new`, and `version` run from a bare checkout. `registry`, `module`,
+  `build`, `apply`, `status`, `compile`, `assemble`, `explain-variant`,
+  `explain-bundles`, and `layer-lint` require the consuming project's source
+  tree (see [docs/variants.md](docs/variants.md) and
+  [docs/contrib-modules.md](docs/contrib-modules.md)). No command requires
+  Python 3.
 - `module.d/` and `modules/platform/` — generic platform modules
   (`platform_posix`, `platform_macos`, `platform_linux`, `platform_bsd`).
 - `manifests/parser-support.tsv` — declares the shell parsers used to check
@@ -95,6 +122,10 @@ loader example without installation, use `examples/local/` as described in
   fresh temporary HOME, controlled TMPDIR and PATH, cleared startup hooks.
 - `examples/local/` — a minimal runnable module demonstrating the metadata
   contract.
+- `examples/profile-project/` — a complete consuming project: metadata,
+  bodies, a provider layer, bundles, variants, and project defaults. Its
+  [README](examples/profile-project/README.md) walks from clone to a loaded
+  profile.
 
 Product-specific modules, adapters, release packaging, and installer
 transactions belong in the consuming project, not here. See
@@ -120,6 +151,9 @@ transactions belong in the consuming project, not here. See
 - [CHANGELOG.md](CHANGELOG.md) — user-facing changes.
 
 ## Running the tests
+
+The Makefile and the test suite live in the source repository. The npm
+package ships the runtime, the docs, and the examples, not the Makefile.
 
 ```sh
 make check-fast  # quick contributor lane; no optional shells required
