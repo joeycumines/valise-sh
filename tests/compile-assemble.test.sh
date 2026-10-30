@@ -691,6 +691,160 @@ else
   cat "$_test_root/variant-list.out" >&2
 fi
 
+# A build variant excludes modules from the resolved graph. The exclusion
+# names a module identity: a qualified name (name@source) matches that exact
+# source, and a bare name matches a primary module. A layer module must be
+# excludable by its qualified identity, and a bare exclusion must never
+# remove a layer module that happens to share the name.
+_exclude_project="$_test_root/exclude-project"
+mkdir -p "$_exclude_project/shell/module.d" "$_exclude_project/shell/modules" \
+  "$_exclude_project/shell/release" \
+  "$_exclude_project/shell/layers/vendor/module.d" \
+  "$_exclude_project/shell/layers/vendor/modules/shared"
+cat >"$_exclude_project/shell/module.d/root.meta" <<'EOF'
+name=root
+version=
+side_effect=read-only
+requires=
+optional=
+shells=bash zsh ksh
+platforms=any
+exports=root_ready
+updates=
+load=modules/root.sh
+EOF
+printf 'root_ready() { :; }\n' >"$_exclude_project/shell/modules/root.sh"
+cat >"$_exclude_project/shell/layers/vendor/module.d/contrib_shared_name.meta" <<'EOF'
+name=contrib_shared_name
+version=1.0.0
+side_effect=read-only
+requires=
+optional=
+shells=bash zsh ksh
+platforms=any
+exports=vendor_ready
+updates=
+load=modules/shared/contrib_shared_name.sh
+EOF
+printf 'vendor_ready() { :; }\n' >"$_exclude_project/shell/layers/vendor/modules/shared/contrib_shared_name.sh"
+printf '# bundle\tshell\troots\ndefault\tbash\troot contrib_shared_name@shell/layers/vendor/module.d\ndefault\tzsh\troot contrib_shared_name@shell/layers/vendor/module.d\ndefault\tksh\troot contrib_shared_name@shell/layers/vendor/module.d\n' \
+  >"$_exclude_project/shell/release/bundle-roots"
+printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll\t\nworkstation-lean\tNo provider layer\tcontrib_shared_name@shell/layers/vendor/module.d\n' \
+  >"$_exclude_project/shell/release/install-variants"
+
+(cd "$_exclude_project" && "$_link" registry) >/dev/null 2>&1
+if (cd "$_exclude_project" && "$_link" compile --variant=workstation-full full-out) >"$_test_root/exclude-full.out" 2>&1 &&
+  grep -F '# order=contrib_shared_name root' "$_exclude_project/full-out/installed-modules.bash" >/dev/null 2>&1; then
+  pass "the full variant keeps the provider layer module"
+else
+  fail "the full variant keeps the provider layer module"
+  cat "$_test_root/exclude-full.out" >&2
+fi
+
+# The qualified exclusion must actually remove the layer module. The layer
+# module is a bundle root here, so the seed filter removes it.
+if (cd "$_exclude_project" && "$_link" compile --variant=workstation-lean lean-out) >"$_test_root/exclude-lean.out" 2>&1 &&
+  grep -F '# order=root' "$_exclude_project/lean-out/installed-modules.bash" >/dev/null 2>&1 &&
+  ! grep -F 'contrib_shared_name' "$_exclude_project/lean-out/installed-modules.bash" >/dev/null 2>&1; then
+  pass "a qualified variant exclusion removes the provider layer module"
+else
+  fail "a qualified variant exclusion removes the provider layer module"
+  cat "$_test_root/exclude-lean.out" >&2
+fi
+
+# A qualified exclusion must also remove a layer module that is reached as a
+# DEPENDENCY of a surviving module rather than as a bundle root. The seed
+# filter only sees roots, so this is the case the registry row filter has to
+# handle. Before the fix the row filter was gated on the primary source, so
+# the excluded layer module stayed in the plan.
+printf '# bundle\tshell\troots\ndefault\tbash\tneeds_layer\ndefault\tzsh\tneeds_layer\ndefault\tksh\tneeds_layer\n' \
+  >"$_exclude_project/shell/release/bundle-roots"
+cat >"$_exclude_project/shell/module.d/needs_layer.meta" <<'EOF'
+name=needs_layer
+version=
+side_effect=read-only
+requires=contrib_shared_name
+optional=
+shells=bash zsh ksh
+platforms=any
+exports=needs_layer_ready
+updates=
+load=modules/needs_layer.sh
+EOF
+printf 'needs_layer_ready() { :; }\n' >"$_exclude_project/shell/modules/needs_layer.sh"
+(cd "$_exclude_project" && "$_link" registry) >/dev/null 2>&1
+if (cd "$_exclude_project" && "$_link" compile --variant=workstation-lean lean-dep-out) >"$_test_root/exclude-lean-dep.out" 2>&1; then
+  if grep -F 'contrib_shared_name' "$_exclude_project/lean-dep-out/installed-modules.bash" >/dev/null 2>&1; then
+    fail "a qualified variant exclusion removes a layer module reached as a dependency"
+    cat "$_test_root/exclude-lean-dep.out" >&2
+  else
+    pass "a qualified variant exclusion removes a layer module reached as a dependency"
+  fi
+else
+  # A compile failure is acceptable here only if it names the exclusion as the
+  # cause; silently excluding the dependency would leave a broken profile.
+  if grep -F 'variant exclusion breaks a required dependency' "$_test_root/exclude-lean-dep.out" >/dev/null 2>&1; then
+    pass "a qualified variant exclusion removes a layer module reached as a dependency"
+  else
+    fail "a qualified variant exclusion removes a layer module reached as a dependency"
+    cat "$_test_root/exclude-lean-dep.out" >&2
+  fi
+fi
+
+# A bare exclusion names a primary module. It must not remove a layer module
+# that happens to share the name, and it must not remove a primary module
+# that the exclusion did not name.
+printf '# bundle\tshell\troots\ndefault\tbash\troot contrib_shared_name@shell/layers/vendor/module.d\ndefault\tzsh\troot contrib_shared_name@shell/layers/vendor/module.d\ndefault\tksh\troot contrib_shared_name@shell/layers/vendor/module.d\n' \
+  >"$_exclude_project/shell/release/bundle-roots"
+printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll\t\nworkstation-lean\tNo primary root\troot\n' \
+  >"$_exclude_project/shell/release/install-variants"
+if (cd "$_exclude_project" && "$_link" compile --variant=workstation-lean lean-bare-out) >"$_test_root/exclude-bare.out" 2>&1; then
+  if grep -F '# order=contrib_shared_name' "$_exclude_project/lean-bare-out/installed-modules.bash" >/dev/null 2>&1 &&
+    ! grep -F 'root_ready' "$_exclude_project/lean-bare-out/installed-modules.bash" >/dev/null 2>&1; then
+    pass "a bare variant exclusion removes only the named primary module"
+  else
+    fail "a bare variant exclusion removes only the named primary module"
+    cat "$_test_root/exclude-bare.out" >&2
+  fi
+else
+  fail "a bare variant exclusion removes only the named primary module"
+  cat "$_test_root/exclude-bare.out" >&2
+fi
+
+# An exclusion that breaks a required dependency must name both modules, not
+# surface as the compiler's generic "unknown module".
+cat >"$_exclude_project/shell/module.d/needs_vendor.meta" <<'EOF'
+name=needs_vendor
+version=
+side_effect=read-only
+requires=contrib_shared_name
+optional=
+shells=bash zsh ksh
+platforms=any
+exports=needs_vendor_ready
+updates=
+load=modules/needs_vendor.sh
+EOF
+printf 'needs_vendor_ready() { :; }\n' >"$_exclude_project/shell/modules/needs_vendor.sh"
+printf '# bundle\tshell\troots\ndefault\tbash\tneeds_vendor\ndefault\tzsh\tneeds_vendor\ndefault\tksh\tneeds_vendor\n' \
+  >"$_exclude_project/shell/release/bundle-roots"
+printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll\t\nworkstation-lean\tNo provider layer\tcontrib_shared_name@shell/layers/vendor/module.d\n' \
+  >"$_exclude_project/shell/release/install-variants"
+(cd "$_exclude_project" && "$_link" registry) >/dev/null 2>&1
+if (cd "$_exclude_project" && "$_link" compile --variant=workstation-lean broken-out) >"$_test_root/exclude-broken.out" 2>&1; then
+  fail "an exclusion that breaks a required dependency fails the compile"
+  cat "$_test_root/exclude-broken.out" >&2
+else
+  pass "an exclusion that breaks a required dependency fails the compile"
+fi
+if grep -F 'variant exclusion breaks a required dependency' "$_test_root/exclude-broken.out" >/dev/null 2>&1 &&
+  grep -F 'needs_vendor requires contrib_shared_name' "$_test_root/exclude-broken.out" >/dev/null 2>&1; then
+  pass "the broken-dependency diagnostic names both modules"
+else
+  fail "the broken-dependency diagnostic names both modules"
+  cat "$_test_root/exclude-broken.out" >&2
+fi
+
 printf '\n=== valise compile/assemble summary ===\n'
 printf 'Total: %d  Pass: %d  Skip: %d  Fail: %d\n' "$_total" "$_pass" "$_skip" "$_fail"
 [ "$_fail" -eq 0 ] || exit 1

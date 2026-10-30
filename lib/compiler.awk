@@ -51,6 +51,19 @@ BEGIN {
     next
 }
 
+/^EXCLUDED:/ {
+    # A module removed by the active build variant. It is not part of the
+    # closure, but it is named so a required dependency that points at it can
+    # be diagnosed precisely instead of as an unknown module. The record is
+    # "<identity>\t<name>"; the bare name is how a dependency refers to it.
+    line = substr($0, 10)
+    n = split(line, fields, "\t")
+    if (n >= 2) {
+        excluded_id[fields[1]] = fields[2]
+    }
+    next
+}
+
 /^PRELUDE:/ {
     line = substr($0, 9)
     n = split(line, arr, " ")
@@ -91,6 +104,14 @@ END {
 
         if (name in discovered) continue
         if (!(name in mod_exists)) {
+            if (name in excluded_id) {
+                # The module was removed by the active build variant, but a
+                # surviving module still requires it. Name both modules: the
+                # generic "unknown module" diagnostic would point at the
+                # dependency and hide the variant that caused it.
+                print "ERROR: variant exclusion breaks a required dependency: " mod_display[requiring_of[name]] " requires " excluded_id[name] > "/dev/stderr"
+                exit 1
+            }
             print "ERROR: unknown module: " name > "/dev/stderr"
             exit 1
         }
@@ -112,6 +133,9 @@ END {
                     queue[q_tail] = dep
                 }
             }
+            # Remember which module asked for a dependency, so an exclusion
+            # that breaks it can name the requiring module.
+            if (!(dep in requiring_of)) requiring_of[dep] = name
         }
 
         # Re-sort remaining queue
