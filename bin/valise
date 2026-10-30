@@ -3841,9 +3841,9 @@ cmd_compile() {
   _stage=$(trusted_mktemp_at "$_out_parent" dir "$_out_parent/.valise-compile.XXXXXX") ||
     die "cannot create compile staging directory"
 
-  # Fish plans require native Fish syntax; awk compiler emits POSIX sh only.
-  # Python compiler (hack/compile-shell-profile-release.py) handles Fish correctly.
-  info "fish plan generation requires Python compiler (awk compiler is POSIX-only)"
+  # Fish plans require native Fish syntax; the plan compiler emits POSIX sh
+  # only. A Fish integration uses the native Fish loader instead.
+  info "fish plans are not generated; a Fish integration uses the native Fish loader"
   for _shell in bash zsh ksh wrapper_lifecycle; do
     # Extract roots for this shell from JSON using POSIX tools
     if [ "$_bundle_requested" -eq 1 ]; then

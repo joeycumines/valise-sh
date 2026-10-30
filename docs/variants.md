@@ -78,8 +78,10 @@ module:
 | 10 | `updates` | Space-separated update registration identifiers. |
 | 11 | `source` | Directory that holds the `.meta`: `shell/module.d` or `shell/layers/<provider>/module.d`. |
 
-Rows are sorted deterministically in the C locale, so regenerating an
-unchanged project produces a byte-identical file.
+Rows come out in a fixed order: the primary modules of `shell/module.d/`
+first, then the layer modules of each `shell/layers/<provider>/module.d/`,
+each group in C-locale name order. The order does not depend on the caller's
+locale, so regenerating an unchanged project produces a byte-identical file.
 
 ## Bundles: which modules seed each shell
 

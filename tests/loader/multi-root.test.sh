@@ -240,6 +240,18 @@ assert_eq 'symlink layer metadata fails closed' 1 "$CASE_STATUS"
 assert_contains 'symlink metadata diagnostic identifies the path' "$CASE_STDERR" \
   'metadata path contains a symlink'
 
+# The primary root gets the same treatment: a symlinked metadata file must
+# not redirect module resolution outside the root the loader was given.
+mkdir -p "$_tmp_dir/primary-symlink/module.d" "$_tmp_dir/primary-symlink/modules"
+cp -R "$PRIMARY_ROOT"/. "$_tmp_dir/primary-symlink/"
+rm -f "$_tmp_dir/primary-symlink/module.d/core.meta"
+ln -s "$PRIMARY_ROOT/module.d/core.meta" "$_tmp_dir/primary-symlink/module.d/core.meta"
+run_case symlink_primary_metadata "PRIMARY_ROOT=$_tmp_dir/primary-symlink" core strict
+assert_eq 'symlink primary metadata fails closed' 1 "$CASE_STATUS"
+assert_contains 'symlink primary metadata diagnostic identifies the path' "$CASE_STDERR" \
+  'metadata path contains a symlink'
+assert_eq 'symlink primary metadata prevents module body execution' '' "$CASE_TRACE"
+
 write_layer_module contrib_symlink_body
 rm -f "$_tmp_dir/layer/modules/contrib_symlink_body.sh"
 ln -s "$PRIMARY_ROOT/modules/core.sh" "$_tmp_dir/layer/modules/contrib_symlink_body.sh"

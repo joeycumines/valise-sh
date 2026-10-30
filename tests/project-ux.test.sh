@@ -72,6 +72,14 @@ else
   fail "module new creates a module"
   cat "$_test_home/module-new.err" >&2
 fi
+# The generated body must define the declared export, otherwise the module
+# fails its own export check when the profile loads it.
+if grep -F 'hello() {' "$_project/shell/modules/hello.sh" >/dev/null; then
+  pass "module new writes a body that defines the declared export"
+else
+  fail "module new writes a body that defines the declared export"
+  cat "$_project/shell/modules/hello.sh" >&2
+fi
 cat >"$_project/shell/modules/hello.sh" <<'EOF'
 hello() {
   printf '%s\n' 'project ux hello'

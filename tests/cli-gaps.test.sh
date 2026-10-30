@@ -106,7 +106,7 @@ fi
 _release_one="$_test_root/release-one"
 _make_release "$_release_one" '# release one'
 if _env; then
-  (cd "$_release_one" && "$_valise" install --integration=profile) >"$_test_root/install-one.out" 2>&1
+  (cd "$_release_one" && "$_valise" install --integration=profile) >"$_test_root/install-one.out" 2>&1 || :
   if "$_valise" doctor >"$_test_root/doctor-ok.out" 2>&1; then
     pass "doctor succeeds with a verified release and a managed block"
   else
@@ -124,6 +124,72 @@ if _env; then
   else
     fail "doctor verifies the active release"
     cat "$_test_root/doctor-ok.out" >&2
+  fi
+
+  # The active pointer must name the release that was just installed, and
+  # verify-active must resolve that pointer to a directory that verifies.
+  _active_link="$XDG_CONFIG_HOME/valise/active"
+  _active_target=$(readlink "$_active_link" 2>/dev/null || :)
+  _expected_target=$(find "$XDG_DATA_HOME/valise/releases" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
+  if [ -n "$_active_target" ] && [ "$_active_target" = "$_expected_target" ] &&
+    [ -d "$_active_target" ]; then
+    pass "the active pointer names the installed release directory"
+  else
+    fail "the active pointer names the installed release directory" \
+      "pointer=$_active_target expected=$_expected_target"
+  fi
+  if "$_valise" verify-active >"$_test_root/verify-active.out" 2>&1; then
+    pass "verify-active resolves the active pointer to a verifying release"
+  else
+    fail "verify-active resolves the active pointer to a verifying release"
+    cat "$_test_root/verify-active.out" >&2
+  fi
+
+  # --no-integration must skip the startup-file check, not merely the
+  # release check. A machine with a good release and no managed block
+  # fails the default doctor, and passes when the integration check is
+  # explicitly turned off.
+  _profile_backup="$_test_root/profile-backup"
+  if [ -f "$HOME/.profile" ]; then
+    cp "$HOME/.profile" "$_profile_backup"
+  else
+    : >"$_profile_backup"
+  fi
+  rm -f "$HOME/.profile"
+  if "$_valise" doctor >"$_test_root/doctor-noblock.out" 2>&1; then
+    fail "doctor fails when the startup file has no managed block"
+  else
+    pass "doctor fails when the startup file has no managed block"
+  fi
+  if grep -F 'no valise integration found' "$_test_root/doctor-noblock.out" >/dev/null 2>&1; then
+    pass "doctor names the missing startup-file integration"
+  else
+    fail "doctor names the missing startup-file integration"
+    cat "$_test_root/doctor-noblock.out" >&2
+  fi
+  if "$_valise" doctor --no-integration >"$_test_root/doctor-noblock-noint.out" 2>&1; then
+    pass "doctor --no-integration skips the startup-file check"
+  else
+    fail "doctor --no-integration skips the startup-file check"
+    cat "$_test_root/doctor-noblock-noint.out" >&2
+  fi
+  if grep -F 'skipping the shell integration check' \
+    "$_test_root/doctor-noblock-noint.out" >/dev/null 2>&1; then
+    pass "doctor --no-integration reports that it skipped the check"
+  else
+    fail "doctor --no-integration reports that it skipped the check"
+    cat "$_test_root/doctor-noblock-noint.out" >&2
+  fi
+  if grep -F 'startup file' "$_test_root/doctor-noblock-noint.out" >/dev/null 2>&1; then
+    fail "doctor --no-integration examines no startup file"
+    cat "$_test_root/doctor-noblock-noint.out" >&2
+  else
+    pass "doctor --no-integration examines no startup file"
+  fi
+  if [ -s "$_profile_backup" ]; then
+    cp "$_profile_backup" "$HOME/.profile"
+  else
+    rm -f "$HOME/.profile"
   fi
 fi
 

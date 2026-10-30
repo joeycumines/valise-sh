@@ -496,7 +496,7 @@ sp_loader_load_modules() {
       _spl_meta_file=
       _spl_meta_root=
       if [ -L "$_spl_root/module.d/$_spl_mod.meta" ] || { [ -e "$_spl_root/module.d/$_spl_mod.meta" ] && ! _sp_loader_path_is_physical "$_spl_root" "$_spl_root/module.d/$_spl_mod.meta"; }; then
-        command printf 'loader: %s\n' "$_spl_mod: metadata path contains a symlink"
+        command printf 'loader: %s\n' "$_spl_mod: metadata path contains a symlink" >&2
         _spl_return=1
         _spl_strict_error=1
       elif [ -f "$_spl_root/module.d/$_spl_mod.meta" ]; then

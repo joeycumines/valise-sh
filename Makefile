@@ -10,7 +10,7 @@ VALISE_REQUIRE_TOOLING ?= $(if $(filter true TRUE 1 yes YES,$(CI) $(GITHUB_ACTIO
 comma := ,
 VALISE_REQUIRED_PARSERS ?= $(if $(filter 1,$(VALISE_REQUIRE_TOOLING)),sh$(comma)dash$(comma)ksh$(comma)busybox-ash$(comma)bash$(comma)fish,)
 
-.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e
+.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-consumer-profile
 .NOTPARALLEL: check test
 
 TEST_ENV_PATH = /usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
@@ -72,6 +72,7 @@ test: test-runner-quarantine
 	@$(MAKE) test-project-ux
 	@$(MAKE) test-compiler-benchmark
 	@$(MAKE) test-fish-runtime
+	@$(MAKE) test-consumer-profile
 	@$(MAKE) test-doc-links
 
 test-runner-quarantine: tests/test-runner-quarantine.test.sh
@@ -248,4 +249,13 @@ test-e2e: tests/e2e.test.sh bin/valise examples/e2e/build-manifest.sh
 	@echo "=== valise end-to-end test ==="
 	@VALISE_REQUIRE_TOOLING="$(VALISE_REQUIRE_TOOLING)" /bin/bash tests/e2e.test.sh
 
-check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-registry test-project-ux test-cli-gaps test-contrib-modules test-docs test-doc-links
+# The reference consumer profile lives in scratch/shell-profile and is not
+# tracked by the repository. The suite copies it to a temporary directory
+# and works only on the copy, so the original tree and the live profile
+# are never touched. It skips with a visible message when the tree is
+# absent, which is the case in CI and in a package install.
+test-consumer-profile: tests/consumer-profile.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
+	@echo "=== valise consumer-profile end-to-end test ==="
+	@$(TEST_RUNNER)
+
+check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-registry test-project-ux test-cli-gaps test-contrib-modules test-consumer-profile test-docs test-doc-links
