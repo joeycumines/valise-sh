@@ -82,7 +82,7 @@ then build and install:
 
 ```sh
 valise build   # build a release under build/release/
-valise apply   # install it and write the managed block into ~/.profile
+valise apply   # install it and write the managed shell integration
 ```
 
 `examples/profile-project/` is a worked version of this: it has two modules,

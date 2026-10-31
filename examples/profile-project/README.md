@@ -57,7 +57,7 @@ build/release/
   modules/                           the project's bodies
   layers/demo/module.d/              the layer's metadata
   layers/demo/modules/shared/        the layer's bodies
-  shell/release/                     bundle, variants, project defaults
+  shell/release/                     registry, bundle, variants, defaults
   shell/install/profile-release.manifest
 ```
 
@@ -115,7 +115,7 @@ build output: /path/to/profile-project/build/release
 drift: active release matches build output
 ```
 
-`status` reports the active release, the integration file, and whether the
+`status` reports the active release, the startup files, and whether the
 installed release still matches what the project would build. If you edit a
 module and re-apply, the release changes and the drift line tells you the
 active release is no longer the one you built.

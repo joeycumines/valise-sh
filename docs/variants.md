@@ -171,8 +171,8 @@ The steps, in order:
    its roots must resolve.
 4. For each of `bash`, `zsh`, and `ksh`, resolve the
    bundle's roots for that shell, walk the dependency closure, drop the
-   variant's exclusions, gate each module by `shells=` and `platforms=`,
-   and emit a plan.
+   variant's exclusions, select each module by `shells=`, emit its
+   `platforms=` gate, and emit a plan.
 5. Replace the output directory atomically.
 
 The output directory must be empty or absent. Compile stages into a private

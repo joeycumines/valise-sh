@@ -3,8 +3,8 @@
 `bin/valise` is a `/bin/sh` CLI. Its normal install and verification commands
 need the platform utilities used by the release manifest and integrity checks
 (for example, a SHA-256 utility). Every documented command runs without
-Python 3. `explain-bundles` and `layer-lint` read the project's metadata
-directly.
+Python 3. `explain-bundles` reads the generated registry and the bundle
+roots; `layer-lint` reads layer metadata directly.
 
 ## Install the CLI
 
@@ -39,62 +39,88 @@ packed CLI without a registry, and loads a module from the extracted package.
 ## Shell integration
 
 `valise install` installs the release described by the manifest in the
-current project and deploys shell integration automatically. A managed block
-is written to `~/.profile`; to the first of `~/.bash_profile` and
-`~/.bash_login` that exists, because it shadows `~/.profile` for bash; to
-`~/.bashrc` and `~/.zshrc` when that shell is `$SHELL` or the file exists;
-and to `~/.zprofile` when zsh is installed or the file exists. A Fish
-`conf.d` hook is written when Fish is installed. `--no-integration` writes
-no startup file and no Fish hook.
+current directory and writes shell integration by default. It always writes
+`~/.profile`, which login `sh`, `ksh`, and bash sessions read when no other
+file shadows it. It then adds the files each shell reads instead:
 
-The POSIX snippet works with either release shape. A compiled release —
-one built by `valise build` — carries `generated/installed-modules.<shell>`
-plans; an engine release — one that ships `entrypoints/profile.sh` and the
-loader — carries the loader instead. The snippet prefers the compiled plan
-and falls back to the loader entrypoint, so installing a release never
-leaves a startup file that loads nothing.
+- `~/.bash_profile` or `~/.bash_login` when one exists, because login bash
+  reads the first of those instead of `~/.profile`. valise never creates
+  either file.
+- `~/.bashrc` when bash is `$SHELL` or the file already exists.
+- `~/.zprofile` when zsh is on `PATH` or the file already exists. It is the
+  login file zsh reads instead of `~/.profile`.
+- `~/.zshrc` when zsh is `$SHELL` or the file already exists.
+- `${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/valise.fish` when valise
+  finds a Fish executable in a trusted location.
 
-The Fish hook is
-`${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/valise.fish`. Existing POSIX
-profile content is preserved; a managed block makes repeat installs
-idempotent. Symlinked POSIX profile files are left alone. Install prints
-which file was written and how to remove the integration.
+`--no-integration` writes no startup file and no Fish hook. `valise apply`
+builds, installs, and then uses the same writer.
+
+Each POSIX file receives a managed block between `# BEGIN valise managed
+block` and `# END valise managed block`. Existing content is preserved, and
+a repeat install replaces the block in place. An unpaired marker is refused
+and stops the install; a file already processed keeps its updated block. A
+symlinked POSIX startup file is reported and left untouched. If the Fish
+hook path is a symlink or a directory, install fails rather than write
+through it. Install prints every path it wrote and how to remove the
+integration.
+
+The POSIX snippet adapts to the release shape:
+
+- A project release built by `valise build` carries
+  `generated/installed-modules.<shell>` for each shell its bundle seeds
+  (`bash`, `zsh`, and `ksh` for the scaffold and the example). The snippet
+  sources the plan for the running shell.
+- An engine release carries `entrypoints/profile.sh` and the loader. The
+  snippet sources that entrypoint.
+- If the release has neither a plan for the running shell nor the loader,
+  the snippet leaves the session alone. This is the result for a login
+  `dash` session with a built release: `dash` has no plan, and a built
+  release has no loader.
+
+`valise install` writes `~/.profile`, which ksh reads at login. A non-login
+interactive ksh reads the file named by `$ENV` when that variable is set.
+valise does not choose or edit that file; to cover non-login ksh, put the
+POSIX block in the file `$ENV` names.
 
 Zsh does not read `~/.profile` on its own: zsh login shells read
-`.zprofile`, not `~/.profile`. When zsh is present, install writes the same
-managed block to `~/.zprofile` as it does to the other startup files, so zsh
-needs no separate pointer. Users who integrate by hand paste the block into
-`~/.zprofile` themselves.
+`.zprofile`, not `~/.profile`. Install writes the same managed block to
+`~/.zprofile`, so zsh needs no separate pointer.
 
-To print a POSIX integration snippet without editing a startup file, run
-`valise init` once and paste its output where you want it:
+A built project release has no Fish surface: no Fish entrypoint, generated
+Fish plan, or native Fish loader. The Fish hook verifies the active release,
+then loads nothing and prints nothing. Only an engine release with
+`entrypoints/fish/profile.fish` uses the native Fish loader.
+
+The Fish hook verifies the active release before loading it. The check
+validates the active pointer, the release manifest, and every listed file.
+If verification fails, the hook loads no release code. Fish continues
+starting even if a `conf.d` hook fails, so this does not abort the
+interactive shell.
+
+To write integration by hand, print it once and paste or save it:
 
 ```sh
-valise init            # POSIX snippet for the shell named by $SHELL
-valise init fish       # Fish snippet; add `| source` under Fish
+valise init            # POSIX block, or the Fish hook when $SHELL is fish
+valise init posix      # POSIX managed block
+valise init fish       # Fish conf.d hook; save it as fish/conf.d/valise.fish
 ```
 
 Evaluating `valise init` output directly at every prompt —
 `eval "$(valise init)"` — re-runs CLI startup code in every shell and is
 not the routine path; prefer `valise install` or `valise apply`, which
-write a managed block once.
-
-The Fish integration verifies the active release before loading it. The
-check validates the active pointer, the release manifest, and every listed
-file. If verification fails, the hook loads no release code. Fish continues
-starting even if a `conf.d` hook fails, so this does not abort the interactive
-shell.
+write the files once.
 
 `valise doctor` verifies the active release against its own manifest, checks
-the startup files the running shell actually reads for the valise managed
-block, and warns when a `.bash_profile` would prevent bash from reading
+the startup files the running shell actually reads for valise integration,
+including the `.bash_profile` or `.bash_login` that bash reads instead of
 `~/.profile`. It exits nonzero when the active release is missing or fails
-verification, and when no startup file carries the managed block.
+verification, and when no startup file carries the integration.
 
 Two options adjust its scope:
 
-- `--pre-install` skips the active-release check, so doctor can run before the
-  first install.
+- `--pre-install` skips the active-release and startup-file checks, so doctor
+  can run before the first install.
 - `--no-integration` skips the startup-file check and reports only the
   release.
 
@@ -141,9 +167,12 @@ their manifest. Fish repeats that check at startup; the POSIX startup snippets
 do not, so run `release verify` separately if you need a check before sourcing
 in a POSIX shell.
 
-The engine does not build a consuming project's module catalog or release
-tree. The included [e2e example](../examples/e2e/README.md) demonstrates a
-small complete profile.
+`valise build` builds a consuming project's release tree: the module
+registry, the per-shell plans, every module body, and the manifest inputs.
+The engine itself ships as an engine release rather than a built project
+release; it carries `entrypoints/profile.sh` and `lib/`, not `generated/`.
+The included [e2e example](../examples/e2e/README.md) demonstrates a small
+complete profile.
 
 ## Integrity and provenance
 
