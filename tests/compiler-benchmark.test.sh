@@ -32,9 +32,10 @@ _awk="$_script_dir/lib/compiler.awk"
 printf '=== valise compiler structural scaling ===\n\n'
 
 # The emitted plan is a fixed-size shell block per module, wrapped in a
-# constant-size preamble and epilogue. BLOCK_LINES is that per-module size.
-BLOCK_LINES=7
-FIXED_LINES=58
+# constant-size preamble and epilogue. BLOCK_LINES is that per-module size; the
+# dependency check of a module is one line however many dependencies it has.
+BLOCK_LINES=14
+FIXED_LINES=52
 
 # Generate a synthetic module graph of N modules: a linear dependency chain
 # plus a fan-out edge every 7th module, seeded from the last 5 modules so the
@@ -63,7 +64,7 @@ generate_graph() {
       _fan=$((_i-7))
       _req="$_req mod_$_fan"
     fi
-    printf 'MOD:mod_%d\t%s\tmodules/test/mod_%d.sh\tany\tread-only\t\n' "$_i" "$_req" "$_i" >> "$_out"
+    printf 'MOD:mod_%d\t%s\tmodules/test/mod_%d.sh\tany\tread-only\t\t\n' "$_i" "$_req" "$_i" >> "$_out"
     _i=$((_i+1))
   done
 }

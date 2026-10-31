@@ -3964,6 +3964,7 @@ cmd_compile() {
           row_name[identity] = name
           row_source[identity] = msrc
           row_req[identity] = $4
+          row_opt[identity] = $5
           row_load[identity] = $9
           row_platforms[identity] = $7
           row_side_effect[identity] = $3
@@ -4013,6 +4014,26 @@ cmd_compile() {
               }
               req = req (req == "" ? "" : " ") resolved
             }
+            # An optional dependency that is absent for this shell or removed by
+            # the variant is simply not there; only a present one joins the plan.
+            opt = ""
+            n_opt = split(row_opt[identity], opt_arr, " ")
+            for (ri = 1; ri <= n_opt; ri++) {
+              dep = opt_arr[ri]
+              if (dep == "") continue
+              resolved = ""
+              candidate = dep "@" source
+              if ((candidate in row_exists) && !excluded_by_variant(candidate, dep, source)) {
+                resolved = candidate
+              } else if (!(candidate in row_exists)) {
+                candidate_count = 0
+                for (candidate_key in row_exists) {
+                  if (row_name[candidate_key] == dep) { resolved = candidate_key; candidate_count++ }
+                }
+                if (candidate_count != 1 || excluded_by_variant(resolved, dep, row_source[resolved])) resolved = ""
+              }
+              if (resolved != "") opt = opt (opt == "" ? "" : " ") resolved
+            }
             load_path = row_load[identity]
             # A meta module has no body, so it has no installed path to prefix.
             if (load_path != "" && source ~ /^shell\/layers\/[^\/]+\/module\.d$/) {
@@ -4021,7 +4042,7 @@ cmd_compile() {
               sub(/\/module\.d$/, "", layer)
               load_path = "layers/" layer "/" load_path
             }
-            printf "MOD:%s\t%s\t%s\t%s\t%s\t%s\n", identity, req, load_path, row_platforms[identity], row_side_effect[identity], row_exports[identity]
+            printf "MOD:%s\t%s\t%s\t%s\t%s\t%s\t%s\n", identity, req, load_path, row_platforms[identity], row_side_effect[identity], row_exports[identity], opt
           }
         }
       ' "$_registry"

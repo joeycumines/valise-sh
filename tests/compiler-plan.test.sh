@@ -119,6 +119,22 @@ updates=
 load=
 EOF
 _module meta_other_user meta_other meta_other_user_loaded any read-only 'meta_other_user_loaded() { :; }'
+case "$_other_platform" in
+linux) _here_platform=darwin ;;
+*) _here_platform=$(uname -s | tr '[:upper:]' '[:lower:]') ;;
+esac
+_module cross_here '' cross_here_loaded "$_here_platform" read-only 'cross_here_loaded() { :; }
+CROSS_HERE_RAN=yes'
+_module cross_user '' cross_user_loaded any read-only 'cross_user_loaded() { :; }
+CROSS_SEEN_HERE=${CROSS_HERE_RAN:-no}'
+sed -i.bak 's/^optional=$/optional=cross_here platform_other/' "$_project/shell/module.d/cross_user.meta"
+_module opt_fail_user '' opt_fail_user_loaded any read-only 'opt_fail_user_loaded() { :; }'
+sed -i.bak 's/^optional=$/optional=first_fail/' "$_project/shell/module.d/opt_fail_user.meta"
+_module cycle_a '' cycle_a_loaded any read-only 'cycle_a_loaded() { :; }'
+_module cycle_b '' cycle_b_loaded any read-only 'cycle_b_loaded() { :; }'
+sed -i.bak 's/^optional=$/optional=cycle_b/' "$_project/shell/module.d/cycle_a.meta"
+sed -i.bak 's/^optional=$/optional=cycle_a/' "$_project/shell/module.d/cycle_b.meta"
+rm -f "$_project"/shell/module.d/*.bak
 mkdir -p "$_project/shell/layers/demo/module.d" "$_project/shell/layers/demo/modules"
 cat >"$_project/shell/layers/demo/module.d/contrib_demo_child.meta" <<'EOF'
 name=contrib_demo_child
@@ -183,6 +199,9 @@ _bundle_row platform platform_other
 _bundle_row blocked-platform 'later_ok platform_user_user'
 _bundle_row blocked-failed 'failed_user later_ok'
 _bundle_row blocked-meta 'meta_other_user'
+_bundle_row optional 'cross_user'
+_bundle_row optional-fail 'opt_fail_user'
+_bundle_row optional-cycle 'cycle_a'
 _bundle_row layer-meta 'contrib_demo_meta@shell/layers/demo/module.d'
 _bundle_row capability capability_user
 _bundle_row reload reload_probe
@@ -241,6 +260,9 @@ _assemble platform "$_tmp/release-platform"
 _assemble blocked-platform "$_tmp/release-blocked-platform"
 _assemble blocked-failed "$_tmp/release-blocked-failed"
 _assemble blocked-meta "$_tmp/release-blocked-meta"
+_assemble optional "$_tmp/release-optional"
+_assemble optional-fail "$_tmp/release-optional-fail"
+_assemble optional-cycle "$_tmp/release-optional-cycle"
 _assemble layer-meta "$_tmp/release-layer-meta"
 _assemble capability "$_tmp/release-capability"
 _assemble reload "$_tmp/release-reload"
@@ -273,8 +295,8 @@ else
   fi
 fi
 
-# Permissive mode reports the same failure, continues, and returns the first status.
-if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-behavior" /bin/bash -c '
+# Permissive mode reports the failure, continues, and returns success, as the loader does.
+if ! VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-behavior" /bin/bash -c '
   . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
   _status=$?
   printf "status=%s\n" "$_status"
@@ -282,9 +304,9 @@ if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-behavior" /bin/bash 
   command -v later_ok_loaded >/dev/null && printf "later=loaded\n"
   exit "$_status"
 ' >"$_tmp/behavior-permissive.out" 2>"$_tmp/behavior-permissive.err"; then
-  fail "permissive plan returns the first failure"
+  fail "permissive plan returns success after a failure"
 else
-  if grep -F 'status=1' "$_tmp/behavior-permissive.out" >/dev/null &&
+  if grep -F 'status=0' "$_tmp/behavior-permissive.out" >/dev/null &&
     grep -F 'first=loaded' "$_tmp/behavior-permissive.out" >/dev/null &&
     grep -F 'later=loaded' "$_tmp/behavior-permissive.out" >/dev/null &&
     grep -F 'module first_fail failed with status 1' "$_tmp/behavior-permissive.err" >/dev/null; then
@@ -323,26 +345,80 @@ else
   cat "$_tmp/meta.err" >&2
 fi
 
-# Platform gating uses one runtime probe and skips nonmatching modules.
+# A root declared for another platform fails strict with a named diagnostic, as
+# the loader does, and is skipped in permissive mode.
 if VALISE_MODULE_ROOT="$_tmp/release-platform" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+' >"$_tmp/platform.out" 2>"$_tmp/platform.err"; then
+  fail "strict plan fails on an unsupported root"
+elif grep -F 'module platform_other skipped: unsupported platform' "$_tmp/platform.err" >/dev/null; then
+  pass "strict plan fails on an unsupported root and names it"
+else
+  fail "strict plan fails on an unsupported root and names it"
+  cat "$_tmp/platform.err" >&2
+fi
+if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-platform" /bin/bash -c '
   . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
   printf "status=%s\n" "$?"
   if command -v platform_other_loaded >/dev/null; then printf "platform=loaded\n"; else printf "platform=skipped\n"; fi
-' >"$_tmp/platform.out" 2>"$_tmp/platform.err"; then
-  if grep -F 'status=0' "$_tmp/platform.out" >/dev/null &&
-    grep -F 'platform=skipped' "$_tmp/platform.out" >/dev/null; then
-    pass "runtime platform gating skips a nonmatching module"
-  else
-    fail "runtime platform gating skips a nonmatching module"
-    cat "$_tmp/platform.out" >&2
-  fi
+' >"$_tmp/platform.out" 2>"$_tmp/platform.err" &&
+  grep -F 'status=0' "$_tmp/platform.out" >/dev/null &&
+  grep -F 'platform=skipped' "$_tmp/platform.out" >/dev/null; then
+  pass "permissive plan skips a nonmatching module"
 else
-  fail "runtime platform gating skips a nonmatching module"
-  cat "$_tmp/platform.err" >&2
+  fail "permissive plan skips a nonmatching module"
+  cat "$_tmp/platform.out" "$_tmp/platform.err" >&2
 fi
 
-# A module whose required dependency was skipped by platform does not run, and
-# neither does anything that depends on it. Strict mode fails as the loader does.
+# The cross-platform form: optional dependencies. Strict mode succeeds on any
+# host, the host's module loads first, and the expected absence prints nothing.
+if VALISE_MODULE_ROOT="$_tmp/release-optional" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  _status=$?
+  printf "status=%s\n" "$_status"
+  command -v cross_user_loaded >/dev/null && printf "user=loaded\n"
+  command -v cross_here_loaded >/dev/null && printf "here=loaded\n"
+  command -v platform_other_loaded >/dev/null && printf "other=loaded\n"
+  printf "seen=%s\n" "${CROSS_SEEN_HERE:-no}"
+  exit "$_status"
+' >"$_tmp/optional.out" 2>"$_tmp/optional.err" &&
+  grep -F 'status=0' "$_tmp/optional.out" >/dev/null &&
+  grep -F 'user=loaded' "$_tmp/optional.out" >/dev/null &&
+  grep -F 'here=loaded' "$_tmp/optional.out" >/dev/null &&
+  ! grep -F 'other=loaded' "$_tmp/optional.out" >/dev/null &&
+  grep -F 'seen=yes' "$_tmp/optional.out" >/dev/null &&
+  [ ! -s "$_tmp/optional.err" ]; then
+  pass "optional dependencies make a profile cross-platform in strict mode"
+else
+  fail "optional dependencies make a profile cross-platform in strict mode"
+  cat "$_tmp/optional.out" "$_tmp/optional.err" >&2
+fi
+
+# A failing optional dependency is reported and does not fail strict mode.
+if VALISE_MODULE_ROOT="$_tmp/release-optional-fail" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  command -v opt_fail_user_loaded >/dev/null
+' >"$_tmp/optional-fail.out" 2>"$_tmp/optional-fail.err" &&
+  grep -F 'module first_fail failed with status 1' "$_tmp/optional-fail.err" >/dev/null; then
+  pass "a failing optional dependency does not fail strict mode"
+else
+  fail "a failing optional dependency does not fail strict mode"
+  cat "$_tmp/optional-fail.err" >&2
+fi
+
+# An optional cycle cannot deadlock the plan; a required cycle still fails.
+if VALISE_MODULE_ROOT="$_tmp/release-optional-cycle" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  command -v cycle_a_loaded >/dev/null && command -v cycle_b_loaded >/dev/null
+' >"$_tmp/optional-cycle.out" 2>"$_tmp/optional-cycle.err"; then
+  pass "an optional-only cycle still loads its members"
+else
+  fail "an optional-only cycle still loads its members"
+  cat "$_tmp/optional-cycle.err" >&2
+fi
+
+# A platform-unsupported module in the required closure stops a strict plan before
+# anything that depends on it runs.
 : >"$_tmp/blocked.trace"
 if VALISE_MODULE_ROOT="$_tmp/release-blocked-platform" /bin/bash -c '
   . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
@@ -353,7 +429,7 @@ if VALISE_MODULE_ROOT="$_tmp/release-blocked-platform" /bin/bash -c '
   fail "strict plan fails when a required dependency is platform-skipped"
 else
   if grep -F 'status=1' "$_tmp/blocked-strict.out" >/dev/null &&
-    grep -F 'module platform_user skipped: required dependency unavailable: platform_other' "$_tmp/blocked-strict.err" >/dev/null &&
+    grep -F 'module platform_other skipped: unsupported platform' "$_tmp/blocked-strict.err" >/dev/null &&
     [ ! -s "$_tmp/blocked.trace" ]; then
     pass "strict plan fails when a required dependency is platform-skipped"
   else
@@ -388,7 +464,7 @@ VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-failed" /bin/ba
   printf "status=%s\n" "$?"
   command -v later_ok_loaded >/dev/null && printf "later=loaded\n"
 ' >"$_tmp/blocked-failed.out" 2>"$_tmp/blocked-failed.err" || :
-if grep -F 'status=1' "$_tmp/blocked-failed.out" >/dev/null &&
+if grep -F 'status=0' "$_tmp/blocked-failed.out" >/dev/null &&
   grep -F 'later=loaded' "$_tmp/blocked-failed.out" >/dev/null &&
   grep -F 'module failed_user skipped: required dependency unavailable: first_fail' "$_tmp/blocked-failed.err" >/dev/null &&
   [ ! -s "$_tmp/blocked.trace" ]; then

@@ -253,6 +253,23 @@ and `tests/fish-runtime.test.sh` respectively:
   quarantines them and continues. Unlike the POSIX fallback, quarantined
   members are not loaded.
 
+### Writing a cross-platform profile
+
+`requires` means the module cannot work without the dependency, so a
+dependency that does not support the host blocks the module and fails strict
+mode. Use `optional` for platform-specific modules, so one profile works on
+every host:
+
+```text
+name=profile_main
+requires=common_tools
+optional=mac_tools linux_tools
+```
+
+Only the module for the running platform loads. The other is skipped without a
+message, because its absence is expected. The POSIX loader and compiled plans
+follow the same rules.
+
 `exports` lists public commands or shell functions the module declares. The loader
 uses this list for post-load export checks and failure cleanup; project catalogs
 and wrapper manifests use it for documentation and registration. An exported name

@@ -199,14 +199,20 @@ resolved load order. The body then:
 - sources `vendor/shell-profile/lib/capabilities.sh`, so `sp_cap_*` helpers
   stay available to module functions after the plan finishes;
 - checks each module's declared exports before and after loading it;
-- in permissive mode, reports a failing module by name and continues with
-  the unrelated modules;
-- in strict mode, stops at the first failure;
+- does not run a module whose required dependency is unavailable, whether that
+  dependency failed or was skipped for this platform, and reports it by name;
+- in strict mode, returns nonzero at the first failure in the required closure:
+  the bundle's roots and everything they require;
+- in permissive mode, reports each failure, continues with the unrelated
+  modules, and returns zero;
+- treats an optional dependency as best effort: it loads first when it can, and
+  its absence never affects the module that declared it. A failure is reported;
+  an unsupported platform is expected and prints nothing;
 - when `VALISE_RELOAD=1` is set, clears the plan's declared exports first, so
   the plan can be sourced again.
 
-The plan is the compiled equivalent of the loader: same dependency order,
-same export checks, same fail-closed behavior. The plan is static and fast;
+The plan is the compiled equivalent of the loader: same dependency rules,
+same export checks, same strict and permissive behavior. The plan is static and fast;
 the loader parses metadata at runtime and is the fallback for releases that
 ship an `entrypoints/` tree instead of `generated/` plans.
 

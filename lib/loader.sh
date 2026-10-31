@@ -662,7 +662,11 @@ sp_loader_load_modules() {
         continue
       fi
       if [ "$_spl_platform_match" -ne 1 ]; then
-        command printf 'loader: %s\n' "$_spl_mod: unsupported platform for $_spl_current_platform" >&2
+        # A module reached only as an optional dependency is expected to be absent
+        # on some hosts. Reporting it would print at every shell startup.
+        case " $_spl_strict_required_words " in
+        *" $_spl_mod "*) command printf 'loader: %s\n' "$_spl_mod: unsupported platform for $_spl_current_platform" >&2 ;;
+        esac
         command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/blocked"
         _spl_blocked_words="$_spl_blocked_words $_spl_mod"
         [ "$_spl_mode" = strict ] && case " $_spl_strict_required_words " in *" $_spl_mod "*) _spl_strict_error=1 ;; esac

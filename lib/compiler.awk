@@ -4,7 +4,7 @@
 # valise compile: pure POSIX awk static plan compiler.
 # Input: single preprocessed stream from sh wrapper.
 #   Lines starting with SEED: space-separated seed module names
-#   Lines starting with MOD: identity<TAB>requires<TAB>load_path<TAB>platforms<TAB>side_effect<TAB>exports
+#   Lines starting with MOD: identity<TAB>requires<TAB>load_path<TAB>platforms<TAB>side_effect<TAB>exports<TAB>optional
 #   identity is module@meta_source when registry sources are qualified.
 #   Lines starting with PRELUDE: sp_cap function names (space-separated)
 # Output: complete installed plan on stdout.
@@ -33,13 +33,14 @@ BEGIN {
 /^MOD:/ {
     line = substr($0, 5)
     n = split(line, fields, "\t")
-    if (n >= 6) {
+    if (n >= 7) {
         name = fields[1]
         mod_req[name] = fields[2]
         mod_load[name] = fields[3]
         mod_platforms[name] = fields[4]
         mod_side_effect[name] = fields[5]
         mod_exports[name] = fields[6]
+        mod_opt[name] = fields[7]
         display_name = name
         at = index(name, "@")
         if (at > 0) display_name = substr(name, 1, at - 1)
@@ -138,6 +139,22 @@ END {
             if (!(dep in requiring_of)) requiring_of[dep] = name
         }
 
+        # The preprocessor keeps only optional dependencies that exist for this
+        # shell and variant, so each of these is a module the plan must attempt.
+        n_opt = split(mod_opt[name], opts, " ")
+        for (ri = 1; ri <= n_opt; ri++) {
+            dep = opts[ri]
+            if (dep in discovered) continue
+            in_q = 0
+            for (qi = q_head; qi <= q_tail; qi++) {
+                if (queue[qi] == dep) { in_q = 1; break }
+            }
+            if (!in_q) {
+                q_tail++
+                queue[q_tail] = dep
+            }
+        }
+
         # Re-sort remaining queue
         for (i = q_head + 1; i <= q_tail; i++) {
             key = queue[i]
@@ -168,6 +185,10 @@ END {
     rem_count = discovered_count
     ordered_count = 0
 
+    # Order by required and optional edges. When that stalls, retry on required
+    # edges alone, as the loader does, so an optional edge can never deadlock the
+    # graph. Only a stall on required edges is a cycle.
+    relaxed = 0
     while (rem_count > 0) {
         progress = 0
         next_rem_count = 0
@@ -176,11 +197,18 @@ END {
             all_loaded = 1
             n_req = split(mod_req[name], reqs, " ")
             for (rqi = 1; rqi <= n_req; rqi++) {
-                dep = reqs[rqi]
-                if (dep == "") continue
-                if (!(dep in loaded)) {
+                if (!(reqs[rqi] in loaded)) {
                     all_loaded = 0
                     break
+                }
+            }
+            if (all_loaded && !relaxed) {
+                n_opt = split(mod_opt[name], opts, " ")
+                for (rqi = 1; rqi <= n_opt; rqi++) {
+                    if (!(opts[rqi] in loaded)) {
+                        all_loaded = 0
+                        break
+                    }
                 }
             }
             if (all_loaded) {
@@ -194,12 +222,33 @@ END {
             }
         }
         if (!progress) {
-            print "ERROR: cycle detected" > "/dev/stderr"
-            exit 1
+            if (relaxed) {
+                print "ERROR: cycle detected" > "/dev/stderr"
+                exit 1
+            }
+            relaxed = 1
+            continue
         }
+        relaxed = 0
         rem_count = next_rem_count
         for (ri = 1; ri <= rem_count; ri++) {
             remaining[ri] = next_remaining[ri]
+        }
+    }
+
+    # The required closure is the roots and everything they require. A module
+    # reached only through an optional edge may be unavailable without failing
+    # the plan.
+    for (i = 1; i <= seed_count; i++) {
+        required_stack[++required_top] = seeds[i]
+    }
+    while (required_top > 0) {
+        name = required_stack[required_top--]
+        if (name in required) continue
+        required[name] = 1
+        n_req = split(mod_req[name], reqs, " ")
+        for (rqi = 1; rqi <= n_req; rqi++) {
+            required_stack[++required_top] = reqs[rqi]
         }
     }
 
@@ -304,6 +353,7 @@ END {
         printf " %s", ordered[i]
     }
     printf "; do\n"
+    printf "    %srequired=1\n", prefix
     printf "    case \"$%smodule\" in\n", prefix
 
     for (oi = 1; oi <= ordered_count; oi++) {
@@ -318,23 +368,25 @@ END {
         export_count = split(mod_exports[name], module_exports, " ")
         body_indent = platform_any == 0 ? "        " : "      "
 
+        # An optional-only module is expected to be unavailable on some hosts,
+        # so it fails quietly; the loop below does not treat it as a plan failure.
+        if (!(name in required)) printf "      %srequired=0\n", prefix
+
         # A module whose required dependency is unavailable must not run: its
-        # body would call functions that were never defined. In strict mode a
-        # real failure has already stopped the plan, so the cause here is a
-        # platform skip, and the loader fails that case too. In permissive mode
-        # the module is reported and the plan continues.
+        # body would call functions that were never defined.
         n_req = split(mod_req[name], reqs, " ")
         if (n_req > 0) {
             printf "      %sblocked_by=\n", prefix
+            printf "      case \" $%sunavailable \" in", prefix
             for (rqi = 1; rqi <= n_req; rqi++) {
-                printf "      case \" $%sunavailable \" in *\" %s \"*) %sblocked_by=%s ;; esac\n", prefix, reqs[rqi], prefix, mod_display[reqs[rqi]]
+                printf " *\" %s \"*) %sblocked_by=%s ;;", reqs[rqi], prefix, mod_display[reqs[rqi]]
             }
+            printf " esac\n"
             printf "      if [ -n \"$%sblocked_by\" ]; then\n", prefix
-            printf "        printf 'valise: module %%s skipped: required dependency unavailable: %%s\\n' '%s' \"$%sblocked_by\" >&2\n", display, prefix
-            printf "        %sunavailable=\"$%sunavailable %s\"\n", prefix, prefix, name
-            printf "        if [ \"$%smode\" = strict ]; then\n", prefix
-            printf "          %sstatus=1\n", prefix
-            printf "        fi\n"
+            if (name in required) {
+                printf "        printf 'valise: module %%s skipped: required dependency unavailable: %%s\\n' '%s' \"$%sblocked_by\" >&2\n", display, prefix
+            }
+            printf "        %sstatus=1\n", prefix
             printf "      else\n"
             # A meta module on any platform has no statement for this branch.
             if (mod_load[name] == "" && platform_any == 1) printf "        :\n"
@@ -351,7 +403,10 @@ END {
                 }
             }
             printf "      if [ \"$%splatform_match\" -ne 1 ]; then\n", prefix
-            printf "        %sunavailable=\"$%sunavailable %s\"\n", prefix, prefix, name
+            if (name in required) {
+                printf "        printf 'valise: module %%s skipped: unsupported platform: %%s\\n' '%s' \"$%splatform\" >&2\n", display, prefix
+            }
+            printf "        %sstatus=1\n", prefix
             if (mod_load[name] != "") printf "      else\n"
         }
         if (mod_load[name] != "") {
@@ -428,13 +483,13 @@ END {
     }
 
     printf "    esac\n"
+    # Strict mode stops at the first failure in the required closure. Anything
+    # else is recorded so its dependents are blocked, and the plan continues.
     printf "    if [ \"$%sstatus\" -ne 0 ]; then\n", prefix
     printf "      %sunavailable=\"$%sunavailable $%smodule\"\n", prefix, prefix, prefix
-    printf "      if [ \"$%sfailed\" -eq 0 ]; then\n", prefix
+    printf "      if [ \"$%smode\" = strict ] && [ \"$%srequired\" -eq 1 ]; then\n", prefix, prefix
     printf "        %sfailed=1\n", prefix
     printf "        %sfirst_status=$%sstatus\n", prefix, prefix
-    printf "      fi\n"
-    printf "      if [ \"$%smode\" = strict ]; then\n", prefix
     printf "        break\n"
     printf "      fi\n"
     printf "      %sstatus=0\n", prefix
@@ -448,6 +503,6 @@ END {
     printf "  %sreturn=0\n", prefix
     printf "fi\n"
     printf "unset %sstatus %sfailed %sfirst_status %sunavailable %smode %splatform\n", prefix, prefix, prefix, prefix, prefix, prefix
-    printf "unset %smodule %sblocked_by %splatform_match %sexport %slookup %sconflict %swrapper_exports\n", prefix, prefix, prefix, prefix, prefix, prefix, prefix
+    printf "unset %smodule %srequired %sblocked_by %splatform_match %sexport %slookup %sconflict %swrapper_exports\n", prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix
     printf "eval \"unset %sreturn; return $%sreturn\"\n", prefix, prefix
 }
