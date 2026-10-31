@@ -105,9 +105,7 @@ check_output_contains "help shows usage" "Usage: valise" "$_valise" help
 check_output_contains "no args shows usage" "Usage: valise" "$_valise"
 
 # --- Init ---
-check_output_contains "init bash outputs profile source" ". " "$_valise" init bash
-check_output_contains "init zsh outputs profile source" ". " "$_valise" init zsh
-check_output_contains "init ksh outputs profile source" ". " "$_valise" init ksh
+check_output_contains "init posix outputs profile source" ". " "$_valise" init posix
 check_output_contains "init fish outputs protected Fish loader integration" "loader.fish" "$_valise" init fish
 
 # Verify init output contains active link path. The CLI prints the
@@ -117,10 +115,10 @@ check_output_contains "init fish outputs protected Fish loader integration" "loa
 _init_expected_active=$XDG_CONFIG_HOME/valise/active
 _init_expected_active=$(printf '%s' "$_init_expected_active" |
   awk '{ n = split($0, p, "/"); out = ""; for (i = 1; i <= n; i++) { if (p[i] == "" || p[i] == ".") continue; out = out "/" p[i] } print out }')
-_init_out=$("$_valise" init bash 2>&1)
+_init_out=$("$_valise" init posix 2>&1)
 case "$_init_out" in
-  *"$_init_expected_active"*) pass "init bash references XDG active path" ;;
-  *) fail "init bash references XDG active path (expected '$_init_expected_active')" ;;
+  *"$_init_expected_active"*) pass "init posix references XDG active path" ;;
+  *) fail "init posix references XDG active path (expected '$_init_expected_active')" ;;
 esac
 unset _init_expected_active _init_out
 
@@ -130,7 +128,7 @@ unset _init_expected_active _init_out
 _injection_marker="$_test_home/integration-command-substitution-ran"
 _injection_xdg="$_test_home/xdg-\$(touch $_injection_marker)/a\\'h"
 XDG_CONFIG_HOME="$_injection_xdg" "$_valise" init fish >"$_test_home/init-fish-hostile.out"
-XDG_CONFIG_HOME="$_injection_xdg" "$_valise" init bash >"$_test_home/init-sh-hostile.out"
+XDG_CONFIG_HOME="$_injection_xdg" "$_valise" init posix >"$_test_home/init-sh-hostile.out"
 if [ -e "$_injection_marker" ]; then
   fail "init integration does not execute command substitutions from XDG paths"
 else
@@ -480,24 +478,21 @@ fi
 # Check that shell integration was auto-deployed
 # The test environment sets SHELL=/bin/sh, so we test with explicit bash
 _bash_profile_expected="$_test_home/.bashrc"
-if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-  _bash_profile_expected="$_test_home/.bash_profile"
-fi
 (cd "$_test_home/repo" && SHELL=/bin/bash "$_valise" install >/dev/null 2>&1)
 if [ -f "$_bash_profile_expected" ]; then
-  if grep -q "managed by valise install" "$_bash_profile_expected"; then
-    pass "install auto-deploys bash integration to platform-appropriate file"
+  if grep -q "# BEGIN valise managed block" "$_bash_profile_expected"; then
+    pass "install writes bash integration to ~/.bashrc"
   else
-    fail "install auto-deploys bash integration (marker missing)"
+    fail "install writes bash integration (marker missing)"
   fi
 else
-  fail "install auto-deploys bash integration (file not created: $_bash_profile_expected)"
+  fail "install writes bash integration (file not created: $_bash_profile_expected)"
 fi
 
 # Verify idempotency: running install again should not duplicate the snippet
-_snippet_count_before=$(grep -c "managed by valise install" "$_bash_profile_expected" || echo 0)
+_snippet_count_before=$(grep -c "# BEGIN valise managed block" "$_bash_profile_expected" || echo 0)
 (cd "$_test_home/repo" && SHELL=/bin/bash "$_valise" install >/dev/null 2>&1)
-_snippet_count_after=$(grep -c "managed by valise install" "$_bash_profile_expected" || echo 0)
+_snippet_count_after=$(grep -c "# BEGIN valise managed block" "$_bash_profile_expected" || echo 0)
 if [ "$_snippet_count_before" = "$_snippet_count_after" ]; then
   pass "install is idempotent (no duplicate snippets)"
 else
@@ -506,26 +501,20 @@ fi
 
 # Test zsh deployment
 _zsh_profile_expected="$_test_home/.zshrc"
-if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-  _zsh_profile_expected="$_test_home/.zprofile"
-fi
 (cd "$_test_home/repo" && SHELL=/bin/zsh "$_valise" install >/dev/null 2>&1)
 if [ -f "$_zsh_profile_expected" ]; then
-  if grep -q "managed by valise install" "$_zsh_profile_expected"; then
-    pass "install auto-deploys zsh integration to platform-appropriate file"
+  if grep -q "# BEGIN valise managed block" "$_zsh_profile_expected"; then
+    pass "install writes zsh integration to ~/.zshrc"
   else
-    fail "install auto-deploys zsh integration (marker missing)"
+    fail "install writes zsh integration (marker missing)"
   fi
 else
-  fail "install auto-deploys zsh integration (file not created: $_zsh_profile_expected)"
+  fail "install writes zsh integration (file not created: $_zsh_profile_expected)"
 fi
 
 # Test that existing profile content is preserved
 _custom_profile_content="# existing user config"
 _bash_profile_test="$_test_home/.bashrc"
-if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-  _bash_profile_test="$_test_home/.bash_profile"
-fi
 printf '%s\n' "$_custom_profile_content" > "$_bash_profile_test"
 (cd "$_test_home/repo" && SHELL=/bin/bash "$_valise" install >/dev/null 2>&1)
 if grep -q "existing user config" "$_bash_profile_test"; then
@@ -535,16 +524,16 @@ else
 fi
 
 # Test ksh deployment
-_ksh_profile_expected="$_test_home/.kshrc"
+_ksh_profile_expected="$_test_home/.profile"
 (cd "$_test_home/repo" && SHELL=/bin/ksh "$_valise" install >/dev/null 2>&1)
 if [ -f "$_ksh_profile_expected" ]; then
-  if grep -q "managed by valise install" "$_ksh_profile_expected"; then
-    pass "install auto-deploys ksh integration"
+  if grep -q "# BEGIN valise managed block" "$_ksh_profile_expected"; then
+    pass "install writes ksh integration"
   else
-    fail "install auto-deploys ksh integration (marker missing)"
+    fail "install writes ksh integration (marker missing)"
   fi
 else
-  fail "install auto-deploys ksh integration (file not created: $_ksh_profile_expected)"
+  fail "install writes ksh integration (file not created: $_ksh_profile_expected)"
 fi
 
 # Test unknown shell: install should skip POSIX shell integration gracefully
@@ -559,9 +548,6 @@ fi
 
 # Test symlink profile: install should skip and not overwrite the symlink
 _symlink_profile="$_test_home/.bashrc"
-if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-  _symlink_profile="$_test_home/.bash_profile"
-fi
 rm -f "$_symlink_profile"
 printf '%s\n' "# symlink target" > "$_test_home/.profile-real"
 ln -s "$_test_home/.profile-real" "$_symlink_profile"

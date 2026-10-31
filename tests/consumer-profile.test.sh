@@ -105,6 +105,15 @@ rewrite_interpreters() {
 }
 rewrite_interpreters "$CONSUMER/tests/lib.sh"
 
+# The consumer tree predates the current CLI spellings. Move the copy to them.
+for _cp_cli_file in "$CONSUMER/Makefile" "$CONSUMER"/tests/*.sh; do
+  [ -f "$_cp_cli_file" ] || continue
+  sed -e 's/--no-shell-integration/--no-integration/g' \
+    -e 's/init profile --compiled/init posix/g' \
+    "$_cp_cli_file" >"$_cp_cli_file.cp" && mv "$_cp_cli_file.cp" "$_cp_cli_file"
+done
+unset _cp_cli_file
+
 # The consumer's metadata suite rebuilds the expected registry by globbing
 # the metadata directories and comparing the result to the committed TSV.
 # That expectation predates the generator: the glob order follows the
@@ -240,7 +249,7 @@ if [ -d "$RELEASE" ]; then
         PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin" TERM=dumb \
         XDG_DATA_HOME="$WORK/xdg/data" XDG_CONFIG_HOME="$WORK/xdg/config" \
         XDG_STATE_HOME="$WORK/xdg/state" \
-        "$VALISE" install --no-shell-integration &&
+        "$VALISE" install --no-integration &&
       env -i HOME="$WORK/home" TMPDIR="$WORK/tmp/" \
         PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin" TERM=dumb \
         XDG_DATA_HOME="$WORK/xdg/data" XDG_CONFIG_HOME="$WORK/xdg/config" \

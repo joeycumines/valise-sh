@@ -14,8 +14,8 @@ usage() {
     "Usage: valise <command> [options]" \
     "" \
     "Commands:" \
-    "  init [bash|zsh|ksh|sh|profile|fish] [--compiled]  Output shell integration snippet" \
-    "  install [--integration=<auto|profile|none>] [--no-shell-integration]  Install or update the active release" \
+    "  init [posix|fish]         Print the shell integration snippet" \
+    "  install [--no-integration]  Install a release tree and make it active" \
     "  verify-active [--print-root] Verify the sealed active release" \
     "  doctor [--pre-install] [--no-integration]  Run environment diagnostics" \
     "  variant <list|use|prune>  List, switch, or prune installed releases" \
@@ -24,7 +24,7 @@ usage() {
     "  new [dir]                 Scaffold a new valise project" \
     "  module <new|list|remove>  Create, list, or remove project modules" \
     "  build [--variant=<name>] [--bundle=<name>] [out]  Assemble a release (consuming project)" \
-    "  apply [--variant=<name>] [--bundle=<name>] [--target=<file>]  Build, install, and integrate the project" \
+    "  apply [--variant=<name>] [--bundle=<name>] [--no-integration]  Build the project and install it" \
     "  status                    Show project, active release, integration, and drift" \
     "  compile [--bundle=<name>] [--variant=<name>] <output-dir>  (consuming project)" \
     "  assemble [--bundle=<name>] [--variant=<name>] <out-dir>  Compile and build a release tree (consuming project)" \
@@ -47,31 +47,34 @@ usage() {
 
 usage_init() {
   printf '%s\n' \
-    "usage: valise init [bash|zsh|ksh|sh|profile|fish] [--compiled] [--source-tree]" \
+    "usage: valise init [posix|fish] [--source-tree]" \
     "" \
-    "Print the shell integration snippet for the active release." \
+    "Print the shell integration snippet for the active release. valise install" \
+    "and valise apply write it for you; use this to wire a startup file by hand." \
     "" \
-    "  bash zsh ksh  Emit the snippet for that shell." \
-    "  sh profile    Emit the snippet that detects the running shell." \
-    "  fish          Emit the Fish conf.d hook." \
-    "  --compiled    Prefer the compiled plan, falling back to the loader entrypoint." \
+    "  posix         A managed block for any POSIX shell. It loads the plan for" \
+    "                the running shell, or the loader when the release has none." \
+    "  fish          The Fish conf.d hook." \
     "  --source-tree Skip release verification in the Fish hook (development only)." \
     "" \
-    "With no shell argument, the shell named by \$SHELL is used."
+    "With no argument, fish when \$SHELL names fish, otherwise posix."
 }
 
 usage_install() {
   printf '%s\n' \
-    "usage: valise install [--integration=<auto|profile|none>] [--no-shell-integration]" \
+    "usage: valise install [--no-integration]" \
     "" \
-    "Install the release described by the manifest in the current tree and make it active." \
+    "Install the release tree in the current directory and make it active, then" \
+    "write the shell integration." \
     "" \
-    "  --integration=auto    Write the startup file for \$SHELL and a Fish conf.d hook." \
-    "  --integration=profile Write only ~/.profile as a managed block." \
-    "  --integration=none    Write no startup file and no Fish hook." \
-    "  --no-shell-integration  Legacy spelling of --integration=none." \
+    "A managed block is written to ~/.profile; to the first of ~/.bash_profile and" \
+    "~/.bash_login that exists, because it shadows ~/.profile for bash; to ~/.bashrc" \
+    "and ~/.zshrc when that shell is \$SHELL or the file exists; and to ~/.zprofile" \
+    "when zsh is installed or the file exists. Symlinked files are left alone. A" \
+    "Fish conf.d hook is written when Fish is installed. Each install replaces the" \
+    "block in place." \
     "" \
-    "Run from the release tree root, which must contain a release manifest."
+    "  --no-integration  Write no startup file and no Fish hook."
 }
 
 usage_doctor() {
@@ -130,12 +133,12 @@ usage_build() {
 
 usage_apply() {
   printf '%s\n' \
-    "usage: valise apply [--variant=<name>] [--bundle=<name>] [--target=<file>]" \
+    "usage: valise apply [--variant=<name>] [--bundle=<name>] [--no-integration]" \
     "" \
-    "Build the project, install the result, and write the shell integration." \
+    "Build the project, install the result, write the shell integration, and verify" \
+    "the active release. See 'valise install --help' for the files it writes." \
     "" \
-    "  --target=<file>  Integration target (default: ~/.profile, or the" \
-    "                   integration_target setting in shell/release/project.conf)."
+    "  --no-integration  Write no startup file and no Fish hook."
 }
 
 usage_status() {
@@ -571,7 +574,6 @@ _manifest_parse=""
 _stage=""
 _hook_tmp=""
 _mm_tmp=""
-_posix_tmp=""
 _rr_tmp=""
 _install_manifest_source=""
 _mv_path=""
@@ -734,11 +736,6 @@ release_lock() {
     [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_mm_tmp" 2>/dev/null || :
     if [ -e "$_mm_tmp" ] || [ -L "$_mm_tmp" ]; then _cleanup_failed=1; fi
     _mm_tmp=""
-  fi
-  if [ -n "$_posix_tmp" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_posix_tmp" 2>/dev/null || :
-    if [ -e "$_posix_tmp" ] || [ -L "$_posix_tmp" ]; then _cleanup_failed=1; fi
-    _posix_tmp=""
   fi
   [ "$_lock_owned" -eq 1 ] || { [ "$_cleanup_failed" -eq 0 ]; return; }
   [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$VALISE_LOCK_DIR/pid" 2>/dev/null || :
@@ -2697,188 +2694,151 @@ print_fish_integration() {
     "end"
 }
 
-# Emit a POSIX shell integration snippet for the active release.
+# Emit the POSIX integration block for the active release.
 #
-# print_posix_integration <shell|profile> <compiled|loader> <header>
-#
-# The snippet works with either release shape the CLI produces. A compiled
-# release carries generated/installed-modules.<shell>; an engine release
-# carries entrypoints/profile.sh and the loader behind it. The preferred
-# mechanism is tried first and the other one is the fallback, so installing a
-# release can never leave a startup file that loads nothing. "profile" picks
-# the plan for the running shell; a named shell pins that shell's plan.
+# It works in every POSIX shell and with both release shapes. A built release
+# carries generated/installed-modules.<shell> plans; an engine release carries
+# entrypoints/profile.sh and the loader. The plan for the running shell is tried
+# first, then the loader, so a startup file never silently loads nothing when
+# the release has a way to load. The guard makes several startup files safe: a
+# login shell that reads more than one of them loads the profile once.
 print_posix_integration() {
-  _pix_shell=$1
-  _pix_prefer=$2
-  _pix_header=$3
-  case "$_pix_prefer" in
-    compiled | loader) ;;
-    *) return 1 ;;
-  esac
-  case "$_pix_shell" in
-    bash|zsh|ksh) _pix_select="_valise_plan=$_pix_shell" ;;
-    profile|sh)
-      _pix_select='if [ -n "${BASH_VERSION-}" ]; then _valise_plan=bash; elif [ -n "${ZSH_VERSION-}" ]; then _valise_plan=zsh; elif [ -n "${KSH_VERSION-}" ]; then _valise_plan=ksh; else _valise_plan=; fi'
-      ;;
-    *) return 1 ;;
-  esac
   _pix_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
   printf '%s\n' \
-    "$_pix_header" \
+    '# BEGIN valise managed block' \
     "_valise_active_link=$_pix_active_literal" \
     'if [ -z "${_valise_profile_loaded:-}" ] || [ "${VALISE_RELOAD:-}" = 1 ]; then' \
     '  _valise_profile_loaded=1' \
-    "  $_pix_select" \
+    '  if [ -n "${BASH_VERSION-}" ]; then _valise_plan=bash; elif [ -n "${ZSH_VERSION-}" ]; then _valise_plan=zsh; elif [ -n "${KSH_VERSION-}" ]; then _valise_plan=ksh; else _valise_plan=; fi' \
     '  _valise_active=$(cd "$_valise_active_link" 2>/dev/null && pwd -P)' \
-    '  if [ -n "$_valise_active" ]; then'
-  if [ "$_pix_prefer" = compiled ]; then
-    printf '%s\n' \
-      '    if [ -n "$_valise_plan" ] && [ -f "$_valise_active/generated/installed-modules.$_valise_plan" ]; then' \
-      '      VALISE_MODULE_ROOT="$_valise_active"' \
-      '      . "$_valise_active/generated/installed-modules.$_valise_plan"' \
-      '      unset VALISE_MODULE_ROOT' \
-      '    elif [ -f "$_valise_active/entrypoints/profile.sh" ]; then' \
-      '      VALISE_ROOT="$_valise_active"' \
-      '      . "$_valise_active/entrypoints/profile.sh"' \
-      '    fi'
-  else
-    printf '%s\n' \
-      '    if [ -f "$_valise_active/entrypoints/profile.sh" ]; then' \
-      '      VALISE_ROOT="$_valise_active"' \
-      '      . "$_valise_active/entrypoints/profile.sh"' \
-      '    elif [ -n "$_valise_plan" ] && [ -f "$_valise_active/generated/installed-modules.$_valise_plan" ]; then' \
-      '      VALISE_MODULE_ROOT="$_valise_active"' \
-      '      . "$_valise_active/generated/installed-modules.$_valise_plan"' \
-      '      unset VALISE_MODULE_ROOT' \
-      '    fi'
-  fi
-  printf '%s\n' \
+    '  if [ -n "$_valise_active" ]; then' \
+    '    if [ -n "$_valise_plan" ] && [ -f "$_valise_active/generated/installed-modules.$_valise_plan" ]; then' \
+    '      VALISE_MODULE_ROOT="$_valise_active"' \
+    '      . "$_valise_active/generated/installed-modules.$_valise_plan"' \
+    '      unset VALISE_MODULE_ROOT' \
+    '    elif [ -f "$_valise_active/entrypoints/profile.sh" ]; then' \
+    '      VALISE_ROOT="$_valise_active"' \
+    '      . "$_valise_active/entrypoints/profile.sh"' \
+    '    fi' \
     '  fi' \
     '  unset _valise_active _valise_plan' \
     'fi' \
-    'unset _valise_active_link'
-  unset _pix_shell _pix_prefer _pix_header _pix_select _pix_active_literal
+    'unset _valise_active_link' \
+    '# END valise managed block'
+  unset _pix_active_literal
 }
 
 cmd_init() {
   _shell=""
   _fish_source_tree_mode=0
-  _init_compiled=0
   for _arg do
     case "$_arg" in
       --source-tree) _fish_source_tree_mode=1 ;;
-      --compiled) _init_compiled=1 ;;
       --help|-h) usage_init; return 0 ;;
       -*) die "unknown init option: $_arg" ;;
       *)
-        [ -z "$_shell" ] || die "usage: valise init [shell] [--source-tree] [--compiled]"
+        [ -z "$_shell" ] || die "usage: valise init [posix|fish] [--source-tree]"
         _shell=$_arg
         ;;
     esac
   done
   if [ -z "$_shell" ]; then
-    # Detect current shell
     case "${SHELL:-}" in
-      *bash) _shell=bash ;;
-      *zsh)  _shell=zsh ;;
-      *ksh)  _shell=ksh ;;
       *fish) _shell=fish ;;
-      *)     _shell=sh ;;
+      *)     _shell=posix ;;
     esac
   fi
-
-  if [ "$_init_compiled" -eq 1 ]; then
-    # A compiled release carries generated/installed-modules.<shell>; an
-    # engine release carries entrypoints/profile.sh. The snippet prefers the
-    # compiled plan and falls back to the loader entrypoint, so it loads
-    # whichever mechanism the installed release actually provides.
-    case "$_shell" in
-      bash|zsh|ksh|sh|profile) ;;
-      *) die "--compiled supports bash, zsh, ksh, sh and profile (compile emits no $_shell plan)" ;;
-    esac
-    print_posix_integration "$_shell" compiled "# valise shell integration (compiled plan preferred)" || return 1
-    return 0
-  fi
-
   case "$_shell" in
-    bash|zsh|ksh|sh|profile)
-      # The loader snippet is POSIX, so `profile` (for ~/.profile) and `sh`
-      # share it; the entrypoint detects the running shell itself. It also
-      # falls back to a compiled plan when the release carries one instead.
-      print_posix_integration "$_shell" loader "# valise shell integration" || return 1
-      ;;
-    fish)
-      print_fish_integration
-      ;;
-    *)
-      die "unsupported shell: $_shell (use bash, zsh, ksh, sh, profile, or fish)"
-      ;;
+    posix) print_posix_integration || return 1 ;;
+    fish) print_fish_integration ;;
+    *) die "unsupported shell family: $_shell (use posix or fish)" ;;
   esac
 }
 
-# Report whether a startup file carries a valise managed block.
-#
-# Three writers produce a valise-managed startup file, and each uses its own
-# marker. `valise apply` and `valise init` use project_write_integration,
-# which frames the snippet in the "# BEGIN valise managed block" /
-# "# END valise managed block" pair. `valise install --integration=auto`
-# writes the POSIX snippet with a "managed by valise install" header, and
-# the Fish hook with a "Managed by valise install" header. Doctor must
-# recognize all of them, or it reports a correctly installed system as
-# having no integration.
+# Report whether a startup file carries valise integration: the POSIX managed
+# block, or the header of the Fish hook, which valise owns as a whole file.
 integration_has_managed_block() {
   _ihb_awk=$(trusted_utility_path awk) || return 1
   "$_ihb_awk" '
     index($0, "# BEGIN valise managed block") { found = 1; exit }
-    index($0, "managed by valise install") { found = 1; exit }
     index($0, "Managed by valise install") { found = 1; exit }
     END { exit !found }
   ' "$1" 2>/dev/null
 }
 
-# The startup files a given POSIX shell reads for login and interactive
-# startup. The per-shell lists mirror what `valise install
-# --integration=auto` writes, so doctor checks the files install actually
-# manages. `~/.profile` is the shared target used by `valise apply` and
-# `--integration=profile`.
+# The startup files a shell reads at login and for interactive shells. A login
+# bash reads the first of .bash_profile, .bash_login and .profile that exists.
 #
-# integration_shell_files <shell> <platform> <home>
+# integration_shell_files <shell> <home>
 # prints one candidate path per line.
 integration_shell_files() {
-  _isf_shell=$1
-  _isf_platform=$2
-  _isf_home=$3
-  case "$_isf_shell" in
+  case "$1" in
   bash)
-    # A login bash reads .bash_profile, then .bash_login, then .profile. The
-    # first file that exists shadows the rest, so only the effective one can
-    # deliver the integration.
-    if [ -e "$_isf_home/.bash_profile" ]; then
-      printf '%s\n' "$_isf_home/.bash_profile"
-    elif [ -e "$_isf_home/.bash_login" ]; then
-      printf '%s\n' "$_isf_home/.bash_login"
+    if [ -e "$2/.bash_profile" ]; then
+      printf '%s\n' "$2/.bash_profile"
+    elif [ -e "$2/.bash_login" ]; then
+      printf '%s\n' "$2/.bash_login"
     else
-      printf '%s\n' "$_isf_home/.profile"
+      printf '%s\n' "$2/.profile"
     fi
-    if [ "$_isf_platform" != Darwin ] && [ -e "$_isf_home/.bashrc" ]; then
-      printf '%s\n' "$_isf_home/.bashrc"
-    fi
+    printf '%s\n' "$2/.bashrc"
     ;;
   zsh)
-    printf '%s\n' "$_isf_home/.zprofile" "$_isf_home/.zshrc"
-    ;;
-  ksh)
-    printf '%s\n' "$_isf_home/.profile" "$_isf_home/.kshrc"
+    printf '%s\n' "$2/.zprofile" "$2/.zshrc"
     ;;
   fish)
-    # Fish loads every .fish file in conf.d. The hook `valise install`
-    # deploys lives there, so that is the file doctor must check.
-    printf '%s\n' "${XDG_CONFIG_HOME:-$_isf_home/.config}/fish/conf.d/valise.fish"
+    printf '%s\n' "${XDG_CONFIG_HOME:-$2/.config}/fish/conf.d/valise.fish"
     ;;
   *)
-    printf '%s\n' "$_isf_home/.profile"
+    printf '%s\n' "$2/.profile"
     ;;
   esac
+}
+
+# The startup files install manages. ~/.profile is always included: it serves
+# sh, ksh and login bash. Files that belong to another shell are only created
+# for the user's own shell, except ~/.zprofile, because zsh reads nothing else at
+# login. Existing files are always kept current.
+#
+# posix_integration_targets <home>
+# prints one path per line.
+posix_integration_targets() {
+  printf '%s\n' "$1/.profile"
+  if [ -e "$1/.bash_profile" ] || [ -L "$1/.bash_profile" ]; then
+    printf '%s\n' "$1/.bash_profile"
+  elif [ -e "$1/.bash_login" ] || [ -L "$1/.bash_login" ]; then
+    printf '%s\n' "$1/.bash_login"
+  fi
+  case "${SHELL:-}" in
+  */bash | bash) printf '%s\n' "$1/.bashrc" ;;
+  *) if [ -e "$1/.bashrc" ] || [ -L "$1/.bashrc" ]; then printf '%s\n' "$1/.bashrc"; fi ;;
+  esac
+  if [ -e "$1/.zprofile" ] || [ -L "$1/.zprofile" ] || command -v zsh >/dev/null 2>&1; then
+    printf '%s\n' "$1/.zprofile"
+  fi
+  case "${SHELL:-}" in
+  */zsh | zsh) printf '%s\n' "$1/.zshrc" ;;
+  *) if [ -e "$1/.zshrc" ] || [ -L "$1/.zshrc" ]; then printf '%s\n' "$1/.zshrc"; fi ;;
+  esac
+}
+
+# Write the managed block to every startup file install manages.
+write_posix_integration() {
+  if [ -z "${HOME:-}" ]; then
+    info "warning: HOME is not set; no startup file was written"
+    return 0
+  fi
+  _wpi_home=$(path_normalize "$HOME") || die "cannot resolve HOME"
+  _wpi_snippet=$(print_posix_integration) || die "cannot generate integration block"
+  _wpi_targets=$(posix_integration_targets "$_wpi_home")
+  while IFS= read -r _wpi_target; do
+    [ -n "$_wpi_target" ] || continue
+    project_write_integration "$_wpi_target" "$_wpi_snippet"
+  done <<EOF
+$_wpi_targets
+EOF
+  info "to remove the integration, delete the valise managed block from these files"
+  unset _wpi_home _wpi_snippet _wpi_targets _wpi_target
 }
 
 cmd_doctor() {
@@ -2986,27 +2946,7 @@ cmd_doctor() {
     printf '  info: skipping the active release check (--pre-install)\n'
   fi
 
-  # Report the shared POSIX integration file and whether valise owns a block
-  # in it. A .bash_profile shadow is informational because bash stops reading
-  # ~/.profile once it exists.
   if [ -n "${HOME:-}" ]; then
-    _doctor_profile=$HOME/.profile
-    printf '  integration file: %s\n' "$_doctor_profile"
-    if [ -L "$_doctor_profile" ]; then
-      printf '  warn: integration file is a symlink: %s\n' "$_doctor_profile"
-    elif [ -f "$_doctor_profile" ]; then
-      if integration_has_managed_block "$_doctor_profile"; then
-        printf '  ok: integration file contains the valise managed block\n'
-      else
-        printf '  warn: integration file exists but has no valise managed block\n'
-      fi
-      if [ -f "$HOME/.bash_profile" ]; then
-        printf '  warn: .bash_profile exists and prevents bash from reading %s\n' "$_doctor_profile"
-      fi
-    else
-      printf '  info: integration file is not present\n'
-    fi
-
     # Check the startup files the running shell actually reads. The shell is
     # taken from $SHELL, which is the same signal install uses to pick its
     # per-shell startup file.
@@ -3018,7 +2958,6 @@ cmd_doctor() {
       */ksh|ksh) _doctor_shell=ksh ;;
       */fish|fish) _doctor_shell=fish ;;
       esac
-      _doctor_platform=$(trusted_uname -s 2>/dev/null || echo unknown)
       if [ -n "$_doctor_shell" ]; then
         printf '  integration shell: %s\n' "$_doctor_shell"
       else
@@ -3031,7 +2970,7 @@ cmd_doctor() {
       # through a staging file instead.
       _doctor_cand_file=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-doctor-candidates.XXXXXX") ||
         die "cannot create doctor candidate staging file"
-      integration_shell_files "$_doctor_shell" "$_doctor_platform" "$HOME" >"$_doctor_cand_file"
+      integration_shell_files "$_doctor_shell" "$HOME" >"$_doctor_cand_file"
       while IFS= read -r _doctor_candidate; do
         [ -n "$_doctor_candidate" ] || continue
         _doctor_candidates="$_doctor_candidates $_doctor_candidate"
@@ -3060,7 +2999,6 @@ cmd_doctor() {
     else
       printf '  info: skipping the shell integration check\n'
     fi
-    unset _doctor_profile
   fi
 
   # Platform check (informational only; install and variant use are portable
@@ -3322,16 +3260,12 @@ cmd_variant() {
 }
 
 cmd_install() {
-  _install_integration=auto
+  _install_integration=1
   for _arg do
     case "$_arg" in
       --help|-h) usage_install; return 0 ;;
-      --no-shell-integration) _install_integration=none ;;
-      --integration=auto|--integration=profile|--integration=none)
-        _install_integration=${_arg#--integration=}
-        ;;
-      --integration=*) die "unknown install integration mode: ${_arg#--integration=} (use auto, profile, or none)" ;;
-      --*) die "unknown install option: $_arg (usage: valise install [--integration=<auto|profile|none>] [--no-shell-integration])" ;;
+      --no-integration) _install_integration=0 ;;
+      *) die "unknown install option: $_arg (usage: valise install [--no-integration])" ;;
     esac
   done
 
@@ -3492,7 +3426,7 @@ cmd_install() {
   # currently expose the generated Fish plan; older releases may expose the
   # project Fish entrypoint, so the emitted integration handles both.
   _fish_path=$(trusted_utility_path fish 2>/dev/null || :)
-  if [ "$_install_integration" = auto ] && [ -n "$_fish_path" ]; then
+  if [ "$_install_integration" -eq 1 ] && [ -n "$_fish_path" ]; then
     _fish_conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
     _fish_hook="$_fish_conf_dir/valise.fish"
     _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
@@ -3531,92 +3465,8 @@ cmd_install() {
     info "remove this file to uninstall the Fish integration"
   fi
 
-  # Deploy POSIX shell integration to the platform-appropriate profile file.
-  # macOS: Terminal.app and iTerm2 open every window/tab as a login shell,
-  # so .bash_profile / .zprofile is sourced per terminal.
-  # Linux: terminal emulators open non-login interactive shells, so
-  # .bashrc / .zshrc / .kshrc is sourced per terminal.
-  _posix_shell="${SHELL:-}"
-  _posix_shell_name=""
-  case "$_posix_shell" in
-    */bash|bash) _posix_shell_name=bash ;;
-    */zsh|zsh)   _posix_shell_name=zsh ;;
-    */ksh|ksh)   _posix_shell_name=ksh ;;
-  esac
-  if [ "$_install_integration" = profile ] && [ -n "${HOME:-}" ]; then
-    _install_profile_target=$HOME/.profile
-    _install_profile_snippet=$(cmd_init profile --compiled) || die "cannot generate profile integration snippet"
-    project_write_integration "$_install_profile_target" "$_install_profile_snippet"
-    info "profile integration deployed: $_install_profile_target"
-    info "remove the valise managed block to uninstall this integration"
-    unset _install_profile_target _install_profile_snippet
-  fi
-  if [ "$_install_integration" = auto ] && [ -n "$_posix_shell_name" ] && [ -n "${HOME:-}" ]; then
-    _posix_platform=$(trusted_uname -s 2>/dev/null || echo unknown)
-    _posix_profile=""
-    case "$_posix_platform" in
-      Darwin)
-        case "$_posix_shell_name" in
-          bash) _posix_profile="$HOME/.bash_profile" ;;
-          zsh)  _posix_profile="$HOME/.zprofile" ;;
-          ksh)  _posix_profile="$HOME/.kshrc" ;;
-        esac
-        ;;
-      *)
-        case "$_posix_shell_name" in
-          bash) _posix_profile="$HOME/.bashrc" ;;
-          zsh)  _posix_profile="$HOME/.zshrc" ;;
-          ksh)  _posix_profile="$HOME/.kshrc" ;;
-        esac
-        ;;
-    esac
-    if [ -n "$_posix_profile" ]; then
-      if [ -L "$_posix_profile" ]; then
-        info "shell integration skipped: $_posix_profile is a symlink (managed externally)"
-      else
-        _posix_marker="managed by valise install"
-        _posix_already=0
-        if [ -f "$_posix_profile" ]; then
-          _awk_path=$(trusted_utility_path awk) || die "no trusted awk utility available"
-          if "$_awk_path" -v m="$_posix_marker" 'index($0,m){found=1;exit} END{exit !found}' "$_posix_profile" 2>/dev/null; then
-            _posix_already=1
-          fi
-        fi
-        if [ "$_posix_already" -eq 1 ]; then
-          info "shell integration already present: $_posix_profile"
-        else
-          _posix_profile_dir=$(path_parent "$_posix_profile")
-          if [ ! -d "$_posix_profile_dir" ]; then
-            _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
-            "$_mkdir_path" -p "$_posix_profile_dir" || die "cannot create profile directory: $_posix_profile_dir"
-          fi
-          _posix_tmp=$(trusted_mktemp_at "$_posix_profile_dir" file "$_posix_profile_dir/.valise-profile.XXXXXX") || die "cannot create profile staging file"
-          [ -f "$_posix_tmp" ] && [ ! -L "$_posix_tmp" ] || die "profile staging path is unsafe"
-          if [ -f "$_posix_profile" ]; then
-            _cat_path=$(trusted_utility_path cat) || die "no trusted cat utility available"
-            "$_cat_path" "$_posix_profile" > "$_posix_tmp" || die "cannot copy existing profile"
-            printf '\n' >> "$_posix_tmp"
-          fi
-          _posix_snippet=$(print_posix_integration "$_posix_shell_name" loader \
-            "# valise shell integration — $_posix_marker") || die "cannot generate profile snippet"
-          printf '%s\n' "$_posix_snippet" >> "$_posix_tmp" || die "cannot write profile snippet"
-          unset _posix_snippet
-          _chmod_path=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
-          if [ -f "$_posix_profile" ]; then
-            _posix_existing_mode=$(file_mode "$_posix_profile")
-            [ -n "$_posix_existing_mode" ] || die "cannot read existing profile mode: $_posix_profile"
-            "$_chmod_path" "$_posix_existing_mode" "$_posix_tmp" || die "cannot preserve profile mode"
-          else
-            "$_chmod_path" 0644 "$_posix_tmp" || die "cannot set profile mode"
-          fi
-          _mv_path=$(trusted_utility_path mv) || die "no trusted mv utility available"
-          "$_mv_path" -f "$_posix_tmp" "$_posix_profile" || die "cannot publish profile snippet"
-          _posix_tmp=""
-          info "shell integration deployed: $_posix_profile"
-          info "remove the valise-managed lines to uninstall this integration"
-        fi
-      fi
-    fi
+  if [ "$_install_integration" -eq 1 ]; then
+    write_posix_integration
   fi
 
   release_lock
@@ -4255,7 +4105,6 @@ project_config_load() {
   _project_variant=workstation-full
   _project_bundle=default
   [ -n "${HOME:-}" ] || die "HOME is required for project commands"
-  _project_integration_target=$HOME/.profile
   _project_conf="$_project_root/shell/release/project.conf"
   if [ -f "$_project_conf" ]; then
     [ ! -L "$_project_conf" ] || die "project.conf must not be a symlink: $_project_conf"
@@ -4264,20 +4113,12 @@ project_config_load() {
       '' | '#'*) continue ;;
       variant=*) _project_variant=${_pc_line#variant=} ;;
       bundle=*) _project_bundle=${_pc_line#bundle=} ;;
-      integration_target=*) _project_integration_target=${_pc_line#integration_target=} ;;
       *) die "invalid project.conf line: $_pc_line" ;;
       esac
     done <"$_project_conf"
   fi
   [ -n "$_project_variant" ] || die "project variant must not be empty"
   [ -n "$_project_bundle" ] || die "project bundle must not be empty"
-  case "$_project_integration_target" in
-  '~'/*) _project_integration_target=$HOME/${_project_integration_target#"~"/} ;;
-  esac
-  case "$_project_integration_target" in
-  /*) ;;
-  *) die "integration target must be absolute: $_project_integration_target" ;;
-  esac
   unset _pc_root _pc_line _project_conf
 }
 
@@ -4439,60 +4280,73 @@ project_release_strip() {
   unset _rs_parent _rs_status _rs_mode _rs_chmod _rs_mv
 }
 
+# project_write_integration <file> <block>
+# Replace the valise managed block in place, or append one. A symlink belongs to
+# whatever manages it, so it is reported and left alone. Unpaired markers mean the
+# file was edited by hand: rewriting could delete the user's lines, so refuse.
 project_write_integration() {
   _pi_target=$1
   _pi_snippet=$2
-  [ "$_pi_target" != "/" ] || die "integration target must not be /"
-  [ ! -L "$_pi_target" ] || die "integration target must not be a symlink: $_pi_target"
-  # Rewriting drops everything between the markers, so an unpaired marker would
-  # delete the user's own lines. Refuse before staging anything.
+  if [ -L "$_pi_target" ]; then
+    info "warning: $_pi_target is a symlink; add the output of 'valise init' to it yourself"
+    unset _pi_target _pi_snippet
+    return 0
+  fi
+  _pi_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   if [ -f "$_pi_target" ]; then
-    _pi_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
     "$_pi_awk" '
       BEGIN { open = 0; bad = 0 }
       /^# BEGIN valise managed block$/ { if (open) bad = 1; open = 1; next }
       /^# END valise managed block$/ { if (!open) bad = 1; open = 0; next }
       END { exit (bad || open) ? 1 : 0 }
     ' "$_pi_target" ||
-      die "integration target has unpaired valise managed block markers: $_pi_target (restore or remove the BEGIN and END lines, then retry)"
+      die "unpaired valise managed block markers in $_pi_target (restore or remove the BEGIN and END lines, then retry)"
+  elif [ -e "$_pi_target" ]; then
+    die "startup path is not a regular file: $_pi_target"
   fi
   _pi_parent=$(path_parent "$_pi_target")
-  _pi_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
-  [ -d "$_pi_parent" ] || "$_pi_mkdir" -p "$_pi_parent" || die "cannot create integration target parent: $_pi_parent"
   _pi_tmp=$(trusted_mktemp_at "$_pi_parent" file "$_pi_parent/.valise-integration.XXXXXX") ||
     die "cannot create integration staging file"
   if [ -f "$_pi_target" ]; then
-    _pi_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
-    "$_pi_awk" '
-      BEGIN { skip = 0 }
-      /^# BEGIN valise managed block$/ { skip = 1; next }
+    # The block travels through ENVIRON: awk -v would interpret its backslashes.
+    _VALISE_BLOCK=$_pi_snippet "$_pi_awk" '
+      /^# BEGIN valise managed block$/ {
+        if (!written) print ENVIRON["_VALISE_BLOCK"]
+        written = 1
+        skip = 1
+        next
+      }
       /^# END valise managed block$/ { skip = 0; next }
-      !skip { print }
-    ' "$_pi_target" >"$_pi_tmp" || die "cannot read existing integration target: $_pi_target"
-  fi
-  printf '%s\n' '# BEGIN valise managed block' >>"$_pi_tmp"
-  printf '%s\n' "$_pi_snippet" >>"$_pi_tmp"
-  printf '%s\n' '# END valise managed block' >>"$_pi_tmp"
-  if [ -f "$_pi_target" ]; then
+      !skip { print; last = $0; lines++ }
+      END {
+        if (!written) {
+          if (lines > 0 && last != "") print ""
+          print ENVIRON["_VALISE_BLOCK"]
+        }
+      }
+    ' "$_pi_target" >"$_pi_tmp" || die "cannot read startup file: $_pi_target"
     _pi_cmp=$(trusted_utility_path cmp) || die "no trusted cmp utility available"
     if "$_pi_cmp" -s "$_pi_tmp" "$_pi_target"; then
       _pi_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
       "$_pi_rm" -f "$_pi_tmp" || die "cannot remove unchanged integration staging file"
       _pi_tmp=""
-      unset _pi_target _pi_snippet _pi_parent _pi_mkdir _pi_awk _pi_cmp _pi_rm
+      info "shell integration current: $_pi_target"
+      unset _pi_target _pi_snippet _pi_parent _pi_awk _pi_cmp _pi_rm
       return 0
     fi
     _pi_mode=$(file_mode "$_pi_target")
+    [ -n "$_pi_mode" ] || die "cannot read startup file mode: $_pi_target"
   else
+    printf '%s\n' "$_pi_snippet" >"$_pi_tmp" || die "cannot write integration staging file"
     _pi_mode=0644
   fi
-  [ -n "$_pi_mode" ] || die "cannot read integration target mode: $_pi_target"
   _pi_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
-  "$_pi_chmod" "$_pi_mode" "$_pi_tmp" || die "cannot set integration target mode"
+  "$_pi_chmod" "$_pi_mode" "$_pi_tmp" || die "cannot set startup file mode"
   _pi_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
-  "$_pi_mv" "$_pi_tmp" "$_pi_target" || die "cannot publish integration target: $_pi_target"
+  "$_pi_mv" "$_pi_tmp" "$_pi_target" || die "cannot publish startup file: $_pi_target"
   _pi_tmp=""
-  unset _pi_target _pi_snippet _pi_parent _pi_mkdir _pi_awk _pi_cmp _pi_rm _pi_mode _pi_chmod _pi_mv
+  info "shell integration written: $_pi_target"
+  unset _pi_target _pi_snippet _pi_parent _pi_awk _pi_cmp _pi_rm _pi_mode _pi_chmod _pi_mv
 }
 
 cmd_new() {
@@ -4538,7 +4392,7 @@ cmd_new() {
     >"$_new_target/shell/release/install-variants"
   printf '# bundle\tshell\troots\ndefault\tbash\tprofile_main\ndefault\tzsh\tprofile_main\ndefault\tksh\tprofile_main\n' \
     >"$_new_target/shell/release/bundle-roots"
-  printf 'variant=workstation-full\nbundle=default\nintegration_target=~/.profile\n' \
+  printf 'variant=workstation-full\nbundle=default\n' \
     >"$_new_target/shell/release/project.conf"
   printf '%s\n' \
     "created valise project: $_new_target" \
@@ -4767,53 +4621,30 @@ cmd_build() {
 cmd_apply() {
   _apply_variant=
   _apply_bundle=
-  _apply_target=
+  _apply_install_arg=
   for _apply_arg do
     case "$_apply_arg" in
       --variant=*) _apply_variant=${_apply_arg#--variant=} ;;
       --bundle=*) _apply_bundle=${_apply_arg#--bundle=} ;;
-      --target=*) _apply_target=${_apply_arg#--target=} ;;
+      --no-integration) _apply_install_arg=--no-integration ;;
       --help|-h) usage_apply; return 0 ;;
-      --*) die "unknown apply option: $_apply_arg" ;;
+      *) die "unknown apply option: $_apply_arg" ;;
     esac
   done
   project_config_load
   [ -n "$_apply_variant" ] || _apply_variant=$_project_variant
   [ -n "$_apply_bundle" ] || _apply_bundle=$_project_bundle
-  [ -n "$_apply_target" ] || _apply_target=$_project_integration_target
-  case "$_apply_target" in
-  '~'/*) _apply_target=$HOME/${_apply_target#"~"/} ;;
-  esac
-  case "$_apply_target" in
-  /*) ;;
-  *) die "integration target must be absolute: $_apply_target" ;;
-  esac
-  _apply_target=$(path_normalize "$_apply_target") || die "cannot resolve integration target"
-  # The zsh pointer is only written for the shared ~/.profile target. The
-  # comparison must be between two normalized paths: $HOME is a raw string
-  # that may end in a slash or contain a redundant separator, while
-  # _apply_target is already normalized. Comparing a normalized path with a
-  # raw one silently skipped the pointer for such a HOME.
-  _apply_home_profile=$(path_normalize "$HOME/.profile")
-  _apply_home_zprofile=$(path_normalize "$HOME/.zprofile")
   cmd_build --variant="$_apply_variant" --bundle="$_apply_bundle"
   _apply_build_out=$_project_root/build/release
   _apply_old_pwd=$(pwd -P) || die "cannot resolve current directory"
   cd "$_apply_build_out" || die "cannot enter build output: $_apply_build_out"
   _install_manifest_source=$_apply_build_out/shell/install/profile-release.manifest
-  cmd_install --no-shell-integration || die "valise install failed"
+  cmd_install $_apply_install_arg || die "valise install failed"
   _install_manifest_source=""
   cd "$_apply_old_pwd" || die "cannot restore project directory: $_apply_old_pwd"
-  _apply_snippet=$(cmd_init profile --compiled) || die "cannot generate compiled integration snippet"
-  project_write_integration "$_apply_target" "$_apply_snippet"
-  if [ "$_apply_target" = "$_apply_home_profile" ] && command -v zsh >/dev/null 2>&1; then
-    project_write_integration "$_apply_home_zprofile" '. "$HOME/.profile"'
-  fi
   cmd_verify_active
   info "applied project: $_project_root"
-  info "integration target: $_apply_target"
-  unset _apply_arg _apply_variant _apply_bundle _apply_target _apply_build_out _apply_snippet _apply_old_pwd \
-    _apply_home_profile _apply_home_zprofile
+  unset _apply_arg _apply_variant _apply_bundle _apply_install_arg _apply_build_out _apply_old_pwd
 }
 
 cmd_status() {
@@ -4827,20 +4658,23 @@ cmd_status() {
   printf 'project: %s\n' "$_project_root"
   printf 'variant: %s\n' "$_project_variant"
   printf 'bundle: %s\n' "$_project_bundle"
-  printf 'integration target: %s\n' "$_project_integration_target"
-  if [ -L "$_project_integration_target" ]; then
-    printf 'integration target: symlink (not managed by valise)\n'
-  elif [ -f "$_project_integration_target" ]; then
-    _status_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
-    if "$_status_awk" 'index($0, "# BEGIN valise managed block") { found = 1; exit } END { exit !found }' \
-      "$_project_integration_target" 2>/dev/null; then
-      printf 'integration state: managed block present\n'
+  _status_home=$(path_normalize "$HOME") || die "cannot resolve HOME"
+  _status_targets=$(posix_integration_targets "$_status_home")
+  while IFS= read -r _status_target; do
+    [ -n "$_status_target" ] || continue
+    if [ -L "$_status_target" ]; then
+      printf 'integration: %s: symlink, not managed by valise\n' "$_status_target"
+    elif [ ! -f "$_status_target" ]; then
+      printf 'integration: %s: missing\n' "$_status_target"
+    elif integration_has_managed_block "$_status_target"; then
+      printf 'integration: %s: managed block present\n' "$_status_target"
     else
-      printf 'integration state: managed block missing\n'
+      printf 'integration: %s: managed block missing\n' "$_status_target"
     fi
-  else
-    printf 'integration state: target missing\n'
-  fi
+  done <<EOF
+$_status_targets
+EOF
+  unset _status_home _status_targets _status_target
   if (registry_generate "$_project_root" "$_project_root/shell/release/module-registry.tsv" 1) >/dev/null 2>&1; then
     printf 'registry: up to date\n'
   else

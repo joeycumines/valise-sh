@@ -122,17 +122,13 @@ run_lane() {
   esac
 
   # Resolve the deployed snippet path for this shell.
-  # Note: valise install only deploys POSIX shell integration for bash/zsh/ksh.
-  # Plain sh, dash, and ash are not recognized by the installer, so no snippet
-  # is deployed for them. This is expected behavior, not a test failure.
+  # Plain sh, dash and ash have no plan and use the same ~/.profile block.
   _snippet=""
   _expect_snippet=1
   case "$_shell_name" in
-    bash) _snippet="$_tmp_home/.bash_profile"
-      [ "$(uname -s 2>/dev/null)" = "Darwin" ] || _snippet="$_tmp_home/.bashrc" ;;
-    zsh)  _snippet="$_tmp_home/.zprofile"
-      [ "$(uname -s 2>/dev/null)" = "Darwin" ] || _snippet="$_tmp_home/.zshrc" ;;
-    ksh)  _snippet="$_tmp_home/.kshrc" ;;
+    bash) _snippet="$_tmp_home/.bashrc" ;;
+    zsh)  _snippet="$_tmp_home/.zshrc" ;;
+    ksh)  _snippet="$_tmp_home/.profile" ;;
     fish) _snippet="$_tmp_home/.config/fish/conf.d/valise.fish" ;;
     *)    _expect_snippet=0 ;;
   esac
@@ -296,7 +292,7 @@ run_lima_lane() {
   case "$_shell_name" in
     bash) _lima_snippet=".bashrc" ;;
     zsh)  _lima_snippet=".zshrc" ;;
-    ksh)  _lima_snippet=".kshrc" ;;
+    ksh)  _lima_snippet=".profile" ;;
     fish) _lima_snippet=".config/fish/conf.d/valise.fish" ;;
     *)    _lima_expect_snippet=0 ;;
   esac

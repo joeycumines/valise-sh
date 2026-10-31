@@ -417,80 +417,64 @@ for _shell in bash zsh ksh; do
   fi
 done
 
-# install --no-shell-integration must write neither a POSIX startup file nor a
+# install --no-integration must write neither a POSIX startup file nor a
 # Fish hook, while still installing and activating the release.
 _no_int_home="$_test_root/home-no-int"
 mkdir -p "$_no_int_home"
 if (cd "$_release" && HOME="$_no_int_home" XDG_DATA_HOME="$_no_int_home/.local/share" \
   XDG_CONFIG_HOME="$_no_int_home/.config" XDG_STATE_HOME="$_no_int_home/.local/state" \
-  SHELL=/bin/bash "$_link" install --no-shell-integration) \
+  SHELL=/bin/bash "$_link" install --no-integration) \
   >"$_test_root/install-no-int.out" 2>"$_test_root/install-no-int.err"; then
-  pass "install --no-shell-integration succeeds"
+  pass "install --no-integration succeeds"
 else
-  fail "install --no-shell-integration succeeds"
+  fail "install --no-integration succeeds"
   cat "$_test_root/install-no-int.err" >&2
 fi
 if [ -f "$_no_int_home/.bashrc" ] || [ -f "$_no_int_home/.bash_profile" ] ||
   [ -f "$_no_int_home/.zprofile" ] || [ -f "$_no_int_home/.zshrc" ] ||
   [ -f "$_no_int_home/.kshrc" ] || [ -f "$_no_int_home/.profile" ] ||
   [ -f "$_no_int_home/.config/fish/conf.d/valise.fish" ]; then
-  fail "install --no-shell-integration writes no startup file or Fish hook"
+  fail "install --no-integration writes no startup file or Fish hook"
 else
-  pass "install --no-shell-integration writes no startup file or Fish hook"
+  pass "install --no-integration writes no startup file or Fish hook"
 fi
 
-# The explicit none mode is equivalent to the legacy opt-out.
-_mode_none_home="$_test_root/home-mode-none"
-mkdir -p "$_mode_none_home"
-if (cd "$_release" && HOME="$_mode_none_home" XDG_DATA_HOME="$_mode_none_home/.local/share" \
-  XDG_CONFIG_HOME="$_mode_none_home/.config" XDG_STATE_HOME="$_mode_none_home/.local/state" \
-  SHELL=/bin/bash "$_link" install --integration=none) \
-  >"$_test_root/install-mode-none.out" 2>"$_test_root/install-mode-none.err" &&
-  [ ! -e "$_mode_none_home/.profile" ] &&
-  [ ! -e "$_mode_none_home/.bash_profile" ] &&
-  [ ! -e "$_mode_none_home/.config/fish/conf.d/valise.fish" ]; then
-  pass "install --integration=none writes no startup file or Fish hook"
+# A bash user gets ~/.profile and ~/.bashrc. Nothing is created that could change
+# what the shell reads: no ~/.bash_profile, and no zsh file without zsh in use.
+_mode_home="$_test_root/home-mode-bash"
+mkdir -p "$_mode_home"
+if (cd "$_release" && HOME="$_mode_home" XDG_DATA_HOME="$_mode_home/.local/share" \
+  XDG_CONFIG_HOME="$_mode_home/.config" XDG_STATE_HOME="$_mode_home/.local/state" \
+  PATH=/usr/bin:/bin SHELL=/bin/bash "$_link" install --no-integration) >/dev/null 2>&1 &&
+  (cd "$_release" && HOME="$_mode_home" XDG_DATA_HOME="$_mode_home/.local/share" \
+  XDG_CONFIG_HOME="$_mode_home/.config" XDG_STATE_HOME="$_mode_home/.local/state" \
+  SHELL=/bin/bash "$_link" install) \
+  >"$_test_root/install-mode.out" 2>"$_test_root/install-mode.err" &&
+  grep -F '# BEGIN valise managed block' "$_mode_home/.profile" >/dev/null &&
+  grep -F '# BEGIN valise managed block' "$_mode_home/.bashrc" >/dev/null &&
+  [ ! -e "$_mode_home/.bash_profile" ] &&
+  [ ! -e "$_mode_home/.bash_login" ] &&
+  [ ! -e "$_mode_home/.zshrc" ] &&
+  [ ! -e "$_mode_home/.kshrc" ]; then
+  pass "install writes ~/.profile and ~/.bashrc for a bash user and creates no shadowing file"
 else
-  fail "install --integration=none writes no startup file or Fish hook"
-  cat "$_test_root/install-mode-none.err" >&2
+  fail "install writes ~/.profile and ~/.bashrc for a bash user and creates no shadowing file"
+  cat "$_test_root/install-mode.err" >&2
 fi
 
-# Explicit profile integration writes the shared profile and no shell-specific
-# POSIX startup file.
-_mode_profile_home="$_test_root/home-mode-profile"
-mkdir -p "$_mode_profile_home"
-if (cd "$_release" && HOME="$_mode_profile_home" XDG_DATA_HOME="$_mode_profile_home/.local/share" \
-  XDG_CONFIG_HOME="$_mode_profile_home/.config" XDG_STATE_HOME="$_mode_profile_home/.local/state" \
-  SHELL=/bin/bash "$_link" install --integration=profile) \
-  >"$_test_root/install-mode-profile.out" 2>"$_test_root/install-mode-profile.err" &&
-  [ -f "$_mode_profile_home/.profile" ] &&
-  grep -F '# BEGIN valise managed block' "$_mode_profile_home/.profile" >/dev/null &&
-  [ ! -e "$_mode_profile_home/.bash_profile" ] &&
-  [ ! -e "$_mode_profile_home/.bashrc" ] &&
-  [ ! -e "$_mode_profile_home/.zprofile" ] &&
-  [ ! -e "$_mode_profile_home/.zshrc" ] &&
-  [ ! -e "$_mode_profile_home/.kshrc" ] &&
-  [ ! -e "$_mode_profile_home/.config/fish/conf.d/valise.fish" ]; then
-  pass "install --integration=profile writes only the shared profile"
+# Doctor checks the startup files the running shell reads.
+_doctor_out=$(HOME="$_mode_home" XDG_DATA_HOME="$_mode_home/.local/share" \
+  XDG_CONFIG_HOME="$_mode_home/.config" XDG_STATE_HOME="$_mode_home/.local/state" \
+  SHELL=/bin/bash "$_link" doctor 2>"$_test_root/doctor-mode.err")
+if printf '%s\n' "$_doctor_out" | grep -F "startup file contains the valise managed block: $_mode_home/.profile" >/dev/null &&
+  printf '%s\n' "$_doctor_out" | grep -F "startup file contains the valise managed block: $_mode_home/.bashrc" >/dev/null; then
+  pass "doctor finds the block in the files bash reads"
 else
-  fail "install --integration=profile writes only the shared profile"
-  cat "$_test_root/install-mode-profile.err" >&2
+  fail "doctor finds the block in the files bash reads"
+  printf '%s\n' "$_doctor_out" >&2
+  cat "$_test_root/doctor-mode.err" >&2
 fi
-
-# Doctor reports the shared profile, its managed block, and .bash_profile
-# shadowing without failing merely because integration is absent.
-_doctor_profile_out=$(HOME="$_mode_profile_home" XDG_DATA_HOME="$_mode_profile_home/.local/share" \
-  XDG_CONFIG_HOME="$_mode_profile_home/.config" XDG_STATE_HOME="$_mode_profile_home/.local/state" \
-  "$_link" doctor 2>"$_test_root/doctor-profile.err")
-if printf '%s\n' "$_doctor_profile_out" | grep -F 'integration file:' >/dev/null &&
-  printf '%s\n' "$_doctor_profile_out" | grep -F 'integration file contains the valise managed block' >/dev/null; then
-  pass "doctor reports the profile integration file and managed block"
-else
-  fail "doctor reports the profile integration file and managed block"
-  printf '%s\n' "$_doctor_profile_out" >&2
-  cat "$_test_root/doctor-profile.err" >&2
-fi
-unset _doctor_profile_out
+unset _doctor_out
 
 # An engine-shaped release carries entrypoints/profile.sh and the loader
 # behind it, but no compiled plans. The integration snippet must fall back
@@ -530,10 +514,10 @@ _engine_home="$_test_root/home-engine-release"
 mkdir -p "$_engine_home"
 if (cd "$_engine_release" && HOME="$_engine_home" XDG_DATA_HOME="$_engine_home/.local/share" \
   XDG_CONFIG_HOME="$_engine_home/.config" XDG_STATE_HOME="$_engine_home/.local/state" \
-  "$_link" install --integration=profile) >"$_test_root/install-engine.out" 2>&1; then
-  pass "install --integration=profile succeeds for an engine-shaped release"
+  "$_link" install) >"$_test_root/install-engine.out" 2>&1; then
+  pass "install succeeds for an engine-shaped release"
 else
-  fail "install --integration=profile succeeds for an engine-shaped release"
+  fail "install succeeds for an engine-shaped release"
   cat "$_test_root/install-engine.out" >&2
 fi
 if HOME="$_engine_home" XDG_CONFIG_HOME="$_engine_home/.config" \
@@ -557,10 +541,7 @@ else
   fail "install succeeds for an engine-shaped release"
   cat "$_test_root/install-engine-auto.out" >&2
 fi
-case "$(uname -s 2>/dev/null)" in
-  Darwin) _engine_auto_profile="$_engine_auto_home/.bash_profile" ;;
-  *) _engine_auto_profile="$_engine_auto_home/.bashrc" ;;
-esac
+_engine_auto_profile="$_engine_auto_home/.bashrc"
 if [ -f "$_engine_auto_profile" ] &&
   HOME="$_engine_auto_home" XDG_CONFIG_HOME="$_engine_auto_home/.config" \
   VALISE_MODULES=engine_root /bin/bash -c '. "$1"; command -v engine_root_ready' \
@@ -577,34 +558,33 @@ _int_home="$_test_root/home-profile"
 mkdir -p "$_int_home"
 if (cd "$_release" && HOME="$_int_home" XDG_DATA_HOME="$_int_home/.local/share" \
   XDG_CONFIG_HOME="$_int_home/.config" XDG_STATE_HOME="$_int_home/.local/state" \
-  SHELL=/bin/bash "$_link" install --no-shell-integration) \
+  SHELL=/bin/bash "$_link" install --no-integration) \
   >"$_test_root/install-profile.out" 2>&1 &&
   HOME="$_int_home" XDG_DATA_HOME="$_int_home/.local/share" \
     XDG_CONFIG_HOME="$_int_home/.config" XDG_STATE_HOME="$_int_home/.local/state" \
-    "$_link" init profile --compiled >"$_int_home/.profile"; then
-  pass "init profile --compiled emits an integration snippet"
+    "$_link" init posix >"$_int_home/.profile"; then
+  pass "init posix emits an integration snippet"
 else
-  fail "init profile --compiled emits an integration snippet"
+  fail "init posix emits an integration snippet"
 fi
 
 if SHELL=/bin/bash HOME="$_int_home" XDG_DATA_HOME="$_int_home/.local/share" \
   XDG_CONFIG_HOME="$_int_home/.config" XDG_STATE_HOME="$_int_home/.local/state" \
-  "$_link" init --compiled >"$_test_root/init-auto.out" 2>&1 &&
-  grep -F '_valise_plan=bash' "$_test_root/init-auto.out" >/dev/null 2>&1; then
-  pass "init --compiled accepts options before the detected shell"
+  "$_link" init >"$_test_root/init-auto.out" 2>&1 &&
+  grep -F '# BEGIN valise managed block' "$_test_root/init-auto.out" >/dev/null 2>&1 &&
+  grep -F 'BASH_VERSION' "$_test_root/init-auto.out" >/dev/null 2>&1; then
+  pass "init prints the POSIX managed block by default"
 else
-  fail "init --compiled accepts options before the detected shell"
+  fail "init prints the POSIX managed block by default"
   cat "$_test_root/init-auto.out" >&2
 fi
-if HOME="$_int_home" XDG_DATA_HOME="$_int_home/.local/share" \
-  XDG_CONFIG_HOME="$_int_home/.config" XDG_STATE_HOME="$_int_home/.local/state" \
-  "$_link" init sh --compiled >"$_test_root/init-sh.out" 2>&1 &&
-  grep -F 'BASH_VERSION' "$_test_root/init-sh.out" >/dev/null 2>&1; then
-  pass "init sh --compiled uses the shared profile selector"
-else
-  fail "init sh --compiled uses the shared profile selector"
-  cat "$_test_root/init-sh.out" >&2
-fi
+for _removed in --compiled bash profile; do
+  if HOME="$_int_home" "$_link" init "$_removed" >/dev/null 2>"$_test_root/init-removed.err"; then
+    fail "init rejects removed argument $_removed"
+  else
+    pass "init rejects removed argument $_removed"
+  fi
+done
 
 for _shell in bash zsh ksh; do
   case "$_shell" in
@@ -661,10 +641,7 @@ else
   fail "install succeeds for an assembled release"
   cat "$_test_root/install-assembled-auto.out" >&2
 fi
-case "$(uname -s 2>/dev/null)" in
-  Darwin) _assembled_auto_profile="$_assembled_auto_home/.bash_profile" ;;
-  *) _assembled_auto_profile="$_assembled_auto_home/.bashrc" ;;
-esac
+_assembled_auto_profile="$_assembled_auto_home/.bashrc"
 if [ -f "$_assembled_auto_profile" ] &&
   HOME="$_assembled_auto_home" XDG_CONFIG_HOME="$_assembled_auto_home/.config" \
   /bin/bash -c '. "$1"; command -v root_ready >/dev/null 2>&1; command -v vendor_tool_ready >/dev/null 2>&1' \

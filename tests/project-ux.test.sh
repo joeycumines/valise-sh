@@ -114,14 +114,14 @@ else
 fi
 unset _module_list
 
-printf '%s\n' '. "$HOME/.profile"' >"$_home/.zprofile"
+printf '%s\n' '# my zsh settings' >"$_home/.zprofile"
 if (cd "$_project" && _env apply) >"$_test_home/apply.out" 2>"$_test_home/apply.err"; then
   pass "apply builds, installs, and integrates the project"
 else
   fail "apply builds, installs, and integrates the project"
   cat "$_test_home/apply.err" >&2
 fi
-if grep -F '. "$HOME/.profile"' "$_home/.zprofile" >/dev/null &&
+if grep -Fx '# my zsh settings' "$_home/.zprofile" >/dev/null &&
   grep -F '# BEGIN valise managed block' "$_home/.zprofile" >/dev/null; then
   pass "apply preserves existing zprofile content while adding its managed block"
 else
@@ -138,26 +138,20 @@ if [ ! -e "$_home/.local/state/valise/lock" ] && [ ! -L "$_home/.local/state/val
 else
   fail "apply leaves no state lock behind"
 fi
-# The default apply payload is the shared profile plus the one-line zsh
-# pointer zsh needs; nothing else may appear in the home directory.
+# Apply never creates a file that changes what a shell reads, and it does not
+# make zsh source a ~/.profile that may hold another shell's syntax.
 if [ ! -e "$_home/.bash_profile" ] &&
-  [ ! -e "$_home/.bashrc" ] &&
-  [ ! -e "$_home/.kshrc" ] &&
-  [ ! -e "$_home/.zshrc" ] &&
-  [ ! -e "$_home/.config/fish/conf.d/valise.fish" ]; then
-  pass "apply creates no shell-specific or Fish startup file"
+  [ ! -e "$_home/.bash_login" ] &&
+  [ ! -e "$_home/.kshrc" ]; then
+  pass "apply creates no shadowing startup file"
 else
-  fail "apply creates no shell-specific or Fish startup file"
+  fail "apply creates no shadowing startup file"
 fi
-if [ -f "$_home/.zprofile" ] &&
-  [ "$(awk '/^# BEGIN valise managed block$/{f=1;next} /^# END valise managed block$/{f=0} f' \
-    "$_home/.zprofile" | grep -c .)" -eq 1 ] &&
-  awk '/^# BEGIN valise managed block$/{f=1;next} /^# END valise managed block$/{f=0} f' \
-    "$_home/.zprofile" | grep -Fx '. "$HOME/.profile"' >/dev/null; then
-  pass "apply zprofile managed block is the one-line profile pointer"
+if grep -F 'installed-modules.$_valise_plan' "$_home/.zprofile" >/dev/null &&
+  ! grep -F '.profile' "$_home/.zprofile" >/dev/null; then
+  pass "apply writes the block to ~/.zprofile without sourcing ~/.profile"
 else
-  fail "apply zprofile managed block is the one-line profile pointer"
-  printf '%s\n' '--- .zprofile ---' >&2
+  fail "apply writes the block to ~/.zprofile without sourcing ~/.profile"
   cat "$_home/.zprofile" >&2
 fi
 if HOME="$_home" /bin/bash -lc 'hello' 2>"$_test_home/bash.err" | grep -F 'project ux hello' >/dev/null; then
@@ -205,7 +199,7 @@ fi
 
 _status=$(cd "$_project" && _env status 2>"$_test_home/status.err")
 if printf '%s\n' "$_status" | grep -F 'active release:' >/dev/null &&
-  printf '%s\n' "$_status" | grep -F 'integration target:' >/dev/null &&
+  printf '%s\n' "$_status" | grep -F "integration: $_home/.profile: managed block present" >/dev/null &&
   printf '%s\n' "$_status" | grep -F 'drift: active release matches build output' >/dev/null; then
   pass "status reports project, active release, integration, and no drift"
 else
@@ -251,11 +245,8 @@ else
   cat "$_test_home/build-after-remove.err" >&2
 fi
 
-# A HOME that ends in a slash is a legal HOME. The apply command decides
-# whether to write the zsh pointer by comparing the integration target with
-# ~/.profile; a comparison between a normalized path and the raw HOME string
-# misses the match for such a HOME, and the zsh pointer is silently skipped.
-# A zsh user then gets no profile integration at all.
+# A HOME that ends in a slash is a legal HOME, and every startup file must still
+# be written. A zsh user would otherwise get no profile integration at all.
 _slash_home="$_test_home/slash-home"
 _slash_project="$_test_home/slash-project"
 mkdir -p "$_slash_home"
@@ -271,17 +262,104 @@ if (cd "$_slash_project" && _slash_env apply) \
   >"$_test_home/slash-apply.out" 2>"$_test_home/slash-apply.err"; then
   if [ -f "$_slash_home/.zprofile" ] &&
     grep -F '# BEGIN valise managed block' "$_slash_home/.zprofile" >/dev/null &&
-    grep -F '. "$HOME/.profile"' "$_slash_home/.zprofile" >/dev/null; then
-    pass "apply writes the zsh pointer when HOME ends in a slash"
+    grep -F 'installed-modules.$_valise_plan' "$_slash_home/.zprofile" >/dev/null; then
+    pass "apply writes ~/.zprofile when HOME ends in a slash"
   else
-    fail "apply writes the zsh pointer when HOME ends in a slash"
+    fail "apply writes ~/.zprofile when HOME ends in a slash"
     cat "$_slash_home/.zprofile" >&2 2>/dev/null || :
   fi
 else
-  fail "apply writes the zsh pointer when HOME ends in a slash"
+  fail "apply writes ~/.zprofile when HOME ends in a slash"
   cat "$_test_home/slash-apply.err" >&2
 fi
 unset _slash_home _slash_project
+
+# --- Startup file selection -----------------------------------------------------
+_select_project="$_test_home/select-project"
+(cd "$_test_home" && _env new select-project) >/dev/null 2>&1 || :
+(cd "$_select_project" && _env module new picked --exports=picked_fn) >/dev/null 2>&1 || :
+_select_env() {
+  HOME="$_select_home" SHELL="$_select_shell" \
+  XDG_DATA_HOME="$_select_home/.local/share" \
+  XDG_CONFIG_HOME="$_select_home/.config" \
+  XDG_STATE_HOME="$_select_home/.local/state" \
+  "$_valise" "$@"
+}
+_has_block() { grep -F '# BEGIN valise managed block' "$1" >/dev/null 2>&1; }
+
+# A bash user's non-login terminal reads only ~/.bashrc.
+_select_home="$_test_home/select-bash"; _select_shell=/bin/bash
+mkdir -p "$_select_home"
+(cd "$_select_project" && _select_env apply) >"$_test_home/select.out" 2>"$_test_home/select.err" || cat "$_test_home/select.err" >&2
+if _has_block "$_select_home/.bashrc" && _has_block "$_select_home/.profile" &&
+  [ "$(HOME="$_select_home" /bin/bash --noprofile --rcfile "$_select_home/.bashrc" -ic 'command -v picked_fn' 2>/dev/null)" = picked_fn ]; then
+  pass "a non-login interactive bash loads the profile through ~/.bashrc"
+else
+  fail "a non-login interactive bash loads the profile through ~/.bashrc"
+fi
+
+# An existing ~/.bash_profile shadows ~/.profile, so it must carry the block too.
+_select_home="$_test_home/select-shadow"; _select_shell=/bin/zsh
+mkdir -p "$_select_home"
+printf '%s\n' 'export SHADOW_LINE=1' >"$_select_home/.bash_profile"
+(cd "$_select_project" && _select_env apply) >"$_test_home/select.out" 2>"$_test_home/select.err" || cat "$_test_home/select.err" >&2
+if _has_block "$_select_home/.bash_profile" && grep -Fx 'export SHADOW_LINE=1' "$_select_home/.bash_profile" >/dev/null &&
+  [ "$(HOME="$_select_home" /bin/bash -lc 'command -v picked_fn' 2>/dev/null)" = picked_fn ] &&
+  [ ! -e "$_select_home/.bashrc" ] && _has_block "$_select_home/.zshrc"; then
+  pass "an existing ~/.bash_profile gets the block, and only the user's own shell gets a new rc file"
+else
+  fail "an existing ~/.bash_profile gets the block, and only the user's own shell gets a new rc file"
+fi
+
+# The second install rewrites a stale block in place and keeps surrounding lines.
+_select_home="$_test_home/select-stale"; _select_shell=/bin/bash
+mkdir -p "$_select_home"
+printf '%s\n' 'export BEFORE=1' '# BEGIN valise managed block' 'stale contents' '# END valise managed block' 'export AFTER=1' >"$_select_home/.profile"
+chmod 0640 "$_select_home/.profile"
+(cd "$_select_project" && _select_env apply) >"$_test_home/select.out" 2>"$_test_home/select.err" || cat "$_test_home/select.err" >&2
+if ! grep -F 'stale contents' "$_select_home/.profile" >/dev/null &&
+  [ "$(head -1 "$_select_home/.profile")" = 'export BEFORE=1' ] &&
+  [ "$(tail -1 "$_select_home/.profile")" = 'export AFTER=1' ] &&
+  [ "$(grep -c '^# BEGIN valise managed block$' "$_select_home/.profile")" -eq 1 ] &&
+  [ "$(ls -l "$_select_home/.profile" | cut -c1-10)" = '-rw-r-----' ]; then
+  pass "install replaces a stale block in place and keeps the surrounding lines and mode"
+else
+  fail "install replaces a stale block in place and keeps the surrounding lines and mode"
+  cat "$_select_home/.profile" >&2
+fi
+cp "$_select_home/.profile" "$_test_home/select.twice"
+(cd "$_select_project" && _select_env apply) >/dev/null 2>&1 || :
+if cmp -s "$_select_home/.profile" "$_test_home/select.twice"; then
+  pass "a repeated apply leaves the startup file byte-identical"
+else
+  fail "a repeated apply leaves the startup file byte-identical"
+fi
+
+# A symlink belongs to whatever manages it; other files are still written.
+_select_home="$_test_home/select-link"; _select_shell=/bin/bash
+mkdir -p "$_select_home"
+printf '%s\n' '# dotfile manager' >"$_select_home/real-profile"
+ln -s "$_select_home/real-profile" "$_select_home/.profile"
+if (cd "$_select_project" && _select_env apply) >"$_test_home/select.out" 2>"$_test_home/select.err" &&
+  [ -L "$_select_home/.profile" ] &&
+  ! _has_block "$_select_home/real-profile" &&
+  _has_block "$_select_home/.bashrc" &&
+  grep -F 'is a symlink' "$_test_home/select.err" "$_test_home/select.out" >/dev/null; then
+  pass "a symlinked startup file is reported and left alone"
+else
+  fail "a symlinked startup file is reported and left alone"
+fi
+
+# --no-integration writes nothing.
+_select_home="$_test_home/select-none"; _select_shell=/bin/bash
+mkdir -p "$_select_home"
+if (cd "$_select_project" && _select_env apply --no-integration) >/dev/null 2>&1 &&
+  [ ! -e "$_select_home/.profile" ] && [ ! -e "$_select_home/.bashrc" ] &&
+  [ ! -e "$_select_home/.zprofile" ] && [ ! -e "$_select_home/.config/fish/conf.d/valise.fish" ]; then
+  pass "apply --no-integration writes no startup file"
+else
+  fail "apply --no-integration writes no startup file"
+fi
 
 # --- Managed block markers ---------------------------------------------------
 _marker_home="$_test_home/marker-home"

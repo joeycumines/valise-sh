@@ -106,17 +106,17 @@ fi
 _release_one="$_test_root/release-one"
 _make_release "$_release_one" '# release one'
 if _env; then
-  (cd "$_release_one" && "$_valise" install --integration=profile) >"$_test_root/install-one.out" 2>&1 || :
+  (cd "$_release_one" && "$_valise" install) >"$_test_root/install-one.out" 2>&1 || :
   if "$_valise" doctor >"$_test_root/doctor-ok.out" 2>&1; then
     pass "doctor succeeds with a verified release and a managed block"
   else
     fail "doctor succeeds with a verified release and a managed block"
     cat "$_test_root/doctor-ok.out" >&2
   fi
-  if grep -F 'integration file contains the valise managed block' "$_test_root/doctor-ok.out" >/dev/null 2>&1; then
-    pass "doctor reports the managed block in the integration file"
+  if grep -F 'startup file contains the valise managed block' "$_test_root/doctor-ok.out" >/dev/null 2>&1; then
+    pass "doctor reports the managed block in a startup file"
   else
-    fail "doctor reports the managed block in the integration file"
+    fail "doctor reports the managed block in a startup file"
     cat "$_test_root/doctor-ok.out" >&2
   fi
   if grep -F 'active release verifies' "$_test_root/doctor-ok.out" >/dev/null 2>&1; then
@@ -162,6 +162,8 @@ if _env; then
   else
     : >"$_profile_backup"
   fi
+  _bashrc_backup="$_test_root/bashrc-backup"
+  if [ -f "$HOME/.bashrc" ]; then mv "$HOME/.bashrc" "$_bashrc_backup"; fi
   rm -f "$HOME/.profile"
   if "$_valise" doctor >"$_test_root/doctor-noblock.out" 2>&1; then
     fail "doctor fails when the startup file has no managed block"
@@ -193,6 +195,7 @@ if _env; then
   else
     pass "doctor --no-integration examines no startup file"
   fi
+  if [ -f "$_bashrc_backup" ]; then mv "$_bashrc_backup" "$HOME/.bashrc"; fi
   if [ -s "$_profile_backup" ]; then
     cp "$_profile_backup" "$HOME/.profile"
   else
@@ -242,7 +245,7 @@ for _prune_body in one two three four; do
         XDG_CONFIG_HOME="$_prune_home/.config" \
         XDG_STATE_HOME="$_prune_home/.local/state" \
         SHELL=/bin/bash \
-        "$_valise" install --integration=none
+        "$_valise" install --no-integration
   ) >"$_test_root/prune-install-$_prune_index.out" 2>&1
   # Distinct modification times so the newest-N ordering is deterministic.
   sleep 1
@@ -539,7 +542,7 @@ fi
 # orchestrator reproduced. They are written so that the old behavior
 # fails the assertion, not just the current behavior passing it.
 
-# (1) `install --integration=auto` writes its own marker, not the
+# (1) `install` writes its own marker, not the
 # "# BEGIN valise managed block" pair. Doctor must recognize the marker
 # install actually writes, or it reports a correctly installed system as
 # having no integration.
@@ -564,9 +567,9 @@ if (
     SHELL=/bin/bash \
     "$_valise" doctor
 ) >"$_test_root/doctor-auto.out" 2>&1; then
-  pass "doctor succeeds after install --integration=auto"
+  pass "doctor succeeds after install"
 else
-  fail "doctor succeeds after install --integration=auto"
+  fail "doctor succeeds after install"
   cat "$_test_root/doctor-auto.out" >&2
 fi
 
@@ -583,7 +586,7 @@ _make_release "$_space_release" '# space release'
       XDG_DATA_HOME="$_space_home/.local/share" \
       XDG_CONFIG_HOME="$_space_home/.config" \
       XDG_STATE_HOME="$_space_home/.local/state" \
-      "$_valise" install --integration=profile
+      "$_valise" install
 ) >"$_test_root/install-space.out" 2>&1 || :
 if (
   HOME="$_space_home" \
@@ -692,7 +695,7 @@ _prune_env() {
 _prune_env
 _prune_release="$_test_root/prune-range-release"
 _make_release "$_prune_release" '# prune range release'
-if (cd "$_prune_release" && "$_valise" install --integration=none) >"$_test_root/prune-range-install.out" 2>&1; then
+if (cd "$_prune_release" && "$_valise" install --no-integration) >"$_test_root/prune-range-install.out" 2>&1; then
   if "$_valise" variant prune --keep=99999999999999999999 >"$_test_root/prune-range.out" 2>&1; then
     fail "prune rejects a --keep value beyond the integer range"
   else
@@ -736,7 +739,7 @@ _make_release "$_rel_release" '# relative release'
       XDG_DATA_HOME=../reldata \
       XDG_CONFIG_HOME=../relconf \
       XDG_STATE_HOME=../relstate \
-      "$_valise" install --integration=none
+      "$_valise" install --no-integration
 ) >"$_test_root/relative-install.out" 2>&1 || :
 _rel_target=$(readlink "$_rel_work/relconf/valise/active" 2>/dev/null || :)
 case "$_rel_target" in
