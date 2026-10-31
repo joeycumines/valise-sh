@@ -364,9 +364,13 @@ printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll modul
 # A PATH without python3 proves the native implementation is used.
 _no_python_path="$_test_root/no-python-bin"
 mkdir -p "$_no_python_path"
-for _tool in awk cat chmod cmp cp find ln mkdir mktemp mv rm rmdir shasum sort stat tr wc; do
-  [ -x "/usr/bin/$_tool" ] && ln -s "/usr/bin/$_tool" "$_no_python_path/$_tool"
-  [ -x "/bin/$_tool" ] && ln -s "/bin/$_tool" "$_no_python_path/$_tool"
+# On a merged-/usr system a tool exists in both directories, so link only the first.
+for _tool in awk cat chmod cmp cp find ln mkdir mktemp mv rm rmdir sha256sum shasum sort stat tr wc; do
+  if [ -x "/usr/bin/$_tool" ]; then
+    ln -s "/usr/bin/$_tool" "$_no_python_path/$_tool"
+  elif [ -x "/bin/$_tool" ]; then
+    ln -s "/bin/$_tool" "$_no_python_path/$_tool"
+  fi
 done
 
 if (
