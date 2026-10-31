@@ -41,7 +41,9 @@ to name a dependency, the aggregator is metadata alone.
 A meta module has `requires=` with at least one entry and **no** `load=`.
 The loader and the compiler treat it as a dependency-only
 record: the module itself has nothing to source, but its required closure
-loads normally and in the right order.
+loads normally and in the right order. A meta module must leave `exports=`
+empty; it has no body to define an exported function. Metadata that declares
+an export on a meta module is rejected.
 
 ```text
 name=profile_main
@@ -272,7 +274,9 @@ follow the same rules.
 uses this list for post-load export checks and failure cleanup; project catalogs
 and wrapper manifests use it for documentation and registration. An exported name
 must be defined by the module body before the module is considered
-successfully loaded.
+successfully loaded. An export must name a function, so shell reserved words
+(`case`, `do`, `done`, `elif`, `else`, `esac`, `fi`, `for`, `if`, `in`,
+`then`, `until`, `while`, and `time`) are rejected.
 
 `updates` lists update registrations declared by the module. Each value is an ABI
 identifier that maps one-to-one to a row in the project update manifest. The
@@ -370,6 +374,12 @@ utilities (`command`, `unset`, `readonly`, `return`, or `eval`) or mark those
 functions readonly. Those names are reserved because the loader must recover
 control after sourcing a module; direct definitions in module bodies are
 rejected before the body is invoked.
+
+After a body runs, the loader restores the caller's physical directory, logical
+`PWD` and `OLDPWD`, `IFS`, and the shell options it snapshotted. A body that
+makes any of those variables readonly is rejected as caller-state modification:
+the loader fails the module without aborting the caller. Cleanup resolves `rm`
+from a fixed absolute path, so a module that changes `PATH` cannot prevent it.
 
 Failure handling is selected once by the loader caller with
 `VALISE_MODE=strict|permissive`; it is not a per-module metadata promise.

@@ -34,7 +34,10 @@ shell/
 ```
 
 `shell/module.d/` and `shell/release/module-registry.tsv` are the two markers
-that identify a directory as a valise project. The CLI resolves the project
+that identify a directory as a valise project. A layer's `<provider>` is a
+path component made of letters, digits, `_`, `-`, and `.`; it may not start
+with `.` or contain `..`. The registry rejects any other provider name,
+because the compiler emits module identities from it as shell source text. The CLI resolves the project
 root from the working directory first, then from the engine's own location, so
 running `valise compile` from the project root always compiles *that* project
 rather than a tree that merely happens to contain the engine.

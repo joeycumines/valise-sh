@@ -64,6 +64,8 @@ permissive mode reports each failure, continues with unrelated modules, and
 returns zero. An optional dependency loads first when it is available for the
 shell and variant; its absence never blocks the module that declared it. A
 cross-platform profile declares platform-specific modules with `optional=`.
+A meta module that declares exports is a compile error, and a module that
+fails has its declared exports removed from the function namespace.
 
 ### Capabilities are available at runtime
 

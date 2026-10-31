@@ -146,6 +146,29 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 - A built release's Fish hook printed an error on every Fish start. It now
   verifies the release quietly and returns when there is no Fish surface to
   load.
+- A module that makes `PWD`, `OLDPWD`, or `IFS` readonly no longer aborts the
+  loader mid-transaction. The module fails as caller-state modification, and
+  the loader's cleanup still runs.
+- Loader temp-directory cleanup resolves `rm` from a fixed absolute path, so a
+  module that changes `PATH` cannot leave its metadata scratch directory
+  behind.
+- Compiled plans remove a failed module's declared exports, like the loader.
+  A meta module that declares exports is rejected at compile time, and an
+  optional-only cycle inside a required graph is quarantined instead of
+  failing the whole plan.
+- The compiler rejects an unsafe layer directory name and a reserved-word
+  export instead of emitting an unparseable or misleading plan.
+- `release list`, `release use`, `release prune`, `doctor`, and `status`
+  identify the active release by its canonical directory name, so a trailing
+  slash or an alias symlink cannot hide it from the list or make prune delete
+  it.
+- `module remove` keeps a body that another module still loads, and checks
+  every directory it will rewrite before changing anything. `module new`
+  checks the seed metadata before writing and rejects reserved-word exports.
+- `make-manifest` rejects a directory or symlink as its output, and a
+  normalized in-tree output path is excluded from its own manifest.
+- `valise install` holds its lock through the Fish and POSIX integration
+  writes, so concurrent installs cannot interleave them.
 - The editor-defaults test is independent of host-installed editors by
   supplying a temporary test `vi` executable.
 
