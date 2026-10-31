@@ -341,7 +341,7 @@ END {
     if (prelude_fn_count > 0) {
         printf ". \"${VALISE_MODULE_ROOT%%/}/%s\" || %sstatus=$?\n", prelude_dest, prefix
         printf "if [ \"$%sstatus\" -ne 0 ]; then\n", prefix
-        printf "  printf 'valise: capability prelude failed with status %%s\\n' \"\$%sstatus\" >&2\n", prefix
+        printf "  printf 'valise: capability prelude failed with status %%s\\n' \"$%sstatus\" >&2\n", prefix
         printf "  %sfailed=1\n", prefix
         printf "  %sfirst_status=$%sstatus\n", prefix, prefix
         printf "fi\n"
@@ -414,7 +414,7 @@ END {
                 printf "%s. \"${VALISE_MODULE_ROOT%%/}/%s\"\n", body_indent, mod_load[name]
                 printf "%s%sstatus=$?\n", body_indent, prefix
                 printf "%sif [ \"$%sstatus\" -ne 0 ]; then\n", body_indent, prefix
-                printf "%s  printf 'valise: module %%s failed with status %%s\\n' '%s' \"\$%sstatus\" >&2\n", body_indent, display, prefix
+                printf "%s  printf 'valise: module %%s failed with status %%s\\n' '%s' \"$%sstatus\" >&2\n", body_indent, display, prefix
                 printf "%sfi\n", body_indent
             } else {
                 printf "%s%swrapper_exports=\n", body_indent, prefix
@@ -437,7 +437,7 @@ END {
                 printf "%s    %slookup=\n", body_indent, prefix
                 printf "%s  fi\n", body_indent
                 printf "%s  if [ \"$%sconflict\" -ne 0 ]; then\n", body_indent, prefix
-                printf "%s    printf 'valise: %%s: declared export already exists before load: %%s\\n' '%s' \"\$%sexport\" >&2\n", body_indent, display, prefix
+                printf "%s    printf 'valise: %%s: declared export already exists before load: %%s\\n' '%s' \"$%sexport\" >&2\n", body_indent, display, prefix
                 printf "%s    %sstatus=1\n", body_indent, prefix
                 printf "%s  fi\n", body_indent
                 printf "%sdone\n", body_indent
@@ -452,14 +452,14 @@ END {
                 }
                 printf "; do\n"
                 printf "%s    if ! %slookup=$(command -v \"$%sexport\" 2>/dev/null); then\n", body_indent, prefix, prefix
-                printf "%s      printf 'valise: %%s: declared export missing: %%s\\n' '%s' \"\$%sexport\" >&2\n", body_indent, display, prefix
+                printf "%s      printf 'valise: %%s: declared export missing: %%s\\n' '%s' \"$%sexport\" >&2\n", body_indent, display, prefix
                 printf "%s      %sstatus=1\n", body_indent, prefix
                 printf "%s    else\n", body_indent
                 printf "%s      case \" $%swrapper_exports \" in\n", body_indent, prefix
                 printf "%s      *\" $%sexport \"*)\n", body_indent, prefix
                 printf "%s        case \"$%slookup\" in\n", body_indent, prefix
                 printf "%s        */*)\n", body_indent
-                printf "%s          printf 'valise: %%s: declared export was not provided by module: %%s\\n' '%s' \"\$%sexport\" >&2\n", body_indent, display, prefix
+                printf "%s          printf 'valise: %%s: declared export was not provided by module: %%s\\n' '%s' \"$%sexport\" >&2\n", body_indent, display, prefix
                 printf "%s          %sstatus=1\n", body_indent, prefix
                 printf "%s          ;;\n", body_indent
                 printf "%s        esac\n", body_indent
@@ -469,7 +469,7 @@ END {
                 printf "%s  done\n", body_indent
                 printf "%sfi\n", body_indent
                 printf "%sif [ \"$%sstatus\" -ne 0 ]; then\n", body_indent, prefix
-                printf "%s  printf 'valise: module %%s failed with status %%s\\n' '%s' \"\$%sstatus\" >&2\n", body_indent, display, prefix
+                printf "%s  printf 'valise: module %%s failed with status %%s\\n' '%s' \"$%sstatus\" >&2\n", body_indent, display, prefix
                 printf "%sfi\n", body_indent
             }
         }

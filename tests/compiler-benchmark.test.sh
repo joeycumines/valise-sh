@@ -76,13 +76,17 @@ for _size in $SIZES; do
   _input="$_test_home/graph_$_size.txt"
   _output="$_test_home/plan_$_size.out"
   _repeat="$_test_home/plan_${_size}_repeat.out"
+  _err="$_test_home/plan_${_size}.err"
   generate_graph "$_size" "$_input"
 
-  awk -v target_shell="bash" -v plan_name="bench" -f "$_awk" "$_input" > "$_output" 2>&1
+  awk -v target_shell="bash" -v plan_name="bench" -f "$_awk" "$_input" > "$_output" 2>"$_err"
 
-  # No diagnostics escaped into the plan.
-  if grep -q 'ERROR' "$_output" 2>/dev/null; then
-    fail "$_size modules: unexpected error in output"
+  # A successful compile writes the plan and nothing else. Diagnostics, and
+  # any awk warning about the compiler itself, belong on stderr and must be
+  # absent here: some awks warn where BSD awk is silent, so merging stderr into
+  # the plan would hide a real compiler warning behind a line-count diff.
+  if [ -s "$_err" ]; then
+    fail "$_size modules: unexpected diagnostics: $(sed -n '1p' "$_err")"
   else
     pass "$_size modules: no errors"
   fi
@@ -148,7 +152,7 @@ for _size in $SIZES; do
   fi
 
   # Identical input must yield byte-identical output.
-  awk -v target_shell="bash" -v plan_name="bench" -f "$_awk" "$_input" > "$_repeat" 2>&1
+  awk -v target_shell="bash" -v plan_name="bench" -f "$_awk" "$_input" > "$_repeat" 2>"$_err"
   if cmp -s "$_output" "$_repeat"; then
     pass "$_size modules: repeated compilation is byte-identical"
   else
