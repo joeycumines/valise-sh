@@ -145,6 +145,9 @@ for _fixture in \
   modules/alpha.sh \
   modules/beta.sh \
   modules/cwd_mover.sh \
+  modules/readonly_pwd.sh \
+  modules/readonly_oldpwd.sh \
+  modules/readonly_ifs.sh \
   modules/tab_name_hijack.sh \
   modules/tab_function_hijack.sh \
   modules/tab_readonly_hijack.sh \
@@ -772,6 +775,13 @@ assert_eq 'module changing cwd fails closed' 1 "$_status"
 assert_contains 'cwd change diagnostic names caller shell state' "$_err" 'caller shell state modified'
 assert_eq 'cwd change attempts module body before detection' 'cwd_mover_started' "$_trace_out"
 assert_no_loader_leaks_with_output 'cwd change preserves logical PWD and OLDPWD' "$(printf 'LOADER_RETURNED=%s\nPWD_AFTER=/tmp\nOLDPWD_AFTER=/var' "$_status")"
+
+for _readonly_case in readonly_pwd readonly_oldpwd readonly_ifs; do
+  run_loader "$_readonly_case" "$_readonly_case" strict ordinary
+  assert_eq "$_readonly_case fails closed" 1 "$_status"
+  assert_contains "$_readonly_case diagnostic names caller shell state" "$_err" 'caller shell state modified'
+  assert_no_loader_leaks "$_readonly_case leaves no loader runtime state"
+done
 
 run_loader cwd_roundtrip cwd_roundtrip strict ordinary
 assert_eq 'module returning to its starting directory loads' 0 "$_status"

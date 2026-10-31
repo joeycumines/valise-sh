@@ -269,6 +269,38 @@ else
 fi
 rm -f "$_project/shell/module.d/missing_body.meta"
 
+# A provider directory whose name is not a safe path component must not reach
+# a compiled plan, where its identity is emitted as shell source text.
+_bad_layer="$_project/shell/layers/l)"
+mkdir -p "$_bad_layer/module.d" "$_bad_layer/modules"
+_meta "$_bad_layer/module.d/contrib_bad_layer.meta" contrib_bad_layer '' \
+  contrib_bad_layer_ready modules/contrib_bad_layer.sh
+printf 'contrib_bad_layer_ready() { :; }\n' >"$_bad_layer/modules/contrib_bad_layer.sh"
+if (cd "$_project" && "$_valise" registry) >"$_test_home/bad-layer.out" 2>"$_test_home/bad-layer.err"; then
+  fail "registry rejects an unsafe layer directory name"
+elif grep -F 'invalid layer source for registry' "$_test_home/bad-layer.err" >/dev/null; then
+  pass "registry rejects an unsafe layer directory name"
+else
+  fail "registry rejects an unsafe layer directory name"
+  cat "$_test_home/bad-layer.err" >&2
+fi
+rm -rf "$_bad_layer"
+
+# A reserved word is a valid identifier but not a valid function name.
+_meta "$_project/shell/module.d/reserved_export.meta" reserved_export '' if modules/reserved_export.sh
+printf 'reserved_export_ready() { :; }\n' >"$_project/shell/modules/reserved_export.sh"
+rm -f "$_project/shell/release/module-registry.tsv"
+if (cd "$_project" && "$_valise" registry) >"$_test_home/reserved.out" 2>"$_test_home/reserved.err"; then
+  fail "registry rejects a reserved-word export"
+elif grep -F 'invalid export (reserved word): if' "$_test_home/reserved.err" >/dev/null; then
+  pass "registry rejects a reserved-word export"
+else
+  fail "registry rejects a reserved-word export"
+  cat "$_test_home/reserved.err" >&2
+fi
+rm -f "$_project/shell/module.d/reserved_export.meta" "$_project/shell/modules/reserved_export.sh"
+"$_valise" registry >/dev/null 2>&1 || (cd "$_project" && "$_valise" registry >/dev/null 2>&1)
+
 # A layer module without the contrib_ prefix fails.
 cat >"$_project/shell/layers/vendor/module.d/bad_layer.meta" <<'EOF'
 name=bad_layer

@@ -326,6 +326,45 @@ else
   skip "prune reports that it kept an unverifiable release (no candidate)"
 fi
 
+# A trailing slash, a relative spelling, or an alias symlink must not change
+# the active release's identity. Prune must keep it, list must mark it, and
+# doctor must verify the real release.
+if [ -n "$_prune_active_id" ]; then
+  ln -sfn "$_prune_releases/$_prune_active_id/" "$_prune_home/.config/valise/active"
+  if (
+    cd "$_prune_releases/.." &&
+      HOME="$_prune_home"         XDG_DATA_HOME="$_prune_home/.local/share"         XDG_CONFIG_HOME="$_prune_home/.config"         XDG_STATE_HOME="$_prune_home/.local/state"         "$_valise" release prune --keep=0
+  ) >"$_test_root/prune-slash.out" 2>&1 &&
+    [ -d "$_prune_releases/$_prune_active_id" ]; then
+    pass "prune keeps the active release when the pointer target ends in a slash"
+  else
+    fail "prune keeps the active release when the pointer target ends in a slash"
+    cat "$_test_root/prune-slash.out" >&2
+  fi
+  if (
+    HOME="$_prune_home"       XDG_DATA_HOME="$_prune_home/.local/share"       XDG_CONFIG_HOME="$_prune_home/.config"       XDG_STATE_HOME="$_prune_home/.local/state"       "$_valise" release list
+  ) >"$_test_root/list-slash.out" 2>&1 &&
+    grep -F "* $_prune_active_id (active)" "$_test_root/list-slash.out" >/dev/null 2>&1; then
+    pass "release list marks the active release when the pointer target ends in a slash"
+  else
+    fail "release list marks the active release when the pointer target ends in a slash"
+    cat "$_test_root/list-slash.out" >&2
+  fi
+  ln -s "$_prune_releases/$_prune_active_id" "$_prune_releases/active-alias"
+  ln -sfn "$_prune_releases/active-alias" "$_prune_home/.config/valise/active"
+  if (
+    HOME="$_prune_home"       XDG_DATA_HOME="$_prune_home/.local/share"       XDG_CONFIG_HOME="$_prune_home/.config"       XDG_STATE_HOME="$_prune_home/.local/state"       "$_valise" doctor --no-integration
+  ) >"$_test_root/doctor-alias.out" 2>&1 &&
+    grep -F "active release verifies: $_prune_active_id" "$_test_root/doctor-alias.out" >/dev/null 2>&1; then
+    pass "doctor verifies the real release when the pointer is an alias"
+  else
+    fail "doctor verifies the real release when the pointer is an alias"
+    cat "$_test_root/doctor-alias.out" >&2
+  fi
+  rm -f "$_prune_releases/active-alias"
+  ln -sfn "$_prune_releases/$_prune_active_id" "$_prune_home/.config/valise/active"
+fi
+
 # --- explain-bundles without python3 ---
 
 _project="$_test_root/project"
@@ -409,6 +448,49 @@ if (
   fail "explain-bundles rejects an unknown bundle"
 else
   pass "explain-bundles rejects an unknown bundle"
+fi
+
+# explain-bundles must report what compile builds: optional edges join the
+# closure, a qualified exclusion removes its layer module, and shells=sh does
+# not make a module available under Fish.
+_closure_project="$_test_root/closure-project"
+mkdir -p "$_closure_project/shell/module.d" "$_closure_project/shell/modules" \
+  "$_closure_project/shell/layers/demo/module.d" "$_closure_project/shell/layers/demo/modules" \
+  "$_closure_project/shell/release"
+printf '%s\n' \
+  'name=base_mod' 'version=' 'side_effect=read-only' 'requires=' \
+  'optional=opt_mod contrib_demo' \
+  'shells=sh' 'platforms=any' 'exports=base_mod_ready' 'updates=' \
+  'load=modules/base_mod.sh' >"$_closure_project/shell/module.d/base_mod.meta"
+printf 'base_mod_ready() { :; }\n' >"$_closure_project/shell/modules/base_mod.sh"
+printf '%s\n' \
+  'name=opt_mod' 'version=' 'side_effect=read-only' 'requires=' \
+  'optional=' 'shells=sh' 'platforms=any' 'exports=opt_mod_ready' 'updates=' \
+  'load=modules/opt_mod.sh' >"$_closure_project/shell/module.d/opt_mod.meta"
+printf 'opt_mod_ready() { :; }\n' >"$_closure_project/shell/modules/opt_mod.sh"
+printf '%s\n' \
+  'name=contrib_demo' 'version=1.0.0' 'side_effect=read-only' 'requires=' \
+  'optional=' 'shells=sh' 'platforms=any' 'exports=contrib_demo_ready' 'updates=' \
+  'load=modules/contrib_demo.sh' >"$_closure_project/shell/layers/demo/module.d/contrib_demo.meta"
+printf 'contrib_demo_ready() { :; }\n' >"$_closure_project/shell/layers/demo/modules/contrib_demo.sh"
+printf '# bundle\tshell\troots\ndefault\tbash\tbase_mod\ndefault\tfish\tbase_mod\n' \
+  >"$_closure_project/shell/release/bundle-roots"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\tcontrib_demo@shell/layers/demo/module.d\n' \
+  >"$_closure_project/shell/release/install-variants"
+if (cd "$_closure_project" && "$_valise" explain-bundles) \
+  >"$_test_root/explain-closure.out" 2>"$_test_root/explain-closure.err"; then
+  if grep -F 'bash: 1 root(s), 2 module(s)' "$_test_root/explain-closure.out" >/dev/null 2>&1 &&
+    grep -F 'module opt_mod' "$_test_root/explain-closure.out" >/dev/null 2>&1 &&
+    ! grep -F 'contrib_demo' "$_test_root/explain-closure.out" >/dev/null 2>&1 &&
+    grep -F 'fish: 1 root(s), 0 module(s)' "$_test_root/explain-closure.out" >/dev/null 2>&1; then
+    pass "explain-bundles matches compile closure semantics"
+  else
+    fail "explain-bundles matches compile closure semantics"
+    cat "$_test_root/explain-closure.out" >&2
+  fi
+else
+  fail "explain-bundles matches compile closure semantics"
+  cat "$_test_root/explain-closure.err" >&2
 fi
 
 # --- layer-lint without python3 ---

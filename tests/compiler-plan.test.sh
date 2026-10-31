@@ -139,6 +139,22 @@ _module cycle_a '' cycle_a_loaded any read-only 'cycle_a_loaded() { :; }'
 _module cycle_b '' cycle_b_loaded any read-only 'cycle_b_loaded() { :; }'
 sed -i.bak 's/^optional=$/optional=cycle_b/' "$_project/shell/module.d/cycle_a.meta"
 sed -i.bak 's/^optional=$/optional=cycle_a/' "$_project/shell/module.d/cycle_b.meta"
+_module opt_req_cycle_user '' opt_req_cycle_user_loaded any read-only 'opt_req_cycle_user_loaded() { :; }'
+_module opt_req_cycle_a opt_req_cycle_b opt_req_cycle_a_loaded any read-only 'opt_req_cycle_a_loaded() { :; }'
+_module opt_req_cycle_b opt_req_cycle_a opt_req_cycle_b_loaded any read-only 'opt_req_cycle_b_loaded() { :; }'
+sed -i.bak 's/^optional=$/optional=opt_req_cycle_a/' "$_project/shell/module.d/opt_req_cycle_user.meta"
+cat >"$_project/shell/module.d/meta_export_bad.meta" <<'EOF'
+name=meta_export_bad
+version=
+side_effect=read-only
+requires=meta_child
+optional=
+shells=bash
+platforms=any
+exports=meta_export_bad_loaded
+updates=
+load=
+EOF
 rm -f "$_project"/shell/module.d/*.bak
 mkdir -p "$_project/shell/layers/demo/module.d" "$_project/shell/layers/demo/modules"
 cat >"$_project/shell/layers/demo/module.d/contrib_demo_child.meta" <<'EOF'
@@ -184,6 +200,10 @@ _registry_row later_ok '' later_ok_loaded any read-only modules/later_ok.sh
 _registry_row missing_export '' missing_export_loaded any read-only modules/missing_export.sh
 _registry_row meta_child '' meta_child_loaded any read-only modules/meta_child.sh
 _registry_row meta_parent meta_child '' any read-only ''
+_registry_row opt_req_cycle_user '' opt_req_cycle_user_loaded any read-only modules/opt_req_cycle_user.sh
+_registry_row opt_req_cycle_a opt_req_cycle_b opt_req_cycle_a_loaded any read-only modules/opt_req_cycle_a.sh
+_registry_row opt_req_cycle_b opt_req_cycle_a opt_req_cycle_b_loaded any read-only modules/opt_req_cycle_b.sh
+_registry_row meta_export_bad meta_child '' any read-only ''
 _registry_row platform_other '' platform_other_loaded "$_other_platform" read-only modules/platform_other.sh
 _registry_row platform_edge_blocked '' platform_edge_blocked_loaded "$_other_platform" read-only modules/platform_edge_blocked.sh
 _registry_row platform_edge_optional '' platform_edge_optional_loaded any read-only modules/platform_edge_optional.sh
@@ -213,6 +233,8 @@ _bundle_row blocked-meta 'meta_other_user'
 _bundle_row optional 'cross_user'
 _bundle_row optional-fail 'opt_fail_user'
 _bundle_row optional-cycle 'cycle_a'
+_bundle_row optional-required-cycle 'opt_req_cycle_user'
+_bundle_row meta-exports 'meta_export_bad'
 _bundle_row layer-meta 'contrib_demo_meta@shell/layers/demo/module.d'
 _bundle_row capability capability_user
 _bundle_row reload reload_probe
@@ -276,6 +298,7 @@ _build blocked-meta "$_tmp/release-blocked-meta"
 _build optional "$_tmp/release-optional"
 _build optional-fail "$_tmp/release-optional-fail"
 _build optional-cycle "$_tmp/release-optional-cycle"
+_build optional-required-cycle "$_tmp/release-optional-required-cycle"
 _build layer-meta "$_tmp/release-layer-meta"
 _build capability "$_tmp/release-capability"
 _build reload "$_tmp/release-reload"
@@ -289,7 +312,7 @@ if VALISE_MODULE_ROOT="$_tmp/release-behavior" /bin/bash -c '
   . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
   _status=$?
   printf "status=%s\n" "$_status"
-  command -v first_fail_loaded >/dev/null && printf "first=loaded\n"
+  if command -v first_fail_loaded >/dev/null; then printf "first=loaded\n"; else printf "first=absent\n"; fi
   if command -v later_ok_loaded >/dev/null; then printf "later=loaded\n"; else printf "later=skipped\n"; fi
   exit "$_status"
 ' >"$_tmp/behavior-strict.out" 2>"$_tmp/behavior-strict.err"; then
@@ -297,7 +320,7 @@ if VALISE_MODULE_ROOT="$_tmp/release-behavior" /bin/bash -c '
 else
   _status=$?
   if grep -F 'status=1' "$_tmp/behavior-strict.out" >/dev/null &&
-    grep -F 'first=loaded' "$_tmp/behavior-strict.out" >/dev/null &&
+    grep -F 'first=absent' "$_tmp/behavior-strict.out" >/dev/null &&
     grep -F 'later=skipped' "$_tmp/behavior-strict.out" >/dev/null &&
     grep -F 'module first_fail failed with status 1' "$_tmp/behavior-strict.err" >/dev/null; then
     pass "strict plan names and stops at the first failure"
@@ -313,14 +336,14 @@ if ! VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-behavior" /bin/bas
   . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
   _status=$?
   printf "status=%s\n" "$_status"
-  command -v first_fail_loaded >/dev/null && printf "first=loaded\n"
+  if command -v first_fail_loaded >/dev/null; then printf "first=loaded\n"; else printf "first=absent\n"; fi
   command -v later_ok_loaded >/dev/null && printf "later=loaded\n"
   exit "$_status"
 ' >"$_tmp/behavior-permissive.out" 2>"$_tmp/behavior-permissive.err"; then
   fail "permissive plan returns success after a failure"
 else
   if grep -F 'status=0' "$_tmp/behavior-permissive.out" >/dev/null &&
-    grep -F 'first=loaded' "$_tmp/behavior-permissive.out" >/dev/null &&
+    grep -F 'first=absent' "$_tmp/behavior-permissive.out" >/dev/null &&
     grep -F 'later=loaded' "$_tmp/behavior-permissive.out" >/dev/null &&
     grep -F 'module first_fail failed with status 1' "$_tmp/behavior-permissive.err" >/dev/null; then
     pass "permissive plan reports failure and continues"
@@ -428,6 +451,32 @@ if VALISE_MODULE_ROOT="$_tmp/release-optional-cycle" /bin/bash -c '
 else
   fail "an optional-only cycle still loads its members"
   cat "$_tmp/optional-cycle.err" >&2
+fi
+
+# An optional edge into a required cycle is quarantined, as the loader does.
+if VALISE_MODULE_ROOT="$_tmp/release-optional-required-cycle" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  command -v opt_req_cycle_user_loaded >/dev/null &&
+    ! command -v opt_req_cycle_a_loaded >/dev/null &&
+    ! command -v opt_req_cycle_b_loaded >/dev/null
+' >"$_tmp/optional-required-cycle.out" 2>"$_tmp/optional-required-cycle.err"; then
+  pass "an optional edge into a required cycle does not fail the plan"
+else
+  fail "an optional edge into a required cycle does not fail the plan"
+  cat "$_tmp/optional-required-cycle.err" >&2
+fi
+
+# A meta module cannot declare exports: the loader and Fish fail it, so the
+# compiled plan must reject it rather than silently ignoring the declaration.
+rm -rf "$_tmp/release-meta-exports"
+if (cd "$_project" && "$_valise" compile --bundle=meta-exports "$_tmp/release-meta-exports") \
+  >"$_tmp/meta-exports.out" 2>"$_tmp/meta-exports.err"; then
+  fail "compile rejects a meta module that declares exports"
+elif grep -F 'meta module meta_export_bad declares exports without a body' "$_tmp/meta-exports.err" >/dev/null; then
+  pass "compile rejects a meta module that declares exports"
+else
+  fail "compile rejects a meta module that declares exports"
+  cat "$_tmp/meta-exports.err" >&2
 fi
 
 # A platform-unsupported module in the required closure stops a strict plan before
@@ -684,6 +733,10 @@ _reject_registry_row \
 _reject_registry_row \
   'bad_source		read-only			bash	any	bad_source_loaded	modules/first_fail.sh		shell/mod*' \
   'invalid registry source for module bad_source: shell/mod*'
+_reject_registry_row "$(printf 'bad_layer_name\t\tread-only\t\t\tsh\tany\t\tmodules/x.sh\t\tshell/layers/l)/module.d')" \
+  'invalid layer source in registry for module bad_layer_name: shell/layers/l)/module.d'
+_reject_registry_row "$(printf 'reserved_export\t\tread-only\t\t\tsh\tany\tif\tmodules/x.sh\t\tshell/module.d')" \
+  'invalid export for registry module reserved_export: if'
 _reject_registry_row \
   'bad_exports		read-only			bash	any	bad_exports$(id)	modules/first_fail.sh		shell/module.d' \
   'invalid export for registry module bad_exports: bad_exports$(id)'

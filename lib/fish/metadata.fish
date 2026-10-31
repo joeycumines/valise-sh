@@ -48,6 +48,13 @@ function sp_fish_metadata_validate_identifier_list --description 'Validate space
             sp_fish_metadata_error "invalid $label: $word"
             return 1
         end
+        if test "$label" = export
+            switch $word
+                case case do done elif else esac fi for if in then until while time
+                    sp_fish_metadata_error "invalid export (reserved word): $word"
+                    return 1
+            end
+        end
     end
     if test $seen -eq 0
         sp_fish_metadata_error "missing required metadata field: $label"

@@ -453,6 +453,80 @@ else
   cat "$_rm_project/shell/release/bundle-roots" "$_rm_project/shell/release/install-variants" >&2
 fi
 
+# --- module new and module remove fail before mutating ------------------------
+_guard_project="$_test_home/guard-project"
+(cd "$_test_home" && _env new guard-project) >/dev/null 2>&1 || :
+rm -f "$_guard_project/shell/module.d/profile_main.meta"
+if (cd "$_guard_project" && _env module new ghost --exports=ghost_fn) \
+  >"$_test_home/ghost.out" 2>"$_test_home/ghost.err"; then
+  fail "module new refuses a missing seed metadata file"
+elif [ ! -e "$_guard_project/shell/module.d/ghost.meta" ] &&
+  [ ! -e "$_guard_project/shell/modules/ghost.sh" ]; then
+  pass "module new refuses a missing seed metadata file without writing files"
+else
+  fail "module new refuses a missing seed metadata file without writing files"
+fi
+
+_reserved_project="$_test_home/reserved-project"
+(cd "$_test_home" && _env new reserved-project) >/dev/null 2>&1 || :
+if (cd "$_reserved_project" && _env module new bad --exports=if) \
+  >"$_test_home/reserved.out" 2>"$_test_home/reserved.err"; then
+  fail "module new rejects a reserved-word export"
+elif grep -F 'reserved word' "$_test_home/reserved.err" >/dev/null &&
+  [ ! -e "$_reserved_project/shell/module.d/bad.meta" ]; then
+  pass "module new rejects a reserved-word export without writing files"
+else
+  fail "module new rejects a reserved-word export without writing files"
+  cat "$_test_home/reserved.err" >&2
+fi
+
+_share_project="$_test_home/share-project"
+(cd "$_test_home" && _env new share-project) >/dev/null 2>&1 || :
+(cd "$_share_project" && _env module new shared_one --exports=shared_one_fn) >/dev/null 2>&1 || :
+cat >"$_share_project/shell/module.d/shared_two.meta" <<'EOF'
+name=shared_two
+version=
+side_effect=read-only
+requires=
+optional=
+shells=sh
+platforms=any
+exports=
+updates=
+load=modules/shared_one.sh
+EOF
+(cd "$_share_project" && _env build) >/dev/null 2>&1 || :
+if (cd "$_share_project" && _env module remove shared_two) \
+  >"$_test_home/shared.out" 2>"$_test_home/shared.err" &&
+  [ -f "$_share_project/shell/modules/shared_one.sh" ] &&
+  [ ! -e "$_share_project/shell/module.d/shared_two.meta" ] &&
+  (cd "$_share_project" && _env build) >/dev/null 2>&1; then
+  pass "module remove keeps a body shared by another module"
+else
+  fail "module remove keeps a body shared by another module"
+  cat "$_test_home/shared.err" >&2
+fi
+
+_ro_project="$_test_home/ro-project"
+(cd "$_test_home" && _env new ro-project) >/dev/null 2>&1 || :
+(cd "$_ro_project" && _env module new stuck --exports=stuck_fn) >/dev/null 2>&1 || :
+chmod 0555 "$_ro_project/shell/module.d"
+if (cd "$_ro_project" && _env module remove stuck) \
+  >"$_test_home/ro.out" 2>"$_test_home/ro.err"; then
+  chmod 0755 "$_ro_project/shell/module.d"
+  fail "module remove refuses an unwritable metadata directory"
+else
+  chmod 0755 "$_ro_project/shell/module.d"
+  if [ -f "$_ro_project/shell/module.d/stuck.meta" ] &&
+    [ -f "$_ro_project/shell/modules/stuck.sh" ] &&
+    (cd "$_ro_project" && _env build) >/dev/null 2>&1; then
+    pass "module remove refuses an unwritable metadata directory and changes nothing"
+  else
+    fail "module remove refuses an unwritable metadata directory and changes nothing"
+    cat "$_test_home/ro.err" >&2
+  fi
+fi
+
 # --- apply in a vendored layout -----------------------------------------------
 # An older manifest at the project root is found first by locate_manifest. Apply
 # must still install the manifest it just built.

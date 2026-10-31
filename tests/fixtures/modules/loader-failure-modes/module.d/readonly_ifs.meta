@@ -1,0 +1,10 @@
+name=readonly_ifs
+version=
+side_effect=read-only
+requires=
+optional=
+shells=sh
+platforms=any
+exports=readonly_ifs_loaded
+updates=
+load=modules/readonly_ifs.sh

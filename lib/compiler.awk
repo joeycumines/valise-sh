@@ -185,6 +185,23 @@ END {
     rem_count = discovered_count
     ordered_count = 0
 
+    # The required closure is the roots and everything they require. A module
+    # reached only through an optional edge may be unavailable without failing
+    # the plan. Compute it before ordering so a stall can distinguish a cycle
+    # inside the required closure from an optional-only cycle.
+    for (i = 1; i <= seed_count; i++) {
+        required_stack[++required_top] = seeds[i]
+    }
+    while (required_top > 0) {
+        name = required_stack[required_top--]
+        if (name in required) continue
+        required[name] = 1
+        n_req = split(mod_req[name], reqs, " ")
+        for (rqi = 1; rqi <= n_req; rqi++) {
+            required_stack[++required_top] = reqs[rqi]
+        }
+    }
+
     # Order by required and optional edges. When that stalls, retry on required
     # edges alone, as the loader does, so an optional edge can never deadlock the
     # graph. Only a stall on required edges is a cycle.
@@ -222,33 +239,35 @@ END {
             }
         }
         if (!progress) {
-            if (relaxed) {
+            if (!relaxed) {
+                relaxed = 1
+                continue
+            }
+            # Every remaining module is in a cycle. The loader quarantines a
+            # cycle that lies wholly outside the required closure and still
+            # loads the rest, so only a cycle containing a required module is
+            # a compile error.
+            stalled_required = 0
+            for (ri = 1; ri <= rem_count; ri++) {
+                if (remaining[ri] in required) {
+                    stalled_required = 1
+                    break
+                }
+            }
+            if (stalled_required) {
                 print "ERROR: cycle detected" > "/dev/stderr"
                 exit 1
             }
-            relaxed = 1
-            continue
+            for (ri = 1; ri <= rem_count; ri++) {
+                print "warning: optional dependency cycle ignored: " remaining[ri] > "/dev/stderr"
+            }
+            rem_count = 0
+            break
         }
         relaxed = 0
         rem_count = next_rem_count
         for (ri = 1; ri <= rem_count; ri++) {
             remaining[ri] = next_remaining[ri]
-        }
-    }
-
-    # The required closure is the roots and everything they require. A module
-    # reached only through an optional edge may be unavailable without failing
-    # the plan.
-    for (i = 1; i <= seed_count; i++) {
-        required_stack[++required_top] = seeds[i]
-    }
-    while (required_top > 0) {
-        name = required_stack[required_top--]
-        if (name in required) continue
-        required[name] = 1
-        n_req = split(mod_req[name], reqs, " ")
-        for (rqi = 1; rqi <= n_req; rqi++) {
-            required_stack[++required_top] = reqs[rqi]
         }
     }
 
@@ -264,6 +283,10 @@ END {
         }
         if (mod_load[name] == "" && mod_req[name] == "") {
             print "ERROR: module " mod_display[name] " has no load path and no dependencies" > "/dev/stderr"
+            exit 1
+        }
+        if (mod_load[name] == "" && mod_exports[name] != "") {
+            print "ERROR: meta module " mod_display[name] " declares exports without a body" > "/dev/stderr"
             exit 1
         }
     }
@@ -418,6 +441,7 @@ END {
                 printf "%sfi\n", body_indent
             } else {
                 printf "%s%swrapper_exports=\n", body_indent, prefix
+                printf "%s%scleanup_exports=\n", body_indent, prefix
                 printf "%sfor %sexport in", body_indent, prefix
                 for (ei = 1; ei <= export_count; ei++) {
                     printf " %s", module_exports[ei]
@@ -439,6 +463,8 @@ END {
                 printf "%s  if [ \"$%sconflict\" -ne 0 ]; then\n", body_indent, prefix
                 printf "%s    printf 'valise: %%s: declared export already exists before load: %%s\\n' '%s' \"$%sexport\" >&2\n", body_indent, display, prefix
                 printf "%s    %sstatus=1\n", body_indent, prefix
+                printf "%s  else\n", body_indent
+                printf "%s    %scleanup_exports=\"${%scleanup_exports:+$%scleanup_exports }$%sexport\"\n", body_indent, prefix, prefix, prefix, prefix, prefix
                 printf "%s  fi\n", body_indent
                 printf "%sdone\n", body_indent
                 printf "%sif [ \"$%sstatus\" -eq 0 ]; then\n", body_indent, prefix
@@ -470,6 +496,9 @@ END {
                 printf "%sfi\n", body_indent
                 printf "%sif [ \"$%sstatus\" -ne 0 ]; then\n", body_indent, prefix
                 printf "%s  printf 'valise: module %%s failed with status %%s\\n' '%s' \"$%sstatus\" >&2\n", body_indent, display, prefix
+                printf "%s  for %sexport in $%scleanup_exports; do\n", body_indent, prefix, prefix
+                printf "%s    unset -f \"$%sexport\" 2>/dev/null || :\n", body_indent, prefix
+                printf "%s  done\n", body_indent
                 printf "%sfi\n", body_indent
             }
         }
@@ -503,6 +532,6 @@ END {
     printf "  %sreturn=0\n", prefix
     printf "fi\n"
     printf "unset %sstatus %sfailed %sfirst_status %sunavailable %smode %splatform\n", prefix, prefix, prefix, prefix, prefix, prefix
-    printf "unset %smodule %srequired %sblocked_by %splatform_match %sexport %slookup %sconflict %swrapper_exports\n", prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix
+    printf "unset %smodule %srequired %sblocked_by %splatform_match %sexport %slookup %sconflict %swrapper_exports %scleanup_exports\n", prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix
     printf "eval \"unset %sreturn; return $%sreturn\"\n", prefix, prefix
 }

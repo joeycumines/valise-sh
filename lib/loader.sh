@@ -1370,16 +1370,40 @@ sp_loader_load_modules() {
         _spl_pwd_cwd_restored=0
       fi
       if [ "$_spl_pwd_cwd_restored" -eq 1 ]; then
+        # Assign only when the value differs, and probe first: a module that
+        # made PWD or OLDPWD readonly must fail closed, not abort the loader
+        # before its cleanup runs. The probe is a subshell assignment, so a
+        # readonly variable fails it without touching the caller.
+        _spl_restore_pwd=1
         if [ "$_spl_expected_pwd_was_set" -eq 1 ]; then
-          PWD=$_spl_expected_pwd
+          if (PWD=$_spl_expected_pwd) >/dev/null 2>&1; then
+            [ "${PWD-}" = "$_spl_expected_pwd" ] || PWD=$_spl_expected_pwd
+          else
+            _spl_restore_pwd=0
+          fi
         else
-          unset PWD
+          if (unset PWD) >/dev/null 2>&1; then
+            unset PWD
+          else
+            _spl_restore_pwd=0
+          fi
         fi
+        [ "$_spl_restore_pwd" -eq 1 ] || _spl_shell_state_modified=1
+        _spl_restore_oldpwd=1
         if [ "$_spl_expected_oldpwd_was_set" -eq 1 ]; then
-          OLDPWD=$_spl_expected_oldpwd
+          if (OLDPWD=$_spl_expected_oldpwd) >/dev/null 2>&1; then
+            [ "${OLDPWD-}" = "$_spl_expected_oldpwd" ] || OLDPWD=$_spl_expected_oldpwd
+          else
+            _spl_restore_oldpwd=0
+          fi
         else
-          unset OLDPWD
+          if (unset OLDPWD) >/dev/null 2>&1; then
+            unset OLDPWD
+          else
+            _spl_restore_oldpwd=0
+          fi
         fi
+        [ "$_spl_restore_oldpwd" -eq 1 ] || _spl_shell_state_modified=1
       fi
       if [ "${IFS+x}" = x ]; then
         _spl_after_ifs_was_set=1
@@ -1391,11 +1415,21 @@ sp_loader_load_modules() {
       elif [ "$_spl_expected_ifs_was_set" -eq 1 ] && [ "${IFS-}" != "$_spl_expected_ifs" ]; then
         _spl_shell_state_modified=1
       fi
+      _spl_restore_ifs=1
       if [ "$_spl_expected_ifs_was_set" -eq 1 ]; then
-        IFS=$_spl_expected_ifs
+        if (IFS=$_spl_expected_ifs) >/dev/null 2>&1; then
+          [ "${IFS-}" = "$_spl_expected_ifs" ] || IFS=$_spl_expected_ifs
+        else
+          _spl_restore_ifs=0
+        fi
       else
-        unset IFS
+        if (unset IFS) >/dev/null 2>&1; then
+          unset IFS
+        else
+          _spl_restore_ifs=0
+        fi
       fi
+      [ "$_spl_restore_ifs" -eq 1 ] || _spl_shell_state_modified=1
       case $- in *a*) _spl_after_allexport_was_set=1 ;; *) _spl_after_allexport_was_set=0 ;; esac
       case $- in *C*) _spl_after_noclobber_was_set=1 ;; *) _spl_after_noclobber_was_set=0 ;; esac
       case $- in *e*) _spl_after_errexit_was_set=1 ;; *) _spl_after_errexit_was_set=0 ;; esac
@@ -1435,7 +1469,18 @@ sp_loader_load_modules() {
           _spl_export_ifs_was_set=0
           _spl_export_old_ifs=
         fi
-        IFS=' '
+        _spl_ifs_ready=1
+        if [ "${IFS+x}" = x ] && [ "${IFS-}" = ' ' ]; then
+          :
+        elif (IFS=' ') >/dev/null 2>&1; then
+          IFS=' '
+        else
+          _spl_ifs_ready=0
+        fi
+        if [ "$_spl_ifs_ready" -eq 0 ] && [ -n "$_spl_exports" ]; then
+          command printf 'loader: %s\n' "$_spl_mod: cannot check declared exports: IFS is readonly" >&2
+          _spl_load_status=1
+        fi
         for _spl_export in $_spl_exports; do
           if ! _spl_export_lookup=$(command -v "$_spl_export" 2>/dev/null); then
             command printf 'loader: %s\n' "$_spl_mod: declared export missing: $_spl_export" >&2
@@ -1453,10 +1498,12 @@ sp_loader_load_modules() {
             esac
           fi
         done
-        if [ "$_spl_export_ifs_was_set" -eq 1 ]; then
-          IFS=$_spl_export_old_ifs
-        else
-          unset IFS
+        if [ "$_spl_ifs_ready" -eq 1 ]; then
+          if [ "$_spl_export_ifs_was_set" -eq 1 ]; then
+            IFS=$_spl_export_old_ifs
+          else
+            unset IFS
+          fi
         fi
       fi
       if [ "$_spl_load_status" -ne 0 ]; then
@@ -1467,14 +1514,23 @@ sp_loader_load_modules() {
           _spl_export_ifs_was_set=0
           _spl_export_old_ifs=
         fi
-        IFS=' '
+        _spl_ifs_ready=1
+        if [ "${IFS+x}" = x ] && [ "${IFS-}" = ' ' ]; then
+          :
+        elif (IFS=' ') >/dev/null 2>&1; then
+          IFS=' '
+        else
+          _spl_ifs_ready=0
+        fi
         for _spl_export in $_spl_exports_to_cleanup; do
           unset -f "$_spl_export" 2>/dev/null || :
         done
-        if [ "$_spl_export_ifs_was_set" -eq 1 ]; then
-          IFS=$_spl_export_old_ifs
-        else
-          unset IFS
+        if [ "$_spl_ifs_ready" -eq 1 ]; then
+          if [ "$_spl_export_ifs_was_set" -eq 1 ]; then
+            IFS=$_spl_export_old_ifs
+          else
+            unset IFS
+          fi
         fi
         command printf 'loader: %s\n' "$_spl_mod: load failed with status $_spl_load_status" >&2
         command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/failed"
@@ -1495,7 +1551,18 @@ sp_loader_load_modules() {
     case $_spl_cleanup_tmp in
     "$_spl_tmp_parent"/shell-profile-loader.*)
       if [ -f "$_spl_cleanup_tmp/.shell-profile-loader-owned" ]; then
-        command rm -rf "$_spl_cleanup_tmp" 2>/dev/null || :
+        # Resolve rm without PATH: a module may legitimately narrow or replace
+        # PATH, and cleanup must not depend on the value it leaves behind.
+        _spl_cleanup_rm=
+        for _spl_rm_candidate in /bin/rm /usr/bin/rm; do
+          if [ -x "$_spl_rm_candidate" ]; then
+            _spl_cleanup_rm=$_spl_rm_candidate
+            break
+          fi
+        done
+        if [ -n "$_spl_cleanup_rm" ]; then
+          "$_spl_cleanup_rm" -rf "$_spl_cleanup_tmp" 2>/dev/null || :
+        fi
       fi
       ;;
     esac
@@ -1523,6 +1590,8 @@ sp_loader_load_modules() {
       _spl_expected_oldpwd _spl_expected_oldpwd_was_set _spl_after_pwd_physical _spl_after_pwd_physical_status \
       _spl_after_pwd_was_set _spl_after_oldpwd_was_set _spl_pwd_cwd_restored \
     _spl_cwd_restore_attempt _spl_restored_pwd_physical _spl_restored_pwd_status \
+    _spl_restore_pwd _spl_restore_oldpwd _spl_restore_ifs _spl_ifs_ready \
+    _spl_cleanup_rm _spl_rm_candidate \
     _spl_expected_ifs_was_set _spl_expected_ifs _spl_after_ifs_was_set \
       _spl_expected_allexport_was_set _spl_expected_noclobber_was_set _spl_expected_errexit_was_set \
       _spl_expected_glob_was_set _spl_expected_nounset_was_set _spl_expected_verbose_was_set _spl_expected_xtrace_was_set \
@@ -1571,6 +1640,8 @@ sp_loader_load_modules() {
       _spl_expected_oldpwd _spl_expected_oldpwd_was_set _spl_after_pwd_physical _spl_after_pwd_physical_status \
       _spl_after_pwd_was_set _spl_after_oldpwd_was_set _spl_pwd_cwd_restored \
     _spl_cwd_restore_attempt _spl_restored_pwd_physical _spl_restored_pwd_status \
+    _spl_restore_pwd _spl_restore_oldpwd _spl_restore_ifs _spl_ifs_ready \
+    _spl_cleanup_rm _spl_rm_candidate \
     _spl_expected_ifs_was_set _spl_expected_ifs _spl_after_ifs_was_set \
     _spl_expected_allexport_was_set _spl_expected_noclobber_was_set _spl_expected_errexit_was_set \
     _spl_expected_glob_was_set _spl_expected_nounset_was_set _spl_expected_verbose_was_set _spl_expected_xtrace_was_set \

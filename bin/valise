@@ -430,6 +430,33 @@ readlink_target() {
   "$_readlink_path" "$1"
 }
 
+# active_release_dir
+# Print the physical directory the active pointer names, or fail. The result
+# is canonical, so a trailing slash, a relative target, or an alias symlink
+# never changes the release identity.
+active_release_dir() {
+  [ -L "$VALISE_ACTIVE_LINK" ] || return 1
+  _ard_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null) || return 1
+  [ -n "$_ard_target" ] || return 1
+  case "$_ard_target" in
+    /*) : ;;
+    *)
+      _ard_parent=$(cd "$(path_parent "$VALISE_ACTIVE_LINK")" 2>/dev/null && pwd -P) || return 1
+      _ard_target="$_ard_parent/$_ard_target"
+      ;;
+  esac
+  _ard_target=$(path_normalize "$_ard_target") || return 1
+  (cd "$_ard_target" 2>/dev/null && pwd -P)
+}
+
+# active_release_id
+# Print the active release's directory name. Identity is the name, not the
+# path spelling.
+active_release_id() {
+  _ari_dir=$(active_release_dir) || return 1
+  printf '%s\n' "${_ari_dir##*/}"
+}
+
 # Resolve the consuming project root for the commands that read project
 # files (compile, build, explain-*, layer-lint). The working directory
 # wins over the engine's own checkout, so a package install cannot supply a
@@ -556,8 +583,6 @@ lower_hex() {
 # participates in lock integrity is resolved by absolute path so PATH cannot
 # forge ownership or suppress stale-lock cleanup.
 _lock_owned=0
-_active_tmp=""
-_active_backup=""
 _publish_tmp=""
 _manifest_rows=""
 _manifest_parse=""
@@ -649,20 +674,6 @@ EOF
 release_lock() {
   _release_rm_path=$(trusted_utility_path rm 2>/dev/null || :)
   _release_rmdir_path=$(trusted_utility_path rmdir 2>/dev/null || :)
-  if [ -n "$_active_tmp" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_active_tmp" 2>/dev/null || :
-    if [ -e "$_active_tmp" ] || [ -L "$_active_tmp" ]; then _cleanup_failed=1; fi
-    _active_tmp=""
-  fi
-  if [ -n "$_active_backup" ]; then
-    if [ -L "$_active_backup" ] && [ ! -e "$VALISE_ACTIVE_LINK" ] && [ ! -L "$VALISE_ACTIVE_LINK" ]; then
-      [ -n "$_mv_path" ] && "$_mv_path" "$_active_backup" "$VALISE_ACTIVE_LINK" 2>/dev/null || :
-    else
-      [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_active_backup" 2>/dev/null || :
-    fi
-    if [ -e "$_active_backup" ] || [ -L "$_active_backup" ]; then _cleanup_failed=1; fi
-    _active_backup=""
-  fi
   if [ -n "$_publish_tmp" ]; then
     remove_tree "$_publish_tmp" || _cleanup_failed=1
     _publish_tmp=""
@@ -757,15 +768,23 @@ switch_active_link() {
   if [ -e "$VALISE_ACTIVE_LINK" ] && [ ! -L "$VALISE_ACTIVE_LINK" ]; then
     die "active path exists and is not a symlink: $VALISE_ACTIVE_LINK"
   fi
-  # ln -sfn replaces the destination symlink. On both BSD and GNU systems,
-  # this executes unlink(2) followed by symlink(2), which is not atomic but
-  # is the most portable approach available in pure POSIX sh (mv -h is
-  # BSD-only, mv -T is GNU-only). The -n flag prevents following a
-  # destination that is a symlink to a directory, making the swap act on
-  # the symlink itself rather than descending into its target.
-  "$_ln_path" -sfn "$1" "$VALISE_ACTIVE_LINK" || die "failed to update active symlink"
+  # ln -sfn replaces the destination symlink. The -n flag prevents following a
+  # destination that is a symlink to a directory. If the swap fails after the
+  # old link was removed, restore the prior target so the pointer is never
+  # left missing.
+  _switch_old_target=
+  if [ -L "$VALISE_ACTIVE_LINK" ]; then
+    _switch_old_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
+  fi
+  if ! "$_ln_path" -sfn "$1" "$VALISE_ACTIVE_LINK"; then
+    if [ -n "$_switch_old_target" ]; then
+      "$_ln_path" -sfn "$_switch_old_target" "$VALISE_ACTIVE_LINK" 2>/dev/null || :
+    fi
+    die "failed to update active symlink"
+  fi
   [ -L "$VALISE_ACTIVE_LINK" ] || die "active symlink was not created"
   [ "$($_readlink_path "$VALISE_ACTIVE_LINK" 2>/dev/null)" = "$1" ] || die "active symlink target mismatch"
+  unset _switch_old_target
 }
 
 source_path_is_physical() {
@@ -2873,17 +2892,13 @@ cmd_doctor() {
   # Check active symlink
   _doctor_active_ok=0
   if [ -L "$VALISE_ACTIVE_LINK" ]; then
-    _target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
-    case "$_target" in
-      /*) : ;;
-      *) _target="$(cd "$(path_parent "$VALISE_ACTIVE_LINK")" 2>/dev/null && pwd -P)/$_target" ;;
-    esac
-    if [ -d "$_target" ]; then
+    _target=$(active_release_dir 2>/dev/null || :)
+    if [ -n "$_target" ]; then
       printf '  ok: active release: %s\n' "$_target"
       _doctor_active_target=$_target
       _doctor_active_ok=1
     else
-      printf '  FAIL: active symlink points to missing directory: %s\n' "$_target"
+      printf '  FAIL: active symlink does not resolve to a release directory\n'
       _status=1
     fi
   elif [ -e "$VALISE_ACTIVE_LINK" ]; then
@@ -3071,15 +3086,17 @@ cmd_release() {
         --help|-h) usage_release; return 0 ;;
       esac
       if [ -d "$VALISE_RELEASES_DIR" ]; then
+        _list_active_id=$(active_release_id 2>/dev/null || :)
         for _rel in "$VALISE_RELEASES_DIR"/*/; do
           [ -d "$_rel" ] || continue
           _name=$(basename "$_rel")
-          if [ -L "$VALISE_ACTIVE_LINK" ] && [ "$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null)" = "${_rel%/}" ]; then
+          if [ -n "$_list_active_id" ] && [ "$_name" = "$_list_active_id" ]; then
             printf '* %s (active)\n' "$_name"
           else
             printf '  %s\n' "$_name"
           fi
         done
+        unset _list_active_id
       else
         info "no releases installed"
       fi
@@ -3158,20 +3175,11 @@ cmd_release() {
         esac
       done
       [ -d "$VALISE_RELEASES_DIR" ] || die "no releases installed"
-      _prune_active=""
-      if [ -L "$VALISE_ACTIVE_LINK" ]; then
-        _prune_active=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
-        case "$_prune_active" in
-          /*) : ;;
-          *) _prune_active="$(cd "$(path_parent "$VALISE_ACTIVE_LINK")" 2>/dev/null && pwd -P)/$_prune_active" ;;
-        esac
-      fi
-      # The active release is identified by its release ID, not by a path
-      # spelling. A path comparison is fragile: the pointer may be spelled
-      # relative, through a symlinked /tmp, or with a different prefix than
-      # the release directory, and any of those would make prune delete the
-      # very release the pointer names.
-      _prune_active_id=${_prune_active##*/}
+      # The active release is identified by its canonical directory name, not
+      # by a path spelling. A trailing slash, a relative target, or an alias
+      # symlink must never make prune delete the release the pointer names.
+      _prune_active_id=$(active_release_id 2>/dev/null || :)
+      _prune_active=$_prune_active_id
       # Collect the candidate releases with their modification times. The
       # active release is excluded here and kept unconditionally below.
       _prune_sort=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-prune.XXXXXX") ||
@@ -3186,9 +3194,11 @@ cmd_release() {
         printf '%s\t%s\n' "$_prune_mtime" "$_prune_name" >>"$_prune_sort"
       done
       _prune_sort_path=$(trusted_utility_path sort) || die "no trusted sort utility available"
+      _prune_sorted=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-prune-sorted.XXXXXX") ||
+        die "cannot create prune ordering file"
       # Newest first; equal timestamps fall back to the release name so the
       # ordering is deterministic.
-      "$_prune_sort_path" -k1,1nr -k2,2 "$_prune_sort" >"$_prune_sort.sorted" ||
+      "$_prune_sort_path" -k1,1nr -k2,2 "$_prune_sort" >"$_prune_sorted" ||
         die "cannot order releases for pruning"
       _prune_index=0
       _prune_removed=0
@@ -3233,9 +3243,9 @@ cmd_release() {
           _prune_kept=$((_prune_kept + 1))
         fi
         release_lock
-      done <"$_prune_sort.sorted"
+      done <"$_prune_sorted"
       _prune_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
-      "$_prune_rm" -f "$_prune_sort" "$_prune_sort.sorted" || die "cannot remove prune staging files"
+      "$_prune_rm" -f "$_prune_sort" "$_prune_sorted" || die "cannot remove prune staging files"
       if [ -n "$_prune_active" ]; then
         info "prune kept the active release plus $_prune_kept other release(s); removed $_prune_removed"
       else
@@ -3402,13 +3412,10 @@ cmd_install() {
 
   # Update active symlink atomically without clobbering a non-symlink path.
   if [ ! -L "$VALISE_ACTIVE_LINK" ] || [ "$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null)" != "$_target_dir" ]; then
-    acquire_lock
     if [ -e "$VALISE_ACTIVE_LINK" ] && [ ! -L "$VALISE_ACTIVE_LINK" ]; then
-      release_lock
       die "active path exists and is not a symlink: $VALISE_ACTIVE_LINK"
     fi
     switch_active_link "$_target_dir"
-    release_lock
     info "active release set to $_release_id"
   fi
 
@@ -3505,9 +3512,19 @@ cmd_make_manifest() {
       _mm_out="$_mm_cwd/$_mm_out"
       ;;
   esac
+  _mm_out=$(path_normalize "$_mm_out") || die "cannot normalize manifest output path"
   _mm_out_dir=$(path_parent "$_mm_out") || die "cannot resolve manifest parent"
   _mm_mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
   "$_mm_mkdir_path" -p "$_mm_out_dir" || die "cannot create manifest directory: $_mm_out_dir"
+  # Resolve the parent physically: find reports physical paths, and /tmp is a
+  # symlink to /private/tmp on macOS. A lexical comparison would include the
+  # manifest in itself on the second run.
+  _mm_out_dir=$(cd "$_mm_out_dir" && pwd -P) || die "cannot resolve manifest parent: $_mm_out_dir"
+  _mm_out="$_mm_out_dir/${_mm_out##*/}"
+  if [ -e "$_mm_out" ] || [ -L "$_mm_out" ]; then
+    [ -f "$_mm_out" ] && [ ! -L "$_mm_out" ] ||
+      die "manifest output is not a regular file: $_mm_out"
+  fi
   _mm_find_path=$(trusted_utility_path find) || die "no trusted find utility available"
   _mm_sort_path=$(trusted_utility_path sort) || die "no trusted sort utility available"
   # Symlinks never enter a sealed release: find without -L reports them as
@@ -3764,14 +3781,15 @@ cmd_compile() {
             layer = msrc
             sub(/^shell\/layers\//, "", layer)
             sub(/\/module\.d$/, "", layer)
-            if (layer == "" || layer ~ /[\/.]/) {
+            if (layer !~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/ || layer ~ /\.\./) {
               print "valise: error: invalid layer source in registry for module " name ": " msrc > "/dev/stderr"
               exit 1
             }
           }
           export_count = split($8, export_values, " ")
           for (export_i = 1; export_i <= export_count; export_i++) {
-            if (export_values[export_i] !~ /^[a-z_][a-zA-Z0-9_]*$/) {
+            if (export_values[export_i] !~ /^[a-z_][a-zA-Z0-9_]*$/ ||
+                export_values[export_i] ~ /^(case|do|done|elif|else|esac|fi|for|if|in|then|until|while|time)$/) {
               print "valise: error: invalid export for registry module " name ": " export_values[export_i] > "/dev/stderr"
               exit 1
             }
@@ -3937,7 +3955,14 @@ registry_generate() {
         _rg_layer=${_rg_source#shell/layers/}
         _rg_layer=${_rg_layer%/module.d}
         case "$_rg_layer" in
-        ""|*/*|.*)
+        [A-Za-z0-9_]*) ;;
+        *)
+          printf 'valise: error: invalid layer source for registry: %s\n' "$_rg_rel" >&2
+          exit 1
+          ;;
+        esac
+        case "$_rg_layer" in
+        */*|*..*|*[!A-Za-z0-9_.-]*)
           printf 'valise: error: invalid layer source for registry: %s\n' "$_rg_rel" >&2
           exit 1
           ;;
@@ -4386,6 +4411,13 @@ cmd_module() {
       *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*) die "invalid module name: $_module_name" ;;
     esac
     project_config_load
+    _module_seed="$_project_root/shell/module.d/profile_main.meta"
+    [ -f "$_module_seed" ] && [ ! -L "$_module_seed" ] ||
+      die "seed metadata file is missing or unsafe: $_module_seed"
+    [ -d "$_project_root/shell/modules" ] ||
+      die "module body directory is missing: $_project_root/shell/modules"
+    [ -w "$_project_root/shell/module.d" ] && [ -w "$_project_root/shell/modules" ] ||
+      die "module directories are not writable: $_project_root/shell"
     _module_meta="$_project_root/shell/module.d/$_module_name.meta"
     _module_body="$_project_root/shell/modules/$_module_name.sh"
     [ ! -e "$_module_meta" ] && [ ! -L "$_module_meta" ] || die "module metadata already exists: $_module_name"
@@ -4402,6 +4434,11 @@ cmd_module() {
         esac
         case "$_module_export" in
           *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*) die "invalid export name: $_module_export" ;;
+        esac
+        case "$_module_export" in
+          case|do|done|elif|else|esac|fi|for|if|in|then|until|while|time)
+            die "invalid export name (reserved word): $_module_export"
+            ;;
         esac
         _module_export_words="$_module_export_words $_module_export"
       done
@@ -4521,7 +4558,8 @@ cmd_module() {
     fi
     _module_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
     _module_load=$("$_module_awk" -F= '$1 == "load" { print substr($0, length($1) + 2); exit }' "$_module_meta")
-    _module_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
+    _module_body_path=
+    _module_body_shared=0
     if [ -n "$_module_load" ]; then
       case "$_module_load" in
       ''|/*|.|..|./*|../*|*/.|*/..|*/./*|*/../*|*//*)
@@ -4531,8 +4569,41 @@ cmd_module() {
       _module_root=${_module_source%/module.d}
       source_path_is_physical "$_module_root" "$_module_load" ||
         die "module load path contains a symlink: $_module_load"
-      [ ! -d "$_module_root/$_module_load" ] || die "module load path is a directory: $_module_load"
-      "$_module_rm" -f "$_module_root/$_module_load" || die "cannot remove module body: $_module_load"
+      _module_body_path="$_module_root/$_module_load"
+      [ ! -d "$_module_body_path" ] || die "module load path is a directory: $_module_load"
+      [ -f "$_module_body_path" ] || die "module body is missing: $_module_load"
+      # Another module in the same source may declare the same body. Keep it
+      # when that is true: removing the metadata is enough, and deleting the
+      # body would break the module that still loads it.
+      for _module_candidate in "$_module_source"/*.meta; do
+        [ -f "$_module_candidate" ] || continue
+        [ "$_module_candidate" != "$_module_meta" ] || continue
+        _module_candidate_load=$("$_module_awk" -F= '$1 == "load" { print substr($0, length($1) + 2); exit }' "$_module_candidate")
+        if [ "$_module_candidate_load" = "$_module_load" ]; then
+          _module_body_shared=1
+          break
+        fi
+      done
+      [ -w "$(path_parent "$_module_body_path")" ] ||
+        die "module body directory is not writable: $(path_parent "$_module_body_path")"
+    fi
+    # Every path the removal rewrites must be writable before the first change.
+    [ -w "$_module_source" ] || die "module metadata directory is not writable: $_module_source"
+    [ -w "$_project_root/shell/release" ] || die "release directory is not writable: $_project_root/shell/release"
+    for _module_candidate in "$_project_root"/shell/module.d/*.meta "$_project_root"/shell/layers/*/module.d/*.meta; do
+      [ -f "$_module_candidate" ] || continue
+      _module_candidate_parent=$(path_parent "$_module_candidate")
+      [ -w "$_module_candidate_parent" ] ||
+        die "metadata directory is not writable: $_module_candidate_parent"
+    done
+    for _module_candidate in "$_module_bundle_roots" "$_module_variants"; do
+      if [ -f "$_module_candidate" ]; then
+        [ -w "$_module_candidate" ] || die "release file is not writable: $_module_candidate"
+      fi
+    done
+    _module_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
+    if [ -n "$_module_body_path" ] && [ "$_module_body_shared" -eq 0 ]; then
+      "$_module_rm" -f "$_module_body_path" || die "cannot remove module body: $_module_load"
     fi
     "$_module_rm" -f "$_module_meta" || die "cannot remove module metadata: $_module_name"
     for _module_candidate in "$_project_root"/shell/module.d/*.meta "$_project_root"/shell/layers/*/module.d/*.meta; do
@@ -4639,8 +4710,8 @@ EOF
     printf 'registry: out of date\n'
   fi
   if [ -L "$VALISE_ACTIVE_LINK" ]; then
-    _status_active_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
-    if [ -n "$_status_active_target" ] && [ -d "$_status_active_target" ]; then
+    _status_active_target=$(active_release_dir 2>/dev/null || :)
+    if [ -n "$_status_active_target" ]; then
       _status_active_id=${_status_active_target##*/}
       printf 'active release: %s\n' "$_status_active_id"
     else
@@ -4786,7 +4857,11 @@ _build_release_tree() {
         _as_layer=${_as_source#shell/layers/}
         _as_layer=${_as_layer%/module.d}
         case "$_as_layer" in
-          ""|*/*|.*) die "invalid layer source in registry: $_as_source" ;;
+          [A-Za-z0-9_]*) ;;
+          *) die "invalid layer source in registry: $_as_source" ;;
+        esac
+        case "$_as_layer" in
+          */*|*..*|*[!A-Za-z0-9_.-]*) die "invalid layer source in registry: $_as_source" ;;
         esac
         _as_prefix="layers/$_as_layer/"
         ;;
@@ -4938,14 +5013,20 @@ cmd_explain_bundles() {
       if (shells == "") return 0
       count = split(shells, values, " ")
       for (i = 1; i <= count; i++) {
-        if (values[i] == wanted || values[i] == "sh") return 1
+        if (values[i] == wanted) return 1
+        # shells=sh means every POSIX shell, not Fish.
+        if (wanted != "fish" && values[i] == "sh") return 1
       }
       return 0
     }
-    function is_excluded(id,   i) {
-      if (mod_src[id] != "shell/module.d") return 0
+    function is_excluded(id,   i, ex) {
       for (i = 1; i <= excl_count; i++) {
-        if (excl_list[i] == mod_id[id] || excl_list[i] == id) return 1
+        ex = excl_list[i]
+        if (index(ex, "@") > 0) {
+          if (ex == id) return 1
+        } else if (ex == mod_id[id] && mod_src[id] == "shell/module.d") {
+          return 1
+        }
       }
       return 0
     }
@@ -4983,6 +5064,16 @@ cmd_explain_bundles() {
           if (!(dep in unresolved)) { unresolved[dep] = 1; unresolved_count++ }
           continue
         }
+        add_module(resolved)
+      }
+      # An optional dependency joins the closure only when it is present for
+      # this shell and not excluded; an absent optional is silent.
+      count = split(mod_opt[id], deps, " ")
+      for (i = 1; i <= count; i++) {
+        dep = deps[i]
+        if (dep == "") continue
+        resolved = resolve_dep(dep, mod_src[id])
+        if (resolved == "") continue
         add_module(resolved)
       }
     }
@@ -5035,6 +5126,7 @@ cmd_explain_bundles() {
       mod_id[id] = name
       mod_src[id] = src
       mod_req[id] = $4
+      mod_opt[id] = $5
       mod_shells[id] = $6
       mod_ver[id] = $2
       mod_exports[id] = $8

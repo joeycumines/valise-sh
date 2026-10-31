@@ -199,6 +199,34 @@ if "$_valise" make-manifest "$_mm_tree" --output="$_test_home/equals-form.manife
 else
   fail "make-manifest equals-form output matches"
 fi
+
+# An existing directory is not a manifest file. It must be rejected without
+# chmod-ing the directory or nesting the manifest inside it.
+_mm_outdir="$_test_home/manifest-outdir"
+mkdir -p "$_mm_outdir"
+chmod 0755 "$_mm_outdir"
+if "$_valise" make-manifest "$_mm_tree" --output "$_mm_outdir" >/dev/null 2>&1; then
+  fail "make-manifest rejects a directory output"
+elif [ "$(stat -c %a "$_mm_outdir" 2>/dev/null || stat -f %Lp "$_mm_outdir")" = 755 ] &&
+  [ ! -e "$_mm_outdir/profile-release.manifest" ]; then
+  pass "make-manifest rejects a directory output without changing it"
+else
+  fail "make-manifest rejects a directory output without changing it"
+fi
+
+# A normalized output path inside the tree must still exclude itself on a
+# second run, so the manifest stays byte-identical.
+_mm_dot_out="$_mm_tree/./custom.manifest"
+"$_valise" make-manifest "$_mm_tree" --output "$_mm_dot_out" >/dev/null 2>&1 || :
+cp "$_mm_tree/custom.manifest" "$_test_home/custom.first"
+if "$_valise" make-manifest "$_mm_tree" --output "$_mm_dot_out" >/dev/null 2>&1 &&
+  cmp -s "$_mm_tree/custom.manifest" "$_test_home/custom.first" &&
+  ! grep -F 'custom.manifest' "$_mm_tree/custom.manifest" >/dev/null 2>&1; then
+  pass "make-manifest excludes a normalized in-tree output from itself"
+else
+  fail "make-manifest excludes a normalized in-tree output from itself"
+fi
+rm -f "$_mm_tree/custom.manifest"
 ln -s readme.txt "$_mm_tree/link.sh"
 if "$_valise" make-manifest "$_mm_tree" --output "$_test_home/sym.manifest" >/dev/null 2>&1; then
   fail "make-manifest rejects symlink trees"
