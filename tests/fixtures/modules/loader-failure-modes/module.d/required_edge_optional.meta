@@ -1,0 +1,9 @@
+name=required_edge_optional
+requires=
+optional=required_edge_mid
+shells=sh
+platforms=any
+side_effect=read-only
+exports=required_edge_optional_loaded
+updates=
+load=modules/required_edge_optional.sh

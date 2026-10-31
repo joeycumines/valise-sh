@@ -1,0 +1,9 @@
+name=zzz_platform_nested_bridge_linux
+requires=platform_nested_mid_linux
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=zzz_platform_nested_bridge_linux_loaded
+updates=
+load=modules/zzz_platform_nested_bridge_linux.sh

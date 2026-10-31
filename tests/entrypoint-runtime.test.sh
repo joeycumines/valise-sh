@@ -211,6 +211,27 @@ assert_contains 'entrypoint loader source failure cleans private root variable' 
 assert_contains 'entrypoint loader source failure cleans private search variable' "$_loader_failure_out" 'search=unset'
 assert_contains 'entrypoint loader source failure cleans private module root variable' "$_loader_failure_out" 'module_root=unset'
 
+printf '\n=== zsh reserved-name scan through the entrypoint ===\n'
+
+# The reserved-utility scanner relies on word splitting. zsh splits words
+# only when shwordsplit is on, and the entrypoint enables it; probe the real
+# entrypoint to prove a tab-named function still fails closed there.
+if command -v zsh >/dev/null 2>&1; then
+  _zsh_tab_trace="$_tmp/zsh-tab.trace"
+  _zsh_tab_out=$(
+    VALISE_ROOT="$ROOT_DIR" \
+      VALISE_MODULE_ROOT="$ROOT_DIR/tests/fixtures/modules/loader-failure-modes" \
+      VALISE_MODULES=tab_name_hijack \
+      VALISE_MODE=strict \
+      SP_LOADER_TEST_TRACE="$_zsh_tab_trace" \
+      zsh -c '. "$VALISE_ROOT/entrypoints/profile.sh" 2>"'"$_tmp"'/zsh-tab.stderr"; _s=$?; printf "status=%s trace=%s export=%s\n" "$_s" "$(cat "$SP_LOADER_TEST_TRACE" 2>/dev/null)" "$(command -v tab_name_hijack_loaded >/dev/null 2>&1 && printf yes || printf no)"'
+  )
+  assert_eq 'zsh entrypoint fails closed on a tab-named reserved function' 'status=1 trace= export=no' "$_zsh_tab_out"
+  assert_contains 'zsh reserved-scan diagnostic is explicit' "$(cat "$_tmp/zsh-tab.stderr")" 'reserved shell utility'
+else
+  printf '  SKIP: zsh reserved-name lane (zsh unavailable)\n'
+fi
+
 printf '\n=== Entrypoint execute-vs-source guard ===\n'
 
 _exec_out=$(/bin/sh "$ROOT_DIR/entrypoints/profile.sh" 2>&1)

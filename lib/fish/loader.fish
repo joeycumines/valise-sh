@@ -931,6 +931,8 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
     set -l meta_provider_modules
     set -l meta_provider_paths
     set -l optional_modules
+    set -l platform_skipped_modules
+    set -l requires_edges
     set -l shell_skipped_modules
     set -l failed_modules
     set -l runtime_failed_modules
@@ -1029,15 +1031,7 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
             end
         end
         if test $platform_match -ne 1
-            if builtin contains -- $current $optional_modules
-                sp_fish_loader_error "warning: optional module unsupported on platform: $current"
-                set -a failed_modules $current
-                continue
-            end
-            if test "$mode" = strict
-                sp_fish_loader_error "unsupported platform for $current: $current_platform"
-                return 1
-            end
+            set -a platform_skipped_modules $current
             set -a failed_modules $current
             continue
         end
@@ -1106,6 +1100,7 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         # Enqueue requires dependencies
         set -l req_line (string match 'requires=*' -- $parsed)
         set -l req_val (string replace 'requires=' '' -- $req_line)
+        set -a requires_edges "$current|$req_val"
         for dep in (string split ' ' -- $req_val)
             if test -z "$dep"
                 continue
@@ -1131,6 +1126,42 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
             if not builtin contains -- $dep $discovered
                 set -a queue $dep
             end
+        end
+    end
+
+    # A platform skip is expected for an optional-only module and stays
+    # silent. Re-walk the required edges to a fixpoint first, because discovery
+    # can mark a module optional before a later required edge promotes it; a
+    # required-closure platform skip is a strict failure and must be named.
+    set -l required_modules $seeds
+    set -l closure_progress 1
+    while test $closure_progress -eq 1
+        set closure_progress 0
+        for edge in $requires_edges
+            set -l edge_parts (string split '|' -- $edge)
+            set -l edge_from $edge_parts[1]
+            set -l edge_deps (string split ' ' -- $edge_parts[2])
+            if not builtin contains -- $edge_from $required_modules
+                continue
+            end
+            for edge_dep in $edge_deps
+                if test -z "$edge_dep"; or builtin contains -- $edge_dep $required_modules
+                    continue
+                end
+                set -a required_modules $edge_dep
+                set closure_progress 1
+            end
+        end
+    end
+    set -l report_platform (sp_fish_loader_platform_name)
+    test -n "$report_platform"; or set report_platform unknown
+    for skipped_module in $platform_skipped_modules
+        if not builtin contains -- $skipped_module $required_modules
+            continue
+        end
+        sp_fish_loader_error "unsupported platform for $skipped_module: $report_platform"
+        if test "$mode" = strict
+            return 1
         end
     end
 

@@ -121,6 +121,26 @@ for _fixture in \
   module.d/fish_only.meta \
   module.d/platform_darwin_only.meta \
   module.d/platform_linux_only.meta \
+  module.d/platform_edge_optional_darwin.meta \
+  module.d/platform_edge_optional_linux.meta \
+  module.d/platform_edge_bridge_darwin.meta \
+  module.d/platform_edge_bridge_linux.meta \
+  module.d/platform_edge_root_darwin.meta \
+  module.d/platform_edge_root_linux.meta \
+  module.d/platform_edge_blocked_darwin.meta \
+  module.d/platform_edge_blocked_linux.meta \
+  module.d/required_edge_optional.meta \
+  module.d/required_edge_mid.meta \
+  module.d/zzz_required_edge_bridge.meta \
+  module.d/required_edge_root.meta \
+  module.d/platform_nested_optional_darwin.meta \
+  module.d/platform_nested_mid_darwin.meta \
+  module.d/platform_nested_root_darwin.meta \
+  module.d/zzz_platform_nested_bridge_darwin.meta \
+  module.d/platform_nested_optional_linux.meta \
+  module.d/platform_nested_mid_linux.meta \
+  module.d/platform_nested_root_linux.meta \
+  module.d/zzz_platform_nested_bridge_linux.meta \
   module.d/bridge_ok.meta \
   module.d/bridge_command_hijack.meta \
   module.d/bridge_fail.meta \
@@ -184,6 +204,26 @@ for _fixture in \
   modules/generated_writer.sh \
   modules/fish_only.sh \
   modules/platform_darwin_only.sh \
+  modules/platform_edge_optional_darwin.sh \
+  modules/platform_edge_optional_linux.sh \
+  modules/platform_edge_bridge_darwin.sh \
+  modules/platform_edge_bridge_linux.sh \
+  modules/platform_edge_root_darwin.sh \
+  modules/platform_edge_root_linux.sh \
+  modules/platform_edge_blocked_darwin.sh \
+  modules/platform_edge_blocked_linux.sh \
+  modules/required_edge_optional.sh \
+  modules/required_edge_mid.sh \
+  modules/zzz_required_edge_bridge.sh \
+  modules/required_edge_root.sh \
+  modules/platform_nested_optional_darwin.sh \
+  modules/platform_nested_mid_darwin.sh \
+  modules/platform_nested_root_darwin.sh \
+  modules/zzz_platform_nested_bridge_darwin.sh \
+  modules/platform_nested_optional_linux.sh \
+  modules/platform_nested_mid_linux.sh \
+  modules/platform_nested_root_linux.sh \
+  modules/zzz_platform_nested_bridge_linux.sh \
   modules/platform_linux_only.sh; do
   assert_file "fixture exists: $_fixture" "$FIXTURE_ROOT/$_fixture"
 done
@@ -846,6 +886,51 @@ assert_contains 'unsupported platform diagnostic is visible' "$_err" 'unsupporte
 assert_eq 'unsupported platform rejection prevents module body execution' '' "$_trace_out"
 assert_no_loader_leaks 'unsupported platform rejection'
 unset _unsupported_platform_module
+
+# A platform-skipped module can be reached through an optional edge first and
+# a required edge later. The required-closure decision must use every edge,
+# not the discovery order: strict fails with the platform diagnostic, and the
+# optional-only case stays silent.
+case "$(uname -s 2>/dev/null || printf unknown)" in
+Darwin) _edge_suffix=darwin; _edge_blocked_suffix=linux ;;
+*) _edge_suffix=linux; _edge_blocked_suffix=darwin ;;
+esac
+
+run_loader platform_edge_optional "platform_edge_optional_$_edge_suffix" strict ordinary
+assert_eq 'a platform-skipped optional dependency is silent in strict mode' 0 "$_status"
+assert_eq 'a platform-skipped optional dependency writes no diagnostic' '' "$_err"
+assert_eq 'a platform-skipped optional dependency still loads its declaring module' "platform_edge_optional_$_edge_suffix" "$_trace_out"
+assert_no_loader_leaks 'platform-skipped optional dependency'
+
+run_loader platform_edge_required "platform_edge_optional_$_edge_suffix platform_edge_root_$_edge_suffix" strict ordinary
+assert_eq 'strict fails when a platform skip is required through a later edge' 1 "$_status"
+assert_contains 'required platform skip diagnostic names the skipped module' "$_err" "platform_edge_blocked_$_edge_blocked_suffix: unsupported platform"
+assert_eq 'strict required platform skip runs no module bodies' '' "$_trace_out"
+assert_no_loader_leaks 'strict required platform skip failure'
+
+run_loader platform_edge_required_permissive "platform_edge_optional_$_edge_suffix platform_edge_root_$_edge_suffix" permissive ordinary
+assert_eq 'permissive platform-required skip continues' 0 "$_status"
+assert_contains 'permissive required platform skip still names the skipped module' "$_err" "platform_edge_blocked_$_edge_blocked_suffix: unsupported platform"
+assert_eq 'permissive required platform skip loads the independent module only' "platform_edge_optional_$_edge_suffix" "$_trace_out"
+assert_no_loader_leaks 'permissive required platform skip'
+
+# A module discovered through an optional edge keeps its own required child
+# when a later edge makes the module required. The topological failure must
+# fail strict mode even though the child was walked before that promotion.
+run_loader required_edge_missing "required_edge_optional required_edge_root" strict ordinary
+assert_eq 'strict fails when a required edge is discovered after an optional one' 1 "$_status"
+assert_contains 'required-edge failure names the missing leaf' "$_err" 'missing_edge_leaf'
+assert_eq 'strict required-edge failure runs no module bodies' '' "$_trace_out"
+assert_no_loader_leaks 'strict required-edge failure'
+
+# The fixpoint matters one level deeper: the required module's own required
+# child was walked while the parent was still optional, so the closure must
+# re-walk it before deciding whether the platform skip is reportable.
+run_loader platform_nested "platform_nested_optional_$_edge_suffix platform_nested_root_$_edge_suffix" strict ordinary
+assert_eq 'strict fails for a platform skip under a promoted required module' 1 "$_status"
+assert_contains 'nested platform skip diagnostic names the skipped module' "$_err" "platform_edge_blocked_$_edge_blocked_suffix: unsupported platform"
+assert_eq 'strict nested platform skip runs no module bodies' '' "$_trace_out"
+assert_no_loader_leaks 'strict nested platform skip'
 
 run_loader bridge_hook bridge_ok strict ordinary
 assert_eq 'bridge load_hook module loads through hook' 0 "$_status"

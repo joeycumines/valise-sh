@@ -1519,6 +1519,12 @@ print_fish_integration() {
     "    end" \
     "    builtin functions -e \"\$_valise_fish_persistence_verify_helper\"; or return 125" \
     "  end" \
+    "  if builtin set -q _valise_fish_owned_cleanup; and builtin functions -q \"\$_valise_fish_owned_cleanup\"" \
+    "    builtin functions -e \"\$_valise_fish_owned_cleanup\"; or return 125" \
+    "  end" \
+    "  if builtin set -q _valise_fish_persistence_path_physical_helper; and builtin functions -q \"\$_valise_fish_persistence_path_physical_helper\"" \
+    "    builtin functions -e \"\$_valise_fish_persistence_path_physical_helper\"; or return 125" \
+    "  end" \
     "  if builtin functions -q \"\$_valise_fish_root_restore_helper\"" \
     "    if not builtin test (builtin functions \"\$_valise_fish_root_restore_helper\" | string collect) = \"\$_valise_fish_root_helper_definition\"" \
     "      builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
@@ -2669,19 +2675,10 @@ print_fish_integration() {
     "  end" \
     "  \$_valise_fish_publish_active_helper; or builtin exit 125" \
     "    else" \
-    "  printf '%s\\n' 'valise Fish integration: native Fish loader infrastructure is unavailable' >&2" \
+    "  # No Fish entrypoint, no generated Fish plan and no native Fish loader:" \
+    "  # the release has nothing this hook can load. Fall through to the shared" \
+    "  # success cleanup so the hook stays silent and leaves no helper behind." \
     "  builtin functions -e \$_valise_fish_legacy_runner 2>/dev/null" \
-    "  if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
-    "    builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
-    "    builtin exit 125" \
-    "  end" \
-    "  \$_valise_fish_owned_cleanup" \
-    "  if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
-    "    builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
-    "    builtin exit 125" \
-    "  end" \
-    "  \$_valise_fish_root_restore_helper; or builtin exit 125" \
-    "  return 1" \
     "end" \
     "  end" \
     "end" \
@@ -3708,7 +3705,7 @@ cmd_compile() {
 
   # Fish plans require native Fish syntax; the plan compiler emits POSIX sh
   # only. A Fish integration uses the native Fish loader instead.
-  info "fish plans are not generated; a Fish integration uses the native Fish loader"
+  info "fish plans are not generated; a Fish session uses the native Fish loader only when the release provides one"
   for _shell in bash zsh ksh wrapper_lifecycle; do
     # Extract roots for this shell from JSON using POSIX tools
     if [ "$_bundle_requested" -eq 1 ]; then

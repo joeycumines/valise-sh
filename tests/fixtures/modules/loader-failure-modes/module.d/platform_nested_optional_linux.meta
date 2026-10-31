@@ -1,0 +1,9 @@
+name=platform_nested_optional_linux
+requires=
+optional=platform_nested_mid_linux
+shells=sh
+platforms=any
+side_effect=read-only
+exports=platform_nested_optional_linux_loaded
+updates=
+load=modules/platform_nested_optional_linux.sh

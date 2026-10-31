@@ -1,0 +1,9 @@
+name=zzz_required_edge_bridge
+requires=required_edge_mid
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=zzz_required_edge_bridge_loaded
+updates=
+load=modules/zzz_required_edge_bridge.sh

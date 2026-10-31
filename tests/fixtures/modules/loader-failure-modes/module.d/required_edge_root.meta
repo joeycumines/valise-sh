@@ -1,0 +1,9 @@
+name=required_edge_root
+requires=zzz_required_edge_bridge
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=required_edge_root_loaded
+updates=
+load=modules/required_edge_root.sh

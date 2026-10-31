@@ -182,6 +182,24 @@ _platform=$(/usr/bin/uname -s 2>/dev/null || printf unknown)
 case "$_platform" in Darwin) _opposite_platform=linux ;; *) _opposite_platform=darwin ;; esac
 _meta "$_fixture/module.d/wrong_platform.meta" wrong_platform fish "$_opposite_platform" read-only wrong_platform_loaded modules/fish/wrong_platform.fish
 _body "$_fixture/modules/fish/wrong_platform.fish" 'set -g wrong_platform_sourced 1; function wrong_platform_loaded; end'
+# A platform-skipped optional dependency is expected to be absent on this
+# host. It must stay silent and must not stop its declaring module, matching
+# the POSIX loader's treatment of optional platform skips.
+_meta "$_fixture/module.d/opt_platform_user.meta" opt_platform_user fish any read-only opt_platform_user_loaded modules/fish/opt_platform_user.fish '' wrong_platform
+_body "$_fixture/modules/fish/opt_platform_user.fish" 'set -g opt_platform_user_sourced 1; function opt_platform_user_loaded; end'
+# The platform-skipped module can sit one required edge below a module that
+# was discovered as optional first. The required-closure fixpoint must still
+# report it, exactly as the POSIX loader does.
+_meta "$_fixture/module.d/nested_opt.meta" nested_opt fish any read-only nested_opt_loaded modules/fish/nested_opt.fish '' nested_mid
+_body "$_fixture/modules/fish/nested_opt.fish" 'set -g nested_opt_sourced 1; function nested_opt_loaded; end'
+_meta "$_fixture/module.d/nested_mid.meta" nested_mid fish any read-only nested_mid_loaded modules/fish/nested_mid.fish nested_platform
+_body "$_fixture/modules/fish/nested_mid.fish" 'set -g nested_mid_sourced 1; function nested_mid_loaded; end'
+_meta "$_fixture/module.d/zzz_nested_bridge.meta" zzz_nested_bridge fish any read-only zzz_nested_bridge_loaded modules/fish/zzz_nested_bridge.fish nested_mid
+_body "$_fixture/modules/fish/zzz_nested_bridge.fish" 'set -g zzz_nested_bridge_sourced 1; function zzz_nested_bridge_loaded; end'
+_meta "$_fixture/module.d/nested_root.meta" nested_root fish any read-only nested_root_loaded modules/fish/nested_root.fish zzz_nested_bridge nested_opt
+_body "$_fixture/modules/fish/nested_root.fish" 'set -g nested_root_sourced 1; function nested_root_loaded; end'
+_meta "$_fixture/module.d/nested_platform.meta" nested_platform fish "$_opposite_platform" read-only nested_platform_loaded modules/fish/nested_platform.fish
+_body "$_fixture/modules/fish/nested_platform.fish" 'set -g nested_platform_sourced 1; function nested_platform_loaded; end'
 
 _engine=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
 # An absent universal store is a valid empty before-image. Rollback must still
@@ -293,12 +311,117 @@ if grep -Eq '^[[:space:]]+eval[[:space:]]' "$_engine/lib/fish/loader.fish"; then
   printf '%s\n' 'FAIL: native Fish loader contains unqualified eval' >&2
   exit 1
 fi
+# A platform-skipped optional dependency loads its declaring module and writes
+# nothing to stderr. Silence is the contract: a per-startup warning for a
+# module the user never asked for is noise, and the POSIX loader is quiet too.
+_opt_platform_program="$_test_root/optional-platform.fish"
+cat >"$_opt_platform_program" <<OPTEOF
+builtin source '$_engine/lib/fish/metadata.fish'
+builtin set -gx SHELL_PROJECT_ROOT '$_fixture'
+builtin set -g _sp_fish_loader_bootstrap_mode strict
+builtin set -g _sp_fish_loader_bootstrap_seeds opt_platform_user
+builtin source '$_engine/lib/fish/loader.fish'
+builtin set -l _status \$_sp_fish_loader_bootstrap_status
+builtin set -e _sp_fish_loader_bootstrap_status
+builtin test "\$_status" -eq 0; or exit 1
+builtin set -q opt_platform_user_sourced; or exit 1
+builtin set -q wrong_platform_sourced; and exit 1
+exit 0
+OPTEOF
+_opt_platform_status=0
+/usr/bin/env -i HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_opt_platform_program" >"$_test_root/optional-platform.stdout" 2>"$_test_root/optional-platform.stderr" || _opt_platform_status=$?
+if [ "$_opt_platform_status" -ne 0 ]; then
+  cat "$_test_root/optional-platform.stdout" "$_test_root/optional-platform.stderr" >&2
+  printf '%s\n' 'FAIL: optional platform skip broke its declaring module' >&2
+  exit 1
+fi
+if [ -s "$_test_root/optional-platform.stderr" ]; then
+  cat "$_test_root/optional-platform.stderr" >&2
+  printf '%s\n' 'FAIL: optional platform skip must be silent' >&2
+  exit 1
+fi
+
+# One required edge below an optional module: the platform skip is required,
+# so strict mode fails and names the platform, not just the blocked parent.
+_nested_platform_program="$_test_root/nested-platform.fish"
+cat >"$_nested_platform_program" <<NESTEOF
+builtin source '$_engine/lib/fish/metadata.fish'
+builtin set -gx SHELL_PROJECT_ROOT '$_fixture'
+builtin set -g _sp_fish_loader_bootstrap_mode strict
+builtin set -g _sp_fish_loader_bootstrap_seeds nested_root
+builtin source '$_engine/lib/fish/loader.fish'
+builtin set -l _status \$_sp_fish_loader_bootstrap_status
+builtin set -e _sp_fish_loader_bootstrap_status
+builtin test "\$_status" -ne 0; or exit 1
+builtin set -q nested_platform_sourced; and exit 1
+exit 0
+NESTEOF
+_nested_platform_status=0
+/usr/bin/env -i HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_nested_platform_program" >"$_test_root/nested-platform.stdout" 2>"$_test_root/nested-platform.stderr" || _nested_platform_status=$?
+if [ "$_nested_platform_status" -ne 0 ]; then
+  cat "$_test_root/nested-platform.stdout" "$_test_root/nested-platform.stderr" >&2
+  printf '%s\n' 'FAIL: strict nested platform skip did not fail as expected' >&2
+  exit 1
+fi
+if ! grep -F 'unsupported platform for nested_platform' "$_test_root/nested-platform.stderr" >/dev/null; then
+  cat "$_test_root/nested-platform.stderr" >&2
+  printf '%s\n' 'FAIL: strict nested platform skip must name the platform cause' >&2
+  exit 1
+fi
+
+# A built release has no Fish entrypoint, no generated Fish plan and no native
+# Fish loader, so its hook can load nothing. Installing it must still write the
+# hook and a Fish session must start without output or an error.
+_built_root="$_test_root/built-release"
+mkdir -p "$_built_root/home"
+cp -R "$_engine/examples/profile-project" "$_built_root/project"
+if ! (cd "$_built_root/project" && "$_engine/bin/valise" build) >"$_built_root/build.stdout" 2>"$_built_root/build.stderr"; then
+  cat "$_built_root/build.stdout" "$_built_root/build.stderr" >&2
+  printf '%s\n' 'FAIL: example project did not build for the Fish hook test' >&2
+  exit 1
+fi
+_built_path="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$_fish")"
+if ! (cd "$_built_root/project/build/release" && /usr/bin/env -i HOME="$_built_root/home" TMPDIR="${TMPDIR:-/tmp}" PATH="$_built_path" XDG_DATA_HOME="$_built_root/home/.local/share" XDG_STATE_HOME="$_built_root/home/.local/state" "$_engine/bin/valise" install) >"$_built_root/install.stdout" 2>"$_built_root/install.stderr"; then
+  cat "$_built_root/install.stdout" "$_built_root/install.stderr" >&2
+  printf '%s\n' 'FAIL: built release did not install for the Fish hook test' >&2
+  exit 1
+fi
+if [ ! -f "$_built_root/home/.config/fish/conf.d/valise.fish" ]; then
+  printf '%s\n' 'FAIL: built release install wrote no Fish hook' >&2
+  exit 1
+fi
+_built_status=0
+/usr/bin/env -i HOME="$_built_root/home" TMPDIR="${TMPDIR:-/tmp}" PATH="$_built_path" XDG_DATA_HOME="$_built_root/home/.local/share" XDG_STATE_HOME="$_built_root/home/.local/state" "$_fish" -c 'true' >"$_built_root/fish.stdout" 2>"$_built_root/fish.stderr" || _built_status=$?
+if [ "$_built_status" -ne 0 ]; then
+  cat "$_built_root/fish.stdout" "$_built_root/fish.stderr" >&2
+  printf '%s\n' 'FAIL: Fish session failed with a built release active' >&2
+  exit 1
+fi
+if [ -s "$_built_root/fish.stdout" ] || [ -s "$_built_root/fish.stderr" ]; then
+  cat "$_built_root/fish.stdout" "$_built_root/fish.stderr" >&2
+  printf '%s\n' 'FAIL: Fish session with a built release active must be silent' >&2
+  exit 1
+fi
+
+# The hook itself must report success. A silent-but-failing hook is still a
+# broken startup path, and the no-op must not leave private helpers behind.
+_built_hook_status=0
+/usr/bin/env -i HOME="$_built_root/home" TMPDIR="${TMPDIR:-/tmp}" PATH="$_built_path" \
+  "$_fish" --no-config -c 'source "$HOME/.config/fish/conf.d/valise.fish"; echo status=$status; for helper in (functions --all --names); string match -q "__valise_fish_*" -- $helper; and echo leak=$helper; end; exit 0' \
+  >"$_built_root/hook.stdout" 2>"$_built_root/hook.stderr" || _built_hook_status=$?
+if [ "$_built_hook_status" -ne 0 ] || [ "$(cat "$_built_root/hook.stdout")" != 'status=0' ] || [ -s "$_built_root/hook.stderr" ]; then
+  cat "$_built_root/hook.stdout" "$_built_root/hook.stderr" >&2
+  printf '%s\n' 'FAIL: built-release Fish hook must succeed, stay silent and leave no helper' >&2
+  exit 1
+fi
+
 _project_adapter=$(CDPATH= cd "$_engine/../.." && pwd -P)/shell/entrypoints/fish/profile.fish
+_have_public_adapter=1
 if [ ! -f "$_project_adapter" ]; then
   printf 'NOTE: consuming-project Fish adapter not found at %s; skipping public-adapter coverage\n' "$_project_adapter"
-  printf '%s\n' 'OK: all Fish runtime checks passed'
-  exit 0
+  _have_public_adapter=0
 fi
+if [ "$_have_public_adapter" -eq 1 ]; then
 _public_root="$_test_root/public"
 _public_engine_lib="$_public_root/vendor/shell-profile/lib/fish"
 _missing_root="$_test_root/missing-public"
@@ -1657,6 +1780,15 @@ if [ "$(cat "$_loader_suffix_marker")" != 1:1 ]; then
   exit 1
 fi
 
+fi
+if [ "$_have_public_adapter" -eq 0 ]; then
+  # The adapter-dependent part of the program below is guarded off; bind its
+  # path variables so the unquoted heredoc can still expand.
+  _missing_root="$_test_root/absent-public/missing"
+  _public_root="$_test_root/absent-public/public"
+  _public_second_root="$_test_root/absent-public/second"
+fi
+
 cat >"$_program" <<EOF
 builtin source '$_engine/lib/fish/metadata.fish'
 set -gx SHELL_PROJECT_ROOT '$_fixture'
@@ -1853,6 +1985,7 @@ functions -q private_failed_loaded; and exit 1
 
 # A caller-defined rollback helper from an arbitrary source must never run.
 function _sp_fish_loader_rollback_activation; set -g fake_rollback_called 1; end
+if test $_have_public_adapter -eq 1
 # Public adapter must fail closed when the engine is missing, even with a
 # stale success handshake, and must not leave readiness behind.
 set -gx SHELL_PROJECT_ROOT '$_missing_root'
@@ -1963,6 +2096,8 @@ or exit 1
 set -q public_plan_sourced; and exit 1
 set -q public_fish_path_loaded; or exit 1
 set -q VALISE_FISH_READY; or exit 1
+
+end
 
 # Return to the direct fixture for the remaining root-discovery probes.
 # Rebind both halves of the loader ABI to the same trusted source directory

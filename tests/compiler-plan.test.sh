@@ -100,6 +100,11 @@ load=
 EOF
 rm -f "$_project/shell/modules/meta_parent.sh"
 _module platform_other '' platform_other_loaded "$_other_platform" read-only 'platform_other_loaded() { :; }'
+_module platform_edge_blocked '' platform_edge_blocked_loaded "$_other_platform" read-only 'platform_edge_blocked_loaded() { :; }'
+_module platform_edge_optional '' platform_edge_optional_loaded any read-only 'platform_edge_optional_loaded() { :; }'
+_module platform_edge_bridge platform_edge_blocked platform_edge_bridge_loaded any read-only 'platform_edge_bridge_loaded() { :; }'
+_module platform_edge_root platform_edge_bridge platform_edge_root_loaded any read-only 'platform_edge_root_loaded() { :; }'
+sed -i.bak 's/^optional=$/optional=platform_edge_blocked/' "$_project/shell/module.d/platform_edge_optional.meta"
 _module platform_user platform_other platform_user_loaded any read-only 'platform_user_loaded() { :; }
 printf "platform_user body\n" >>"'"$_tmp"'/blocked.trace"'
 _module platform_user_user platform_user platform_user_user_loaded any read-only 'platform_user_user_loaded() { :; }
@@ -180,6 +185,10 @@ _registry_row missing_export '' missing_export_loaded any read-only modules/miss
 _registry_row meta_child '' meta_child_loaded any read-only modules/meta_child.sh
 _registry_row meta_parent meta_child '' any read-only ''
 _registry_row platform_other '' platform_other_loaded "$_other_platform" read-only modules/platform_other.sh
+_registry_row platform_edge_blocked '' platform_edge_blocked_loaded "$_other_platform" read-only modules/platform_edge_blocked.sh
+_registry_row platform_edge_optional '' platform_edge_optional_loaded any read-only modules/platform_edge_optional.sh
+_registry_row platform_edge_bridge platform_edge_blocked platform_edge_bridge_loaded any read-only modules/platform_edge_bridge.sh
+_registry_row platform_edge_root platform_edge_bridge platform_edge_root_loaded any read-only modules/platform_edge_root.sh
 _registry_row capability_user '' capability_user_loaded any read-only modules/capability_user.sh
 _registry_row reload_probe '' reload_probe_loaded any read-only modules/reload_probe.sh
 _registry_row generated_bad '' generated_bad_loaded any generated-file modules/generated_bad.sh
@@ -197,6 +206,8 @@ _bundle_row missing missing_export
 _bundle_row meta meta_parent
 _bundle_row platform platform_other
 _bundle_row blocked-platform 'later_ok platform_user_user'
+_bundle_row platform-chain 'platform_user_user'
+_bundle_row platform-optional 'platform_edge_optional platform_edge_root'
 _bundle_row blocked-failed 'failed_user later_ok'
 _bundle_row blocked-meta 'meta_other_user'
 _bundle_row optional 'cross_user'
@@ -258,6 +269,8 @@ _assemble missing "$_tmp/release-missing"
 _assemble meta "$_tmp/release-meta"
 _assemble platform "$_tmp/release-platform"
 _assemble blocked-platform "$_tmp/release-blocked-platform"
+_assemble platform-chain "$_tmp/release-platform-chain"
+_assemble platform-optional "$_tmp/release-platform-optional"
 _assemble blocked-failed "$_tmp/release-blocked-failed"
 _assemble blocked-meta "$_tmp/release-blocked-meta"
 _assemble optional "$_tmp/release-optional"
@@ -702,6 +715,127 @@ else
   fail "repeated assemble produces an identical manifest"
   cat "$_tmp/reload-2.err" >&2
 fi
+
+
+# Loader and plan must reach the same outcome on the same project. Each case
+# runs one set of roots through both surfaces and compares the exit status and
+# the set of exports that survived, so a change to one engine that drifts from
+# the other fails here.
+_parity_loader() {
+  _pl_mode=$1
+  _pl_wanted=$2
+  _pl_out=$3
+  _pl_err=$4
+  PARITY_MODE=$_pl_mode PARITY_WANTED=$_pl_wanted PARITY_PROBES=$_parity_probes PARITY_ROOT=$_project/shell \
+    /bin/bash -c '
+      . "$1/lib/metadata.sh"
+      . "$1/lib/loader.sh"
+      _status=0
+      sp_loader_load_modules "$PARITY_ROOT" "$PARITY_WANTED" "$PARITY_MODE" ordinary || _status=$?
+      printf "status=%s\n" "$_status"
+      for _probe in $PARITY_PROBES; do
+        if command -v "$_probe" >/dev/null 2>&1; then
+          printf "probe_%s=yes\n" "$_probe"
+        else
+          printf "probe_%s=no\n" "$_probe"
+        fi
+      done
+      exit "$_status"
+    ' sh "$_repo" >"$_pl_out" 2>"$_pl_err"
+}
+
+_parity_plan() {
+  _pp_mode=$1
+  _pp_release=$2
+  _pp_out=$3
+  _pp_err=$4
+  VALISE_MODE=$_pp_mode VALISE_MODULE_ROOT=$_pp_release PARITY_PROBES=$_parity_probes \
+    /bin/bash -c '
+      . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+      _status=$?
+      printf "status=%s\n" "$_status"
+      for _probe in $PARITY_PROBES; do
+        if command -v "$_probe" >/dev/null 2>&1; then
+          printf "probe_%s=yes\n" "$_probe"
+        else
+          printf "probe_%s=no\n" "$_probe"
+        fi
+      done
+      exit "$_status"
+    ' >"$_pp_out" 2>"$_pp_err"
+}
+
+_parity_case() {
+  _pc_label=$1
+  _pc_mode=$2
+  _pc_release=$3
+  _pc_wanted=$4
+  _pc_probes=$5
+  _pc_expected=$6
+  _parity_probes=$_pc_probes
+  _parity_loader_out=$_tmp/parity-loader.out
+  _parity_loader_err=$_tmp/parity-loader.err
+  _parity_plan_out=$_tmp/parity-plan.out
+  _parity_plan_err=$_tmp/parity-plan.err
+  _pc_loader_status=0
+  _parity_loader "$_pc_mode" "$_pc_wanted" "$_parity_loader_out" "$_parity_loader_err" || _pc_loader_status=$?
+  _pc_plan_status=0
+  _parity_plan "$_pc_mode" "$_pc_release" "$_parity_plan_out" "$_parity_plan_err" || _pc_plan_status=$?
+  if [ "$_pc_loader_status" -eq "$_pc_plan_status" ] &&
+    [ "$_pc_loader_status" -eq "$_pc_expected" ] &&
+    cmp -s "$_parity_loader_out" "$_parity_plan_out"; then
+    pass "$_pc_label: loader and plan agree"
+  else
+    fail "$_pc_label: loader and plan agree"
+    printf 'loader status=%s plan status=%s expected=%s\n' \
+      "$_pc_loader_status" "$_pc_plan_status" "$_pc_expected" >&2
+    diff -u "$_parity_loader_out" "$_parity_plan_out" >&2 || :
+    cat "$_parity_loader_err" "$_parity_plan_err" >&2
+  fi
+}
+
+_parity_case 'runtime failure' strict "$_tmp/release-behavior" 'first_fail later_ok' 'later_ok_loaded' 1
+if grep -F 'first_fail' "$_parity_loader_err" >/dev/null &&
+  grep -F 'first_fail' "$_parity_plan_err" >/dev/null; then
+  pass 'runtime failure: both engines name the failing module'
+else
+  fail 'runtime failure: both engines name the failing module'
+  cat "$_parity_loader_err" "$_parity_plan_err" >&2
+fi
+
+_parity_case 'platform chain' strict "$_tmp/release-platform-chain" 'platform_user_user' \
+  'platform_other_loaded platform_user_loaded platform_user_user_loaded' 1
+if grep -F 'unsupported platform' "$_parity_loader_err" >/dev/null &&
+  grep -F 'unsupported platform' "$_parity_plan_err" >/dev/null; then
+  pass 'platform chain: both engines report the platform skip'
+else
+  fail 'platform chain: both engines report the platform skip'
+  cat "$_parity_loader_err" "$_parity_plan_err" >&2
+fi
+
+_parity_case 'platform optional-first' strict "$_tmp/release-platform-optional" \
+  'platform_edge_optional platform_edge_root' \
+  'platform_edge_optional_loaded platform_edge_bridge_loaded platform_edge_root_loaded platform_edge_blocked_loaded' 1
+if grep -F 'unsupported platform' "$_parity_loader_err" >/dev/null &&
+  grep -F 'unsupported platform' "$_parity_plan_err" >/dev/null; then
+  pass 'platform optional-first: both engines report the platform skip'
+else
+  fail 'platform optional-first: both engines report the platform skip'
+  cat "$_parity_loader_err" "$_parity_plan_err" >&2
+fi
+
+_parity_case 'optional dependencies' strict "$_tmp/release-optional" 'cross_user' \
+  'cross_user_loaded cross_here_loaded platform_other_loaded' 0
+if ! grep -F 'unsupported platform' "$_parity_loader_err" >/dev/null &&
+  ! grep -F 'unsupported platform' "$_parity_plan_err" >/dev/null; then
+  pass 'optional dependencies: the absent optional is silent on both engines'
+else
+  fail 'optional dependencies: the absent optional is silent on both engines'
+  cat "$_parity_loader_err" "$_parity_plan_err" >&2
+fi
+
+_parity_case 'optional dependencies permissive' permissive "$_tmp/release-optional" 'cross_user' \
+  'cross_user_loaded cross_here_loaded platform_other_loaded' 0
 
 printf '\n=== compiler-plan summary ===\n'
 printf 'Total: %d  Pass: %d  Skip: %d  Fail: %d\n' "$_total" "$_pass" "$_skip" "$_fail"

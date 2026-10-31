@@ -363,6 +363,7 @@ sp_loader_load_modules() {
   : >"$_spl_tmp/queue"
   : >"$_spl_tmp/modules"
   : >"$_spl_tmp/blocked"
+  : >"$_spl_tmp/platform_blocked"
   : >"$_spl_tmp/order"
   : >"$_spl_tmp/failed"
   : >"$_spl_tmp/layers"
@@ -662,11 +663,11 @@ sp_loader_load_modules() {
         continue
       fi
       if [ "$_spl_platform_match" -ne 1 ]; then
-        # A module reached only as an optional dependency is expected to be absent
-        # on some hosts. Reporting it would print at every shell startup.
-        case " $_spl_strict_required_words " in
-        *" $_spl_mod "*) command printf 'loader: %s\n' "$_spl_mod: unsupported platform for $_spl_current_platform" >&2 ;;
-        esac
+        # Record the skip; whether to report it depends on the complete
+        # required closure, which is only known after discovery. A module
+        # reached only as an optional dependency is expected to be absent on
+        # some hosts, and reporting it would print at every shell startup.
+        command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/platform_blocked"
         command printf '%s\n' "$_spl_mod" >>"$_spl_tmp/blocked"
         _spl_blocked_words="$_spl_blocked_words $_spl_mod"
         [ "$_spl_mode" = strict ] && case " $_spl_strict_required_words " in *" $_spl_mod "*) _spl_strict_error=1 ;; esac
@@ -755,6 +756,60 @@ sp_loader_load_modules() {
     command mv "$_spl_tmp/newqueue" "$_spl_tmp/queue"
   done
 
+  # Discovery can reach a module through an optional edge before a required
+  # edge promotes its parent. Re-walk the requires graph to a fixpoint so the
+  # required closure does not depend on discovery order.
+  if [ "$_spl_return" -eq 0 ]; then
+    if [ "${IFS+x}" = x ]; then
+      _spl_ifs_was_set=1
+      _spl_old_ifs=${IFS-}
+    else
+      _spl_ifs_was_set=0
+      _spl_old_ifs=
+    fi
+    IFS=' '
+    _spl_progress=1
+    while [ "$_spl_progress" -ne 0 ]; do
+      _spl_progress=0
+      for _spl_mod in $_spl_strict_required_words; do
+        [ -f "$_spl_tmp/deps/$_spl_mod" ] || continue
+        IFS= read -r _spl_requires <"$_spl_tmp/deps/$_spl_mod" || :
+        for _spl_dep in $_spl_requires; do
+          case " $_spl_strict_required_words " in
+          *" $_spl_dep "*) ;;
+          *)
+            _spl_strict_required_words="$_spl_strict_required_words $_spl_dep"
+            _spl_progress=1
+            ;;
+          esac
+        done
+      done
+    done
+    if [ "$_spl_ifs_was_set" -eq 1 ]; then
+      IFS=$_spl_old_ifs
+    else
+      unset IFS
+    fi
+    unset _spl_mod _spl_requires _spl_dep
+  fi
+
+  # A platform skip is reported only when the module belongs to the required
+  # closure. Discovery can reach a module through an optional edge before a
+  # required edge (or through a required edge that is itself discovered
+  # later), so the decision waits until every edge has been walked.
+  if [ "$_spl_return" -eq 0 ] && [ -s "$_spl_tmp/platform_blocked" ]; then
+    while IFS= read -r _spl_mod || [ -n "$_spl_mod" ]; do
+      [ -n "$_spl_mod" ] || continue
+      case " $_spl_strict_required_words " in
+      *" $_spl_mod "*)
+        command printf 'loader: %s\n' "$_spl_mod: unsupported platform for $_spl_current_platform" >&2
+        [ "$_spl_mode" = strict ] && _spl_strict_error=1
+        ;;
+      esac
+    done <"$_spl_tmp/platform_blocked"
+    unset _spl_mod
+  fi
+
   if [ "$_spl_return" -eq 0 ]; then
     command sort -u "$_spl_tmp/modules" >"$_spl_tmp/remaining"
     command sort -u "$_spl_tmp/blocked" >"$_spl_tmp/blocked.sorted"
@@ -833,6 +888,7 @@ sp_loader_load_modules() {
           _spl_blocked_words="$_spl_blocked_words $_spl_mod"
           command sort -u "$_spl_tmp/blocked" >"$_spl_tmp/blocked.sorted"
           command mv "$_spl_tmp/blocked.sorted" "$_spl_tmp/blocked"
+          [ "$_spl_mode" = strict ] && case " $_spl_strict_required_words " in *" $_spl_mod "*) _spl_strict_error=1 ;; esac
           _spl_progress=1
           continue
         fi

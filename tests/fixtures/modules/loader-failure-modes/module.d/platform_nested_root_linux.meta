@@ -1,0 +1,9 @@
+name=platform_nested_root_linux
+requires=zzz_platform_nested_bridge_linux
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=platform_nested_root_linux_loaded
+updates=
+load=modules/platform_nested_root_linux.sh
