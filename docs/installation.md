@@ -4,9 +4,7 @@
 need the platform utilities used by the release manifest and integrity checks
 (for example, a SHA-256 utility). Every documented command runs without
 Python 3. `explain-bundles` and `layer-lint` read the project's metadata
-directly; they fall back to a consumer's own Python validator only for
-projects that still use the older `bundles.json` and `hack/validate-layer.py`
-layout.
+directly.
 
 ## Install the CLI
 
@@ -41,26 +39,16 @@ packed CLI without a registry, and loads a module from the extracted package.
 ## Shell integration
 
 `valise install` installs the release described by the manifest in the
-current project and deploys shell integration. The mode is selected with
-`--integration=<mode>`:
-
-- `auto` (the default) deploys a POSIX snippet for bash, zsh, or ksh when
-  that shell is named by `$SHELL`, and a Fish `conf.d` hook when it finds
-  Fish in a trusted system path. On macOS the POSIX snippet goes to
-  `.bash_profile`, `.zprofile`, or `.kshrc`; on other systems it goes to
-  `.bashrc`, `.zshrc`, or `.kshrc`.
-- `profile` deploys one shared snippet to `~/.profile` and nothing else.
-  `~/.profile` is read by several shells — bash reads it for login shells
-  when no `.bash_profile` or `.bash_login` exists, and ksh reads it too —
-  so it is the recommended target for a multi-shell POSIX setup. The
-  snippet detects the running shell when it runs and loads nothing for
-  shells without a plan. Creating `.bash_profile` stops bash from reading
-  `~/.profile`, so do not create one just to hold valise integration.
-- `none` writes no startup file. `--no-shell-integration` is the
-  equivalent legacy spelling.
+current project and deploys shell integration automatically. A managed block
+is written to `~/.profile`; to the first of `~/.bash_profile` and
+`~/.bash_login` that exists, because it shadows `~/.profile` for bash; to
+`~/.bashrc` and `~/.zshrc` when that shell is `$SHELL` or the file exists;
+and to `~/.zprofile` when zsh is installed or the file exists. A Fish
+`conf.d` hook is written when Fish is installed. `--no-integration` writes
+no startup file and no Fish hook.
 
 The POSIX snippet works with either release shape. A compiled release —
-one built by `valise assemble` — carries `generated/installed-modules.<shell>`
+one built by `valise build` — carries `generated/installed-modules.<shell>`
 plans; an engine release — one that ships `entrypoints/profile.sh` and the
 loader — carries the loader instead. The snippet prefers the compiled plan
 and falls back to the loader entrypoint, so installing a release never
@@ -73,10 +61,10 @@ idempotent. Symlinked POSIX profile files are left alone. Install prints
 which file was written and how to remove the integration.
 
 Zsh does not read `~/.profile` on its own: zsh login shells read
-`.zprofile`, not `~/.profile`. The project command `valise apply` therefore
-also writes a one-line managed pointer `~/.zprofile` that sources
-`~/.profile` whenever it writes the `~/.profile` integration and zsh is
-present. Users who integrate by hand add the same line themselves.
+`.zprofile`, not `~/.profile`. When zsh is present, install writes the same
+managed block to `~/.zprofile` as it does to the other startup files, so zsh
+needs no separate pointer. Users who integrate by hand paste the block into
+`~/.zprofile` themselves.
 
 To print a POSIX integration snippet without editing a startup file, run
 `valise init` once and paste its output where you want it:
@@ -110,11 +98,11 @@ Two options adjust its scope:
 - `--no-integration` skips the startup-file check and reports only the
   release.
 
-`valise verify-active` runs the release verification without sourcing shell
+`valise release verify` runs the release verification without sourcing shell
 code:
 
 ```sh
-valise verify-active
+valise release verify
 ```
 
 The development-only `valise init fish --source-tree` mode skips installed
@@ -144,13 +132,13 @@ Install and verify from the tree root:
 ```sh
 cd mytree
 valise install
-valise verify-active
+valise release verify
 ```
 
 Install stages a sealed, read-only copy under the XDG data directory and
-updates the active symlink. `verify-active` checks the installed bytes against
+updates the active symlink. `release verify` checks the installed bytes against
 their manifest. Fish repeats that check at startup; the POSIX startup snippets
-do not, so run `verify-active` separately if you need a check before sourcing
+do not, so run `release verify` separately if you need a check before sourcing
 in a POSIX shell.
 
 The engine does not build a consuming project's module catalog or release
@@ -182,11 +170,11 @@ The active path is a symlink to the selected release.
 
 ## Managing installed releases
 
-`valise variant list` shows the installed releases and marks the active one.
-`valise variant use <release-id>` points the active symlink at an existing
+`valise release list` shows the installed releases and marks the active one.
+`valise release use <release-id>` points the active symlink at an existing
 release.
 
-`valise variant prune --keep=<n>` removes old releases. It always keeps the
+`valise release prune --keep=<n>` removes old releases. It always keeps the
 active release and the `n` newest others, and it never removes a release that
 fails verification against its own manifest — a release that cannot be
 verified is reported and kept, so a damaged tree is not silently discarded.
@@ -198,7 +186,7 @@ Every command prints its own contract:
 
 ```sh
 valise compile --help
-valise assemble --help
+valise build --help
 valise install --help
 ```
 
@@ -211,12 +199,10 @@ reinstall the tarball. `valise install` updates the active profile release;
 it does not update the CLI itself.
 
 There is no `valise uninstall` command. Before removing the CLI, remove the
-managed integration from your shell startup file: in `~/.profile` (and the
-`~/.zprofile` pointer written by `valise apply`), delete only the block
-between `# BEGIN valise managed block` and `# END valise managed block`; in
-the shell-specific file written by `install --integration=auto`, delete the
-lines beginning `# valise shell integration — managed by valise install`;
-for Fish, remove
+managed integration from every startup file valise wrote: delete only the
+block between `# BEGIN valise managed block` and `# END valise managed
+block` in `~/.profile` and in any of `~/.bash_profile`, `~/.bash_login`,
+`~/.bashrc`, `~/.zshrc`, and `~/.zprofile`. For Fish, remove
 `${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/valise.fish` if it is still
 the valise-managed hook. Then uninstall the CLI and remove the valise XDG
 state. Installed release files are read-only, so make them writable first:

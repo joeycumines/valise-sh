@@ -45,7 +45,7 @@ export PATH="$PWD/bin:$PATH"
   # Build, install, and verify the sample release.
   sh examples/e2e/build-manifest.sh
   (cd examples/e2e && valise install)
-  valise verify-active
+  valise release verify
 
   # Load two shipped utilities from the installed release.
   _active=$(cd "$XDG_CONFIG_HOME/valise/active" && pwd -P)
@@ -81,7 +81,7 @@ roots, variants, and `project.conf`. Add modules with `valise module new`,
 then build and install:
 
 ```sh
-valise build   # assemble a release under build/release/
+valise build   # build a release under build/release/
 valise apply   # install it and write the managed block into ~/.profile
 ```
 
@@ -104,12 +104,12 @@ explains what the generated release contains.
   instead of platform-specific commands.
 - `lib/fish/` — native Fish loader and metadata reader. The Fish path never
   sources POSIX shell bodies.
-- `bin/valise` — the CLI: init, install, verify-active, doctor, variant,
-  make-manifest, registry, new, module, build, apply, status, compile,
-  assemble, explain-variant, explain-bundles, layer-lint, version.
-  `init`, `install`, `verify-active`, `doctor`, `variant`, `make-manifest`,
-  `new`, and `version` run from a bare checkout. `registry`, `module`,
-  `build`, `apply`, `status`, `compile`, `assemble`, `explain-variant`,
+- `bin/valise` — the CLI: init, install, release, doctor, make-manifest,
+  registry, new, module, build, apply, status, compile, explain-variant,
+  explain-bundles, layer-lint, version.
+  `init`, `install`, `release`, `doctor`, `make-manifest`, `new`, and
+  `version` run from a bare checkout. `registry`, `module`, `build`, `apply`,
+  `status`, `compile`, `explain-variant`,
   `explain-bundles`, and `layer-lint` require the consuming project's source
   tree (see [docs/variants.md](docs/variants.md) and
   [docs/contrib-modules.md](docs/contrib-modules.md)). No command requires

@@ -166,7 +166,7 @@ The supported composition is a primary consumer root plus one
 version-pinned layer root per provider.
 The provider tree is vendored under `layer/<name>/` of the release
 (preserving its internal `module.d/` + `modules/` layout), and a single
-manifest covers the whole closure, so `verify-active` checks consumer
+manifest covers the whole closure, so `release verify` checks consumer
 and provider bytes together before anything is sourced.
 
 - Pinning: record the provider source and revision beside the vendored

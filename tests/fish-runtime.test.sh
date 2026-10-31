@@ -141,7 +141,7 @@ _meta "$_fixture/module.d/return_app.meta" return_app fish any read-only return_
 _body "$_fixture/modules/fish/return_app.fish" 'function return_app_loaded; end'
 _meta "$_fixture/module.d/hijack.meta" hijack fish any read-only hijack_loaded modules/fish/hijack.fish
 _body "$_fixture/modules/fish/hijack.fish" 'function contains; return 0; end; function cd; return 1; end; function hijack_loaded; end'
-# Namespace mutation is assembled dynamically so lexical preflight cannot
+# Namespace mutation is built dynamically so lexical preflight cannot
 # recognize the Fish namespace command or erase option. Runtime integrity must
 # therefore fail closed after the embedded cd has been replaced.
 _meta "$_fixture/module.d/indirect_cd.meta" indirect_cd fish any read-only indirect_cd_loaded modules/fish/indirect_cd.fish
@@ -627,7 +627,7 @@ if ! /usr/bin/env -i HOME="$_metadata_poison_home" TMPDIR="${TMPDIR:-/tmp}" PATH
   exit 1
 fi
 
-# Generated metadata is executable Fish source. Assemble the namespace command
+# Generated metadata is executable Fish source. Build the namespace command
 # and erase option dynamically so lexical preflight cannot identify them; the
 # post-source indexed provenance check must terminate the child with 125.
 _metadata_dynamic_root="$_test_root/metadata-dynamic"

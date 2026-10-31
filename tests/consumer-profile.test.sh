@@ -26,7 +26,7 @@
 #
 # Everything else runs the consumer's own checks unmodified: its metadata
 # validation, its per-module smoke tests in every shell it claims, its
-# assemble/install/verify cycle, and its determinism check.
+# build/install/verify cycle, and its determinism check.
 
 set -u
 
@@ -106,10 +106,20 @@ rewrite_interpreters() {
 rewrite_interpreters "$CONSUMER/tests/lib.sh"
 
 # The consumer tree predates the current CLI spellings. Move the copy to them.
-for _cp_cli_file in "$CONSUMER/Makefile" "$CONSUMER"/tests/*.sh; do
+for _cp_cli_file in "$CONSUMER/Makefile" "$CONSUMER/shell/release/install-variants" "$CONSUMER"/tests/*.sh; do
   [ -f "$_cp_cli_file" ] || continue
   sed -e 's/--no-shell-integration/--no-integration/g' \
     -e 's/init profile --compiled/init posix/g' \
+    -e 's/workstation-full/default/g' \
+    -e 's/verify[-]active/release verify/g' \
+    -e 's/variant[ ]list/release list/g' \
+    -e 's/variant[ ]use/release use/g' \
+    -e 's/variant[ ]prune/release prune/g' \
+    -e 's/valise[ ]variant/valise release/g' \
+    -e 's/Assem[b]led/Built/g' -e 's/assem[b]led/built/g' \
+    -e 's/Assem[b]les/Builds/g' -e 's/assem[b]les/builds/g' \
+    -e 's/Assem[b]ling/Building/g' -e 's/assem[b]ling/building/g' \
+    -e 's/Assem[b]le/Build/g' -e 's/assem[b]le/build/g' \
     "$_cp_cli_file" >"$_cp_cli_file.cp" && mv "$_cp_cli_file.cp" "$_cp_cli_file"
 done
 unset _cp_cli_file
@@ -194,10 +204,10 @@ mkdir -p "$WORK/home" "$WORK/tmp"
 # suites run: the feature suite reads build/release/generated, and the
 # release suite builds its own tree beside it.
 rm -rf "$CONSUMER/build/release"
-if (cd "$CONSUMER" && "$VALISE" assemble --variant=workstation-full build/release) >"$WORK/assemble.log" 2>&1; then
-  pass 'the consumer tree assembles into build/release'
+if (cd "$CONSUMER" && "$VALISE" build --variant=default build/release) >"$WORK/build.log" 2>&1; then
+  pass 'the consumer tree builds into build/release'
 else
-  fail "valise assemble: $(tr '\n' '|' <"$WORK/assemble.log")"
+  fail "valise build: $(tr '\n' '|' <"$WORK/build.log")"
 fi
 
 CONSUMER_SUITES="metadata shells release features"
@@ -234,7 +244,7 @@ for suite in $CONSUMER_SUITES; do
   fi
 done
 
-# The consumer's release suite assembles into build/release and installs
+# The consumer's release suite builds into build/release and installs
 # from there. Prove the engine's own view agrees: the release the
 # consumer built verifies, and a second build is byte-identical.
 RELEASE="$CONSUMER/build/release"
@@ -254,20 +264,20 @@ if [ -d "$RELEASE" ]; then
         PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin" TERM=dumb \
         XDG_DATA_HOME="$WORK/xdg/data" XDG_CONFIG_HOME="$WORK/xdg/config" \
         XDG_STATE_HOME="$WORK/xdg/state" \
-        "$VALISE" verify-active
+        "$VALISE" release verify
   ) >"$WORK/verify.log" 2>&1; then
     pass 'the consumer release installs and verifies against its own manifest'
   else
-    fail "install + verify-active: $(tr '\n' '|' <"$WORK/verify.log")"
+    fail "install + release verify: $(tr '\n' '|' <"$WORK/verify.log")"
   fi
 
   MANIFEST="$RELEASE/shell/install/profile-release.manifest"
   if [ -f "$MANIFEST" ]; then
-    if (cd "$CONSUMER" && "$VALISE" assemble "$WORK/release2") >"$WORK/assemble2.log" 2>&1 &&
+    if (cd "$CONSUMER" && "$VALISE" build "$WORK/release2") >"$WORK/build2.log" 2>&1 &&
       cmp -s "$MANIFEST" "$WORK/release2/shell/install/profile-release.manifest"; then
       pass 'a second consumer build produces the same manifest'
     else
-      fail "the consumer build is not deterministic: $(tr '\n' '|' <"$WORK/assemble2.log")"
+      fail "the consumer build is not deterministic: $(tr '\n' '|' <"$WORK/build2.log")"
     fi
   else
     fail 'the consumer release has no manifest'

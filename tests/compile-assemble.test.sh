@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: MIT
 # Contract test for the compiled-plan consumer workflow: package-install
 # symlink resolution, bundle roots without a Python release compiler, the
-# assembled release tree, compiled-plan cleanup, and the integration targets
+# built release tree, compiled-plan cleanup, and the integration targets
 # that the consumer owns.
 set -eu
 
@@ -47,11 +47,11 @@ chmod 0755 "$_pkg/bin/valise"
 ln -s "$_pkg/bin/valise" "$_link"
 
 # A valid source tree above the package must not win over the project root.
-# Compile resolves from the working tree first so assemble packages the same
+# Compile resolves from the working tree first so build packages the same
 # prelude the plan was built against.
 mkdir -p "$_test_root/shell/release"
 printf 'name\tversion\tside_effect\trequires\toptional\tshells\tplatforms\texports\tload\tupdates\tsource\n'   >"$_test_root/shell/release/module-registry.tsv"
-printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tDecoy\t\n'   >"$_test_root/shell/release/install-variants"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tDecoy\t\n'   >"$_test_root/shell/release/install-variants"
 
 cat >"$_project/shell/module.d/root.meta" <<'EOF'
 name=root
@@ -119,13 +119,13 @@ done
 
 {
   printf 'variant_name\tdescription\texcluded_modules\n'
-  printf 'workstation-full\tAll\t\n'
+  printf 'default\tAll\t\n'
 } >"$_project/shell/release/install-variants"
 
-printf '=== valise compile/assemble consumer contract ===\n'
+printf '=== valise compile/build consumer contract ===\n'
 printf '  project: %s\n\n' "$_project"
 
-# Compile through a symlink, with no hack/compile-shell-profile-release.py,
+# Compile through a symlink, with no consumer compiler fallback,
 # from a relative output directory, using bare bundle seeds. The vendor layer
 # must land under layers/vendor/ rather than the contrib default.
 if (cd "$_project" && "$_link" compile --bundle=default rel-out) >"$_test_root/compile.out" 2>"$_test_root/compile.err"; then
@@ -207,40 +207,40 @@ else
   cat "$_test_root/compile-root.err" >&2
 fi
 
-# Assemble the whole release tree twice. The plans must load, and the two
+# Build the whole release tree twice. The plans must load, and the two
 # manifests must be byte-identical.
 for _n in 1 2; do
-  if (cd "$_project" && "$_link" assemble --bundle=default "build/release$_n") \
-    >"$_test_root/assemble$_n.out" 2>"$_test_root/assemble$_n.err"; then
-    pass "assemble builds release tree $_n"
+  if (cd "$_project" && "$_link" build --bundle=default "build/release$_n") \
+    >"$_test_root/build$_n.out" 2>"$_test_root/build$_n.err"; then
+    pass "build builds release tree $_n"
   else
-    fail "assemble builds release tree $_n"
-    cat "$_test_root/assemble$_n.err" >&2
+    fail "build builds release tree $_n"
+    cat "$_test_root/build$_n.err" >&2
   fi
 done
-if (cd "$_project" && "$_link" assemble --bundle=default "build/../dot-release") \
-  >"$_test_root/assemble-dot.out" 2>"$_test_root/assemble-dot.err" &&
+if (cd "$_project" && "$_link" build --bundle=default "build/../dot-release") \
+  >"$_test_root/build-dot.out" 2>"$_test_root/build-dot.err" &&
   [ -f "$_project/dot-release/generated/installed-modules.bash" ]; then
-  pass "assemble normalizes dot segments in an output path"
+  pass "build normalizes dot segments in an output path"
 else
-  fail "assemble normalizes dot segments in an output path"
-  cat "$_test_root/assemble-dot.err" >&2
+  fail "build normalizes dot segments in an output path"
+  cat "$_test_root/build-dot.err" >&2
 fi
 
-mkdir -p "$_project/empty-assemble"
-if (cd "$_project" && "$_link" assemble --bundle=default "empty-assemble/../empty-assemble")   >"$_test_root/assemble-empty.out" 2>"$_test_root/assemble-empty.err" &&
-  [ -f "$_project/empty-assemble/generated/installed-modules.bash" ]; then
-  pass "assemble accepts an existing empty dot-path destination"
+mkdir -p "$_project/empty-build"
+if (cd "$_project" && "$_link" build --bundle=default "empty-build/../empty-build")   >"$_test_root/build-empty.out" 2>"$_test_root/build-empty.err" &&
+  [ -f "$_project/empty-build/generated/installed-modules.bash" ]; then
+  pass "build accepts an existing empty dot-path destination"
 else
-  fail "assemble accepts an existing empty dot-path destination"
-  cat "$_test_root/assemble-empty.err" >&2
+  fail "build accepts an existing empty dot-path destination"
+  cat "$_test_root/build-empty.err" >&2
 fi
-if (cd "$_project" && "$_link" assemble --bundle=default "$_project/absolute-release")   >"$_test_root/assemble-absolute.out" 2>"$_test_root/assemble-absolute.err" &&
+if (cd "$_project" && "$_link" build --bundle=default "$_project/absolute-release")   >"$_test_root/build-absolute.out" 2>"$_test_root/build-absolute.err" &&
   [ -f "$_project/absolute-release/generated/installed-modules.bash" ]; then
-  pass "assemble accepts an absolute output path"
+  pass "build accepts an absolute output path"
 else
-  fail "assemble accepts an absolute output path"
-  cat "$_test_root/assemble-absolute.err" >&2
+  fail "build accepts an absolute output path"
+  cat "$_test_root/build-absolute.err" >&2
 fi
 
 _release="$_project/build/release1"
@@ -266,16 +266,16 @@ for _file in \
   shell/release/bundle-roots \
   shell/install/profile-release.manifest; do
   if [ -f "$_release/$_file" ]; then
-    pass "assembled tree contains $_file"
+    pass "built tree contains $_file"
   else
-    fail "assembled tree contains $_file"
+    fail "built tree contains $_file"
   fi
 done
 if cmp -s "$_release/shell/install/profile-release.manifest" \
   "$_project/build/release2/shell/install/profile-release.manifest"; then
-  pass "repeated assemble produces a byte-identical manifest"
+  pass "repeated build produces a byte-identical manifest"
 else
-  fail "repeated assemble produces a byte-identical manifest"
+  fail "repeated build produces a byte-identical manifest"
 fi
 
 # Metadata is the source of truth. An invalid module name must fail before any
@@ -292,19 +292,19 @@ exports=
 updates=
 load=modules/root.sh
 EOF
-if (cd "$_project" && "$_link" assemble --bundle=default build/escape) \
-  >"$_test_root/assemble-escape.out" 2>"$_test_root/assemble-escape.err"; then
-  fail "assemble rejects an invalid metadata module name"
+if (cd "$_project" && "$_link" build --bundle=default build/escape) \
+  >"$_test_root/build-escape.out" 2>"$_test_root/build-escape.err"; then
+  fail "build rejects an invalid metadata module name"
 elif ! grep -F 'metadata: invalid module name: ../pwned' \
-  "$_test_root/assemble-escape.err" >/dev/null 2>&1 ||
+  "$_test_root/build-escape.err" >/dev/null 2>&1 ||
   ! grep -F 'valise: error: shell/module.d/pwned.meta: invalid metadata' \
-  "$_test_root/assemble-escape.err" >/dev/null 2>&1; then
-  fail "assemble rejects an invalid metadata module name (wrong diagnostic)"
-  cat "$_test_root/assemble-escape.err" >&2
+  "$_test_root/build-escape.err" >/dev/null 2>&1; then
+  fail "build rejects an invalid metadata module name (wrong diagnostic)"
+  cat "$_test_root/build-escape.err" >&2
 elif [ -e "$_project/build/escape" ]; then
-  fail "assemble rejects an invalid metadata module name (published output)"
+  fail "build rejects an invalid metadata module name (published output)"
 else
-  pass "assemble rejects an invalid metadata module name"
+  pass "build rejects an invalid metadata module name"
 fi
 rm -f "$_project/shell/module.d/pwned.meta"
 
@@ -324,45 +324,20 @@ EOF
 cat >"$_project/shell/modules/evil.sh" <<'EOF'
 evil_loaded() { :; }
 EOF
-if (cd "$_project" && "$_link" assemble --bundle=default build/load-escape) \
-  >"$_test_root/assemble-load-escape.out" 2>"$_test_root/assemble-load-escape.err"; then
-  fail "assemble rejects a metadata load path containing a parent segment"
+if (cd "$_project" && "$_link" build --bundle=default build/load-escape) \
+  >"$_test_root/build-load-escape.out" 2>"$_test_root/build-load-escape.err"; then
+  fail "build rejects a metadata load path containing a parent segment"
 elif ! grep -F 'metadata: invalid relative path: modules/../evil.sh' \
-  "$_test_root/assemble-load-escape.err" >/dev/null 2>&1 ||
+  "$_test_root/build-load-escape.err" >/dev/null 2>&1 ||
   ! grep -F 'valise: error: shell/module.d/trav.meta: invalid metadata' \
-  "$_test_root/assemble-load-escape.err" >/dev/null 2>&1; then
-  fail "assemble rejects a metadata load path containing a parent segment (wrong diagnostic)"
-  cat "$_test_root/assemble-load-escape.err" >&2
+  "$_test_root/build-load-escape.err" >/dev/null 2>&1; then
+  fail "build rejects a metadata load path containing a parent segment (wrong diagnostic)"
+  cat "$_test_root/build-load-escape.err" >&2
 else
-  pass "assemble rejects a metadata load path containing a parent segment"
+  pass "build rejects a metadata load path containing a parent segment"
 fi
 rm -f "$_project/shell/module.d/trav.meta"
 rm -f "$_project/shell/modules/evil.sh"
-
-# A consumer may vendor the prelude as a submodule. Compile uses it, so
-# assemble must package that same file rather than the engine copy.
-mkdir -p "$_project/submodule/valise-sh/lib"
-cat >"$_project/submodule/valise-sh/lib/capabilities.sh" <<'EOF'
-sp_cap_submodule_marker() { :; }
-EOF
-if (cd "$_project" && "$_link" assemble --bundle=default build/submodule) \
-  >"$_test_root/assemble-submodule.out" 2>"$_test_root/assemble-submodule.err" &&
-  grep -F 'sp_cap_submodule_marker' "$_project/build/submodule/vendor/shell-profile/lib/capabilities.sh" >/dev/null 2>&1 &&
-  ! grep -F 'sp_cap_os()' "$_project/build/submodule/vendor/shell-profile/lib/capabilities.sh" >/dev/null 2>&1; then
-  pass "assemble packages the submodule prelude selected by compile"
-else
-  fail "assemble packages the submodule prelude selected by compile"
-  cat "$_test_root/assemble-submodule.err" >&2
-fi
-if VALISE_MODULE_ROOT="$_project/build/submodule" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash" || exit 1
-  command -v sp_cap_submodule_marker >/dev/null 2>&1 || exit 2
-' >"$_test_root/plan-submodule.out" 2>"$_test_root/plan-submodule.err"; then
-  pass "compiled plan keeps the submodule prelude available"
-else
-  fail "compiled plan keeps the submodule prelude available"
-  cat "$_test_root/plan-submodule.err" >&2
-fi
 
 # Source the compiled plan directly. Capability prelude functions remain
 # available to module functions after the plan finishes.
@@ -628,43 +603,43 @@ else
   cat "$_test_root/profile-dash-source.err" >&2
 fi
 
-# An assembled release carries compiled plans but no loader entrypoint. The
+# A built release carries compiled plans but no loader entrypoint. The
 # shell-specific startup file the default (auto) integration writes must load
 # the compiled plan instead of leaving a file that loads nothing.
-_assembled_auto_home="$_test_root/home-assembled-auto"
-mkdir -p "$_assembled_auto_home"
-if (cd "$_release" && HOME="$_assembled_auto_home" XDG_DATA_HOME="$_assembled_auto_home/.local/share" \
-  XDG_CONFIG_HOME="$_assembled_auto_home/.config" XDG_STATE_HOME="$_assembled_auto_home/.local/state" \
-  SHELL=/bin/bash "$_link" install) >"$_test_root/install-assembled-auto.out" 2>&1; then
-  pass "install succeeds for an assembled release"
+_built_auto_home="$_test_root/home-built-auto"
+mkdir -p "$_built_auto_home"
+if (cd "$_release" && HOME="$_built_auto_home" XDG_DATA_HOME="$_built_auto_home/.local/share" \
+  XDG_CONFIG_HOME="$_built_auto_home/.config" XDG_STATE_HOME="$_built_auto_home/.local/state" \
+  SHELL=/bin/bash "$_link" install) >"$_test_root/install-built-auto.out" 2>&1; then
+  pass "install succeeds for a built release"
 else
-  fail "install succeeds for an assembled release"
-  cat "$_test_root/install-assembled-auto.out" >&2
+  fail "install succeeds for a built release"
+  cat "$_test_root/install-built-auto.out" >&2
 fi
-_assembled_auto_profile="$_assembled_auto_home/.bashrc"
-if [ -f "$_assembled_auto_profile" ] &&
-  HOME="$_assembled_auto_home" XDG_CONFIG_HOME="$_assembled_auto_home/.config" \
+_built_auto_profile="$_built_auto_home/.bashrc"
+if [ -f "$_built_auto_profile" ] &&
+  HOME="$_built_auto_home" XDG_CONFIG_HOME="$_built_auto_home/.config" \
   /bin/bash -c '. "$1"; command -v root_ready >/dev/null 2>&1; command -v vendor_tool_ready >/dev/null 2>&1' \
-  sh "$_assembled_auto_profile" >"$_test_root/assembled-auto-bash.out" 2>"$_test_root/assembled-auto-bash.err"; then
-  pass "auto integration loads an assembled release through the compiled plan"
+  sh "$_built_auto_profile" >"$_test_root/built-auto-bash.out" 2>"$_test_root/built-auto-bash.err"; then
+  pass "auto integration loads a built release through the compiled plan"
 else
-  fail "auto integration loads an assembled release through the compiled plan"
-  cat "$_test_root/assembled-auto-bash.err" >&2
+  fail "auto integration loads a built release through the compiled plan"
+  cat "$_test_root/built-auto-bash.err" >&2
 fi
 
-# variant list must mark the release the active link names, not merely any
+# release list must mark the release the active link names, not merely any
 # installed release.
 _active_target=$(readlink "$_int_home/.config/valise/active") || _active_target=
 _active_name=${_active_target##*/}
 mkdir -p "$_int_home/.local/share/valise/releases/inactive-release"
 if HOME="$_int_home" XDG_DATA_HOME="$_int_home/.local/share" \
   XDG_CONFIG_HOME="$_int_home/.config" XDG_STATE_HOME="$_int_home/.local/state" \
-  "$_link" variant list >"$_test_root/variant-list.out" 2>&1 &&
+  "$_link" release list >"$_test_root/variant-list.out" 2>&1 &&
   grep -F "* $_active_name (active)" "$_test_root/variant-list.out" >/dev/null 2>&1 &&
   grep -F '  inactive-release' "$_test_root/variant-list.out" >/dev/null 2>&1; then
-  pass "variant list marks the active release"
+  pass "release list marks the active release"
 else
-  fail "variant list marks the active release"
+  fail "release list marks the active release"
   cat "$_test_root/variant-list.out" >&2
 fi
 
@@ -706,11 +681,11 @@ EOF
 printf 'vendor_ready() { :; }\n' >"$_exclude_project/shell/layers/vendor/modules/shared/contrib_shared_name.sh"
 printf '# bundle\tshell\troots\ndefault\tbash\troot contrib_shared_name@shell/layers/vendor/module.d\ndefault\tzsh\troot contrib_shared_name@shell/layers/vendor/module.d\ndefault\tksh\troot contrib_shared_name@shell/layers/vendor/module.d\n' \
   >"$_exclude_project/shell/release/bundle-roots"
-printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll\t\nworkstation-lean\tNo provider layer\tcontrib_shared_name@shell/layers/vendor/module.d\n' \
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\nworkstation-lean\tNo provider layer\tcontrib_shared_name@shell/layers/vendor/module.d\n' \
   >"$_exclude_project/shell/release/install-variants"
 
 (cd "$_exclude_project" && "$_link" registry) >/dev/null 2>&1
-if (cd "$_exclude_project" && "$_link" compile --variant=workstation-full full-out) >"$_test_root/exclude-full.out" 2>&1 &&
+if (cd "$_exclude_project" && "$_link" compile --variant=default full-out) >"$_test_root/exclude-full.out" 2>&1 &&
   grep -F '# order=contrib_shared_name root' "$_exclude_project/full-out/installed-modules.bash" >/dev/null 2>&1; then
   pass "the full variant keeps the provider layer module"
 else
@@ -773,7 +748,7 @@ fi
 # that the exclusion did not name.
 printf '# bundle\tshell\troots\ndefault\tbash\troot contrib_shared_name@shell/layers/vendor/module.d\ndefault\tzsh\troot contrib_shared_name@shell/layers/vendor/module.d\ndefault\tksh\troot contrib_shared_name@shell/layers/vendor/module.d\n' \
   >"$_exclude_project/shell/release/bundle-roots"
-printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll\t\nworkstation-lean\tNo primary root\troot\n' \
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\nworkstation-lean\tNo primary root\troot\n' \
   >"$_exclude_project/shell/release/install-variants"
 if (cd "$_exclude_project" && "$_link" compile --variant=workstation-lean lean-bare-out) >"$_test_root/exclude-bare.out" 2>&1; then
   if grep -F '# order=contrib_shared_name' "$_exclude_project/lean-bare-out/installed-modules.bash" >/dev/null 2>&1 &&
@@ -805,7 +780,7 @@ EOF
 printf 'needs_vendor_ready() { :; }\n' >"$_exclude_project/shell/modules/needs_vendor.sh"
 printf '# bundle\tshell\troots\ndefault\tbash\tneeds_vendor\ndefault\tzsh\tneeds_vendor\ndefault\tksh\tneeds_vendor\n' \
   >"$_exclude_project/shell/release/bundle-roots"
-printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll\t\nworkstation-lean\tNo provider layer\tcontrib_shared_name@shell/layers/vendor/module.d\n' \
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\nworkstation-lean\tNo provider layer\tcontrib_shared_name@shell/layers/vendor/module.d\n' \
   >"$_exclude_project/shell/release/install-variants"
 (cd "$_exclude_project" && "$_link" registry) >/dev/null 2>&1
 if (cd "$_exclude_project" && "$_link" compile --variant=workstation-lean broken-out) >"$_test_root/exclude-broken.out" 2>&1; then
@@ -822,6 +797,66 @@ else
   cat "$_test_root/exclude-broken.out" >&2
 fi
 
-printf '\n=== valise compile/assemble summary ===\n'
+# A previous successful build must survive a bad variant or bundle: the
+# default output is replaced only after the new tree has compiled.
+if (cd "$_project" && "$_link" build --variant=default >/dev/null 2>&1); then
+  _kept_plan="$_project/build/release/generated/installed-modules.bash"
+  if (cd "$_project" && "$_link" build --variant=no-such-variant) >"$_test_root/typo-variant.out" 2>"$_test_root/typo-variant.err"; then
+    fail "a typo variant does not build"
+  elif [ -f "$_kept_plan" ]; then
+    pass "a typo variant preserves the previous build output"
+  else
+    fail "a typo variant preserves the previous build output"
+  fi
+  printf 'broken\tBroken\tno_such_module\n' >>"$_project/shell/release/install-variants"
+  if (cd "$_project" && "$_link" build --variant=broken) >"$_test_root/typo-exclusion.out" 2>"$_test_root/typo-exclusion.err"; then
+    fail "a variant with a bad exclusion does not build"
+  elif [ -f "$_kept_plan" ]; then
+    pass "a variant with a bad exclusion preserves the previous build output"
+  else
+    fail "a variant with a bad exclusion preserves the previous build output"
+  fi
+  printf 'broken-bundle\tbash\tmissing_root\nbroken-bundle\tzsh\tmissing_root\nbroken-bundle\tksh\tmissing_root\n' >>"$_project/shell/release/bundle-roots"
+  if (cd "$_project" && "$_link" build --bundle=broken-bundle) >"$_test_root/typo-bundle.out" 2>"$_test_root/typo-bundle.err"; then
+    fail "a bundle with a missing root does not build"
+  elif [ -f "$_kept_plan" ]; then
+    pass "a bundle with a missing root preserves the previous build output"
+  else
+    fail "a bundle with a missing root preserves the previous build output"
+  fi
+else
+  fail "baseline build before the failed-build tests"
+fi
+
+# An explicit output inside the project must not traverse a symlink.
+_external_explicit="$_test_root/external-explicit-parent"
+mkdir -p "$_external_explicit/out"
+ln -sfn "$_external_explicit" "$_project/explicit-link"
+if (cd "$_project" && "$_link" build explicit-link/out) >"$_test_root/explicit-symlink.out" 2>"$_test_root/explicit-symlink.err"; then
+  fail "build refuses an explicit output through a symlink"
+elif [ -d "$_external_explicit/out" ]; then
+  pass "build refuses an explicit output through a symlink"
+else
+  fail "build refuses an explicit output through a symlink"
+fi
+rm -f "$_project/explicit-link"
+
+# Clearing build/release must not follow a symlinked build parent outside the
+# project: the default output is validated as a physical path first.
+_external_build="$_test_root/external-build-parent"
+mkdir -p "$_external_build/release"
+printf '%s\n' keep >"$_external_build/release/sentinel"
+rm -rf "$_project/build"
+ln -sfn "$_external_build" "$_project/build"
+if (cd "$_project" && "$_link" build) >"$_test_root/symlink-build.out" 2>"$_test_root/symlink-build.err"; then
+  fail "build refuses a symlinked build parent"
+elif [ -f "$_external_build/release/sentinel" ]; then
+  pass "build refuses a symlinked build parent and preserves its data"
+else
+  fail "build refuses a symlinked build parent and preserves its data"
+fi
+rm -f "$_project/build"
+
+printf '\n=== valise compile/build summary ===\n'
 printf 'Total: %d  Pass: %d  Skip: %d  Fail: %d\n' "$_total" "$_pass" "$_skip" "$_fail"
 [ "$_fail" -eq 0 ] || exit 1

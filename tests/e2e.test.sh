@@ -5,11 +5,11 @@
 
 # Cross-platform end-to-end test for the valise-sh engine.
 # Exercises the examples/e2e scenario: build manifest, valise install into
-# a quarantined HOME, valise verify-active, source the deployed snippet in
+# a quarantined HOME, valise release verify, source the deployed snippet in
 # the target shell, verify module exports are available, run install a
 # second time and verify idempotency. A host-only tamper lane then proves
 # the seal end to end: a tampered release file must be rejected by
-# verify-active inside this suite, not only in CLI unit tests. A host-only
+# release verify inside this suite, not only in CLI unit tests. A host-only
 # composition lane then proves the cross-repo contract: the composed
 # release (primary tree plus the pinned shared layer) installs, verifies,
 # and loads through VALISE_MODULE_PATH.
@@ -103,12 +103,12 @@ run_lane() {
     cat "$_tmp_home/install1.out" >&2
   fi
 
-  # Step 2: verify-active
-  _run_in_e2e_env "$VALISE" verify-active >"$_tmp_home/verify.out" 2>&1
+  # Step 2: release verify
+  _run_in_e2e_env "$VALISE" release verify >"$_tmp_home/verify.out" 2>&1
   if [ $? -eq 0 ]; then
-    pass "$_lane/$_shell_name: valise verify-active passes"
+    pass "$_lane/$_shell_name: valise release verify passes"
   else
-    fail "$_lane/$_shell_name: valise verify-active failed"
+    fail "$_lane/$_shell_name: valise release verify failed"
     cat "$_tmp_home/verify.out" >&2
   fi
 
@@ -313,8 +313,8 @@ else
   cat "\$_tmp_home/install1.out"
 fi
 
-# Verify-active
-HOME="\$_tmp_home" XDG_DATA_HOME="\$_tmp_home/.local/share" XDG_CONFIG_HOME="\$_tmp_home/.config" XDG_STATE_HOME="\$_tmp_home/.local/state" PATH="$REPO_ROOT/bin:/usr/local/bin:/usr/bin:/bin" "\$_valise" verify-active >/dev/null 2>&1
+# Release verify
+HOME="\$_tmp_home" XDG_DATA_HOME="\$_tmp_home/.local/share" XDG_CONFIG_HOME="\$_tmp_home/.config" XDG_STATE_HOME="\$_tmp_home/.local/state" PATH="$REPO_ROOT/bin:/usr/local/bin:/usr/bin:/bin" "\$_valise" release verify >/dev/null 2>&1
 if [ \$? -eq 0 ]; then printf 'VERIFY_OK\n'; else printf 'VERIFY_FAIL\n'; fi
 
 # Check snippet deployed
@@ -337,8 +337,8 @@ LIMA_EOF
 
   case "$_lima_out" in *INSTALL_OK*)   pass "lima/$_instance/$_shell_name: valise install succeeds" ;;
                      *)              fail "lima/$_instance/$_shell_name: valise install failed" ;; esac
-  case "$_lima_out" in *VERIFY_OK*)   pass "lima/$_instance/$_shell_name: valise verify-active passes" ;;
-                     *)              fail "lima/$_instance/$_shell_name: valise verify-active failed" ;; esac
+  case "$_lima_out" in *VERIFY_OK*)   pass "lima/$_instance/$_shell_name: valise release verify passes" ;;
+                     *)              fail "lima/$_instance/$_shell_name: valise release verify failed" ;; esac
   if [ "$_lima_expect_snippet" -eq 1 ]; then
     case "$_lima_out" in *SNIPPET_OK*)  pass "lima/$_instance/$_shell_name: shell integration deployed" ;;
                        *)              fail "lima/$_instance/$_shell_name: shell integration snippet missing" ;; esac
@@ -381,9 +381,9 @@ run_composition_lane() {
   fi
   pass "compose: composed release installs"
 
-  _compose_env "$VALISE" verify-active >"$_tmp_home/compose-verify.out" 2>&1
+  _compose_env "$VALISE" release verify >"$_tmp_home/compose-verify.out" 2>&1
   if [ $? -ne 0 ]; then
-    fail "compose: valise verify-active failed"
+    fail "compose: valise release verify failed"
     cat "$_tmp_home/compose-verify.out" >&2
     _cleanup_home "$_tmp_home"
     unset -f _compose_env 2>/dev/null || :
@@ -438,7 +438,7 @@ run_composition_lane() {
   done
 
   # Fish leg of the composition: the same composed release must verify and
-  # load under Fish. verify-active runs from inside the Fish process, and
+  # load under Fish. release verify runs from inside the Fish process, and
   # the release's Fish-native module loads through the deployed conf.d
   # hook. The shared layer's modules are POSIX-scoped by their shells=
   # metadata (Fish never sources POSIX bodies); the seal covers the whole
@@ -455,7 +455,7 @@ run_composition_lane() {
       VALISE_MODULES='e2e_fish_features' \
       VALISE_MODE=strict \
       _COMPOSE_VALISE="$VALISE" \
-      "$_compose_fish" -c 'builtin printf "fish-version=%s cd-source=%s\\n" $version (builtin functions --details cd); builtin functions -q e2e_fish_loaded; or exit 1; builtin test "$VALISE_FISH_READY" = 1; or exit 1; "$_COMPOSE_VALISE" verify-active >/dev/null 2>&1; or exit 1; exit 0' >"$_tmp_home/compose-fish.out" 2>&1
+      "$_compose_fish" -c 'builtin printf "fish-version=%s cd-source=%s\\n" $version (builtin functions --details cd); builtin functions -q e2e_fish_loaded; or exit 1; builtin test "$VALISE_FISH_READY" = 1; or exit 1; "$_COMPOSE_VALISE" release verify >/dev/null 2>&1; or exit 1; exit 0' >"$_tmp_home/compose-fish.out" 2>&1
     if [ $? -eq 0 ]; then
       pass "compose/fish: composed release verifies and loads through Fish"
     else
@@ -471,7 +471,7 @@ run_composition_lane() {
 # --- Tamper lane (host only) ---
 # The seal must fail closed inside the end-to-end suite, not only in the
 # CLI unit tests: after a real install, flipping one byte of a sealed
-# release file must make verify-active fail, and restoring the exact
+# release file must make release verify fail, and restoring the exact
 # bytes must make it pass again.
 run_tamper_lane() {
   _tmp_home=$(mktemp -d "$_e2e_tmpdir/valise-e2e-tamper.XXXXXX") || {
@@ -498,11 +498,11 @@ run_tamper_lane() {
   fi
   pass "tamper: release installed"
 
-  _tamper_env "$VALISE" verify-active >"$_tmp_home/tamper-verify1.out" 2>&1
+  _tamper_env "$VALISE" release verify >"$_tmp_home/tamper-verify1.out" 2>&1
   if [ $? -eq 0 ]; then
-    pass "tamper: verify-active passes on the untampered release"
+    pass "tamper: release verify passes on the untampered release"
   else
-    fail "tamper: verify-active failed before tampering"
+    fail "tamper: release verify failed before tampering"
     cat "$_tmp_home/tamper-verify1.out" >&2
     _cleanup_home "$_tmp_home"
     unset -f _tamper_env 2>/dev/null || :
@@ -522,11 +522,11 @@ run_tamper_lane() {
   chmod u+w "$_tamper_file"
   printf '%s\n' tampered >>"$_tamper_file"
   chmod u-w "$_tamper_file"
-  _tamper_env "$VALISE" verify-active >"$_tmp_home/tamper-verify2.out" 2>&1
+  _tamper_env "$VALISE" release verify >"$_tmp_home/tamper-verify2.out" 2>&1
   if [ $? -ne 0 ]; then
-    pass "tamper: verify-active rejects the tampered release"
+    pass "tamper: release verify rejects the tampered release"
   else
-    fail "tamper: verify-active accepted a tampered release"
+    fail "tamper: release verify accepted a tampered release"
     cat "$_tmp_home/tamper-verify2.out" >&2
   fi
 
@@ -535,11 +535,11 @@ run_tamper_lane() {
   chmod u+w "$_tamper_file"
   cat "$_tamper_save" >"$_tamper_file"
   chmod 0444 "$_tamper_file"
-  _tamper_env "$VALISE" verify-active >"$_tmp_home/tamper-verify3.out" 2>&1
+  _tamper_env "$VALISE" release verify >"$_tmp_home/tamper-verify3.out" 2>&1
   if [ $? -eq 0 ]; then
-    pass "tamper: verify-active passes after byte restoration"
+    pass "tamper: release verify passes after byte restoration"
   else
-    fail "tamper: verify-active failed after restoring the sealed bytes"
+    fail "tamper: release verify failed after restoring the sealed bytes"
     cat "$_tmp_home/tamper-verify3.out" >&2
   fi
 

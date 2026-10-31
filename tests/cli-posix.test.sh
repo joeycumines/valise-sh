@@ -155,8 +155,8 @@ case "$_doctor_out" in
   *) fail "doctor reports platform" ;;
 esac
 
-# --- Variant list (empty) ---
-check_output_contains "variant list on empty state" "no releases installed" "$_valise" variant list
+# --- Release list (empty) ---
+check_output_contains "release list on empty state" "no releases installed" "$_valise" release list
 
 # --- Make-manifest (standalone publisher) ---
 _mm_tree="$_test_home/pubtree"
@@ -321,121 +321,6 @@ else
   pass "unknown variant leaves no partial output"
 fi
 
-# Bundle compilation is exercised when the parent release authority is present.
-# The standalone engine checkout intentionally has no project bundle sources.
-_bundle_source_root=$(cd "$(dirname "$_valise")/../../.." && pwd -P)
-if [ -f "$_bundle_source_root/shell/release/bundles.json" ]; then
-  _contrib_compile_dir="$_test_home/contrib-compile"
-  if "$_valise" compile --bundle=with-contrib "$_contrib_compile_dir" >"$_test_home/contrib-compile.stdout" 2>"$_test_home/contrib-compile.stderr"; then
-    if grep 'compiled plan for bash' "$_test_home/contrib-compile.stdout" >/dev/null 2>&1 &&
-       grep 'layers/contrib/modules/contrib/hello.sh' "$_contrib_compile_dir/installed-modules.bash" >/dev/null 2>&1; then
-      pass "compile preserves source-qualified contribution bundle roots"
-    else
-      fail "compile preserves source-qualified contribution bundle roots"
-    fi
-  else
-    fail "compile accepts contribution bundle"
-  fi
-  _invalid_bundle_dir="$_test_home/invalid-bundle-output"
-  if "$_valise" compile --bundle=does-not-exist "$_invalid_bundle_dir" >"$_test_home/invalid-bundle.stdout" 2>"$_test_home/invalid-bundle.stderr"; then
-    fail "compile rejects unknown bundle"
-  else
-    pass "compile rejects unknown bundle"
-  fi
-  if [ -e "$_invalid_bundle_dir" ] || [ -L "$_invalid_bundle_dir" ]; then
-    fail "unknown bundle leaves no partial output"
-  else
-    pass "unknown bundle leaves no partial output"
-  fi
-  _empty_bundle_dir="$_test_home/empty-bundle-output"
-  if "$_valise" compile --bundle= "$_empty_bundle_dir" >"$_test_home/empty-bundle.stdout" 2>"$_test_home/empty-bundle.stderr"; then
-    fail "compile rejects empty bundle name"
-  else
-    pass "compile rejects empty bundle name"
-  fi
-  if [ -e "$_empty_bundle_dir" ] || [ -L "$_empty_bundle_dir" ]; then
-    fail "empty bundle leaves no partial output"
-  else
-    pass "empty bundle leaves no partial output"
-  fi
-
-  # Compilation is transactional with respect to a caller-owned destination:
-  # a non-empty output directory is rejected before any plan is written. This
-  # prevents a later-shell path failure from leaving an earlier plan behind.
-  _occupied_compile_dir="$_test_home/occupied-compile-output"
-  mkdir -p "$_occupied_compile_dir/installed-modules.zsh"
-  printf '%s\n' caller-owned >"$_occupied_compile_dir/sentinel"
-  if "$_valise" compile --bundle=with-contrib "$_occupied_compile_dir" >"$_test_home/occupied-compile.stdout" 2>"$_test_home/occupied-compile.stderr"; then
-    fail "compile rejects non-empty output transactionally"
-  else
-    pass "compile rejects non-empty output transactionally"
-  fi
-  if [ -e "$_occupied_compile_dir/installed-modules.bash" ] || [ ! -f "$_occupied_compile_dir/sentinel" ] || [ ! -d "$_occupied_compile_dir/installed-modules.zsh" ]; then
-    fail "non-empty output remains untouched after compile rejection"
-  else
-    pass "non-empty output remains untouched after compile rejection"
-  fi
-
-  _empty_compile_dir="$_test_home/empty-compile-output"
-  mkdir -p "$_empty_compile_dir"
-  if "$_valise" compile --bundle=with-contrib "$_empty_compile_dir" >"$_test_home/empty-compile.stdout" 2>"$_test_home/empty-compile.stderr"; then
-    pass "compile publishes into an empty pre-created output directory"
-  else
-    fail "compile publishes into an empty pre-created output directory"
-  fi
-  if [ -f "$_empty_compile_dir/installed-modules.bash" ]; then
-    pass "empty pre-created destination received published plans"
-  else
-    fail "empty pre-created destination received published plans"
-  fi
-
-  # A missing destination is created only at successful publish; staging never
-  # leaks into the parent on success or on the occupied-directory rejection.
-  _absent_compile_dir="$_test_home/absent-compile-output"
-  if "$_valise" compile --bundle=with-contrib "$_absent_compile_dir" >"$_test_home/absent-compile.stdout" 2>"$_test_home/absent-compile.stderr"; then
-    pass "compile publishes into an absent output directory"
-  else
-    fail "compile publishes into an absent output directory"
-  fi
-  if [ -f "$_absent_compile_dir/installed-modules.bash" ] &&
-     [ -f "$_absent_compile_dir/installed-modules.zsh" ] &&
-     [ -f "$_absent_compile_dir/installed-modules.ksh" ] &&
-     [ -f "$_absent_compile_dir/wrapper-lifecycle.bash" ]; then
-    pass "absent destination receives every compiled plan"
-  else
-    fail "absent destination receives every compiled plan"
-  fi
-  _stage_leftovers=$(find "$_test_home" -maxdepth 2 -name '.valise-compile.*' 2>/dev/null || :)
-  if [ -z "$_stage_leftovers" ]; then
-    pass "successful compile leaves no staging directories"
-  else
-    fail "successful compile leaves no staging directories: $_stage_leftovers"
-  fi
-
-  # Trailing-slash destinations must behave like their slash-free twins:
-  # stage beside the destination, never inside it.
-  _slash_compile_dir="$_test_home/slash-compile-output/"
-  if "$_valise" compile --bundle=with-contrib "$_slash_compile_dir" >"$_test_home/slash-compile.stdout" 2>"$_test_home/slash-compile.stderr"; then
-    pass "compile publishes into a trailing-slash output directory"
-  else
-    fail "compile publishes into a trailing-slash output directory" \
-      "$(cat "$_test_home/slash-compile.stderr" 2>/dev/null || :)"
-  fi
-  if [ -f "$_test_home/slash-compile-output/installed-modules.bash" ]; then
-    pass "trailing-slash destination received published plans"
-  else
-    fail "trailing-slash destination received published plans"
-  fi
-  _slash_stage_leftovers=$(find "$_test_home" -maxdepth 2 -name '.valise-compile.*' 2>/dev/null || :)
-  if [ -z "$_slash_stage_leftovers" ]; then
-    pass "trailing-slash compile leaves no staging directories"
-  else
-    fail "trailing-slash compile leaves no staging directories: $_slash_stage_leftovers"
-  fi
-
-  check_output_contains "explain-bundles shows installed bundle" "Installed bundle resolution:" "$_valise" explain-bundles
-fi
-
 # --- Install (requires manifest context) ---
 # Create a minimal fake manifest for testing
 _manifest_dir="$_test_home/repo/shell/install"
@@ -567,18 +452,18 @@ else
   fail "install preserves symlink profile (symlink was replaced)"
 fi
 
-if "$_valise" verify-active >/dev/null 2>&1; then
-  pass "verify-active authenticates the installed release"
+if "$_valise" release verify >/dev/null 2>&1; then
+  pass "release verify authenticates the installed release"
 else
-  fail "verify-active authenticates the installed release"
+  fail "release verify authenticates the installed release"
 fi
 _installed_active=$(readlink "$XDG_CONFIG_HOME/valise/active")
 chmod u+w "$_installed_active/fixture.sh"
 printf '%s\n' tampered >>"$_installed_active/fixture.sh"
-if "$_valise" verify-active >/dev/null 2>&1; then
-  fail "verify-active rejects a tampered release"
+if "$_valise" release verify >/dev/null 2>&1; then
+  fail "release verify rejects a tampered release"
 else
-  pass "verify-active rejects a tampered release"
+  pass "release verify rejects a tampered release"
 fi
 chmod u-w "$_installed_active/fixture.sh"
 # Restore the disposable release bytes before the later variant-switch fixture
@@ -591,7 +476,7 @@ chmod 0444 "$_installed_active/fixture.sh"
 # Regression test for the greedy ${_sha_output##*= } strip that corrupted
 # sha256sum/shasum output when the absolute path contains '= ' (equals
 # followed by space). This exercises bin/valise itself — not a copy of its
-# parsing logic — by running install + verify-active with HOME containing
+# parsing logic — by running install + release verify with HOME containing
 # '= ', so every staged and installed release path contains '= '. A parsing
 # regression fails install or verify instead of passing silently.
 _eq_home="$_test_home/home= with equals"
@@ -601,10 +486,10 @@ if (cd "$_test_home/repo" && HOME="$_eq_home" XDG_DATA_HOME="$_eq_home/.local/sh
 else
   fail "install succeeds with '= ' in HOME path"
 fi
-if HOME="$_eq_home" XDG_DATA_HOME="$_eq_home/.local/share" XDG_CONFIG_HOME="$_eq_home/.config" XDG_STATE_HOME="$_eq_home/.local/state" "$_valise" verify-active >/dev/null 2>&1; then
-  pass "verify-active passes with '= ' in HOME path"
+if HOME="$_eq_home" XDG_DATA_HOME="$_eq_home/.local/share" XDG_CONFIG_HOME="$_eq_home/.config" XDG_STATE_HOME="$_eq_home/.local/state" "$_valise" release verify >/dev/null 2>&1; then
+  pass "release verify passes with '= ' in HOME path"
 else
-  fail "verify-active passes with '= ' in HOME path"
+  fail "release verify passes with '= ' in HOME path"
 fi
 
 # --- Atomic symlink swap test ---
@@ -626,13 +511,13 @@ printf '# test profile\n' > "$_test_home/.profile"
 _profile_before=$(cat "$_test_home/.profile")
 
 # Switch variant
-(cd "$_test_home/repo" && "$_valise" variant use release_b 2>/dev/null)
+(cd "$_test_home/repo" && "$_valise" release use release_b 2>/dev/null)
 
 _profile_after=$(cat "$_test_home/.profile")
 if [ "$_profile_before" = "$_profile_after" ]; then
-  pass "variant use does not modify .profile"
+  pass "release use does not modify .profile"
 else
-  fail "variant use does not modify .profile"
+  fail "release use does not modify .profile"
 fi
 
 # Verify symlink actually changed. The pointer names a release directory;
@@ -643,20 +528,20 @@ _active_target=$(readlink "$XDG_CONFIG_HOME/valise/active" 2>/dev/null || :)
 _active_resolved=$(cd "$_active_target" 2>/dev/null && pwd -P) || _active_resolved=
 _rel2_resolved=$(cd "$_rel2" 2>/dev/null && pwd -P) || _rel2_resolved=
 if [ -n "$_active_resolved" ] && [ "$_active_resolved" = "$_rel2_resolved" ]; then
-  pass "variant use updates active symlink"
+  pass "release use updates active symlink"
 else
-  fail "variant use updates active symlink (got: $_active_target)"
+  fail "release use updates active symlink (got: $_active_target)"
 fi
 
 # Switch back
-(cd "$_test_home/repo" && "$_valise" variant use release_a 2>/dev/null)
+(cd "$_test_home/repo" && "$_valise" release use release_a 2>/dev/null)
 _active_target=$(readlink "$XDG_CONFIG_HOME/valise/active" 2>/dev/null || :)
 _active_resolved=$(cd "$_active_target" 2>/dev/null && pwd -P) || _active_resolved=
 _rel1_resolved=$(cd "$_rel1" 2>/dev/null && pwd -P) || _rel1_resolved=
 if [ -n "$_active_resolved" ] && [ "$_active_resolved" = "$_rel1_resolved" ]; then
-  pass "variant use round-trips correctly"
+  pass "release use round-trips correctly"
 else
-  fail "variant use round-trips correctly"
+  fail "release use round-trips correctly"
 fi
 unset _active_target _active_resolved _rel1_resolved _rel2_resolved
 

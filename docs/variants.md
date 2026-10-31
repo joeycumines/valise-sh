@@ -1,8 +1,8 @@
-# The compile and assemble contract
+# The compile and build contract
 
 This document describes how a consuming project turns metadata into an
 installed release: what each input file contains, what `valise compile`
-produces, what `valise assemble` packages, and how the two fail.
+produces, what `valise build` packages, and how the two fail.
 
 Two different mechanisms share the word "variant". They compose, but they are
 not the same command.
@@ -10,9 +10,9 @@ not the same command.
 - **Build variants** are exclusion lists decided at compile time inside the
   consuming project. They live in `shell/release/install-variants`.
 - **Installed releases** are sealed directories on this machine. They are
-  listed, switched, and pruned with `valise variant list|use|prune`.
+  listed, switched, and pruned with `valise release list|use|prune`.
 
-Neither reads the other's file. `variant use` never reads `install-variants`;
+Neither reads the other's file. `release use` never reads `install-variants`;
 variant exclusion is decided when the plans are compiled.
 
 ## The project layout
@@ -54,7 +54,7 @@ valise registry --check               # compare, fail on drift, write nothing
 valise registry path/to/registry.tsv  # write somewhere else
 ```
 
-`valise assemble` regenerates the registry before it builds, so a project
+`valise build` regenerates the registry before it builds, so a project
 that only has `.meta` files and bodies builds with no hand-written TSV. The
 generator refuses to publish a registry when the metadata is inconsistent:
 a `name` that does not match its filename, a missing body, a layer module
@@ -128,7 +128,7 @@ A build variant is an exclusion list. The file is
 
 ```
 variant_name	description	excluded_modules
-workstation-full	All project modules	
+default	All project modules	
 workstation-lean	No editor defaults	contrib_editor
 ```
 
@@ -158,7 +158,7 @@ valise compile [--bundle=<name>] [--variant=<name>] <output-dir>
 ```
 
 Compile resolves the module graph and writes one plan per shell. It does not
-copy module bodies; that is `assemble`'s job.
+copy module bodies; that is `build`'s job.
 
 The steps, in order:
 
@@ -169,7 +169,7 @@ The steps, in order:
    row.
 3. Validate the bundle when `--bundle` is given: the name must exist, and
    its roots must resolve.
-4. For each of `bash`, `zsh`, `ksh`, and `wrapper_lifecycle`, resolve the
+4. For each of `bash`, `zsh`, and `ksh`, resolve the
    bundle's roots for that shell, walk the dependency closure, drop the
    variant's exclusions, gate each module by `shells=` and `platforms=`,
    and emit a plan.
@@ -233,16 +233,16 @@ Compile fails closed, before writing anything, when:
 Fish plans are not produced by the POSIX plan generator. `valise compile`
 emits POSIX plans only; a Fish integration uses the native Fish loader.
 
-## `valise assemble`
+## `valise build`
 
 ```sh
-valise assemble [--bundle=<name>] [--variant=<name>] <out-dir>
+valise build [--bundle=<name>] [--variant=<name>] [out]
 ```
 
-Assemble builds a complete, installable release tree. It runs `valise
+Build a complete, installable release tree. It runs `valise
 compile` internally, so everything compile validates is validated here too.
 
-The assembled tree has this layout:
+The built tree has this layout:
 
 ```
 generated/installed-modules.bash      compiled plans
@@ -257,66 +257,66 @@ shell/release/                        bundle-roots, install-variants, registry
 shell/install/profile-release.manifest  the release manifest
 ```
 
-Assemble:
+Build:
 
 1. Runs from the project root — it needs `shell/module.d/`.
 2. Regenerates `shell/release/module-registry.tsv` from the metadata.
 3. Compiles the plans into a staging directory.
-4. Copies the capability prelude from the project's own submodule when it
-   has one, otherwise from the installed engine. The packaged file is the
-   same file the plans were built against.
+4. Copies the capability prelude from the installed engine. The packaged
+   file is the same file the plans were built against.
 5. Copies each module's metadata and body to its release path. A primary
    module lands at the release root; a layer module lands at
    `layers/<provider>/`, matching the paths the plan references.
 6. Normalizes file modes to `0644` and writes the release manifest.
 7. Publishes the tree at the destination.
 
-Like compile, assemble stages beside the destination and publishes only after
+Like compile, build stages beside the destination and publishes only after
 the complete tree and its manifest exist. A failed build never leaves a
-partial release. The destination must be empty or absent.
+partial release. The default destination is `build/release`; an existing
+default tree is replaced only after the new tree has compiled and been
+manifested. An explicit destination must be empty or absent.
 
 Building the same project twice produces byte-identical output, including
 the manifest.
 
 ## `valise build` and `valise apply`
 
-These are the project-level wrappers around the same machinery:
+`valise build` produces the tree; `valise apply` adds install and shell
+integration on top of it:
 
-- `valise build [--variant=<name>] [--bundle=<name>] [out]` assembles to
+- `valise build [--variant=<name>] [--bundle=<name>] [out]` builds to
   `build/release` by default, reading the variant and bundle defaults from
   `shell/release/project.conf`.
-- `valise apply [--variant=<name>] [--bundle=<name>] [--target=<file>]` builds,
-  installs the release without shell integration, writes a managed
-  integration block into the target file (`~/.profile` by default), verifies
-  the active release, and reports what changed.
+- `valise apply [--variant=<name>] [--bundle=<name>] [--no-integration]`
+  builds, installs the release, writes the managed shell integration,
+  verifies the active release, and reports what changed.
 
 Both are idempotent: running them twice leaves the same state.
 
 `shell/release/project.conf` holds the defaults:
 
 ```
-variant=workstation-full
+variant=default
 bundle=default
-integration_target=~/.profile
 ```
 
-## `valise variant list`, `use`, and `prune`
+## `valise release list`, `use`, and `prune`
 
 These operate on the releases installed on this machine. No source tree is
 needed.
 
 ```sh
-valise variant list
-valise variant use <release-id>
-valise variant prune --keep=3
+valise release list
+valise release use <release-id>
+valise release prune --keep=3
 ```
 
 Release directories are named by the content-derived SHA-256 of their
-manifest, and the active one is marked in the list. `variant use` verifies
+manifest, and the active one is marked in the list. `release use` verifies
 the named release byte-for-byte against its own manifest before switching the
 active pointer.
 
-`variant prune --keep=N` removes old releases. It keeps the active release
+`release prune --keep=N` removes old releases. It keeps the active release
 and the `N` newest others, ordered by directory modification time. Before
 removing any candidate it verifies the candidate against its own manifest; a
 release that fails verification is **kept** and reported, because a release

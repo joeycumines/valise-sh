@@ -22,7 +22,7 @@ used from a source checkout or vendored by a consuming profile project.
 
 See [module-abi.md](module-abi.md) for metadata and loader contracts,
 [installation.md](installation.md) for CLI and release behavior,
-[variants.md](variants.md) for the compile and assemble contract, and
+[variants.md](variants.md) for the compile and build contract, and
 [contrib-modules.md](contrib-modules.md) for authoring modules.
 
 ## Two ways to load a profile
@@ -51,7 +51,7 @@ the exact fields the plan honors, is in [variants.md](variants.md).
 A release directory takes one of two shapes, and the startup snippet
 handles both.
 
-An **assembled release** is what `valise assemble` produces. It carries
+A **built release** is what `valise build` produces. It carries
 `generated/installed-modules.<shell>` compiled plans, the capability
 prelude under `vendor/shell-profile/lib/`, the module bodies, and no
 `entrypoints/`.
@@ -103,12 +103,12 @@ the catalog itself is still the consumer's to write.
 
 The CLI splits into two groups by what they need.
 
-Commands that work in a bare checkout: `init`, `install`, `verify-active`,
-`doctor`, `variant`, `make-manifest`, `version`, and `new`.
+Commands that work in a bare checkout: `init`, `install`, `release`,
+`doctor`, `make-manifest`, `version`, and `new`.
 
 Commands that need a consuming project, because they read or write the
 project's source tree: `registry`, `module`, `build`, `apply`, `status`,
-`compile`, `assemble`, `explain-variant`, `explain-bundles`, and
+`compile`, `explain-variant`, `explain-bundles`, and
 `layer-lint`. A project is recognised by `shell/module.d/` or
 `shell/release/module-registry.tsv`; the project commands run from the
 project root and read their defaults from `shell/release/project.conf`.
@@ -120,8 +120,8 @@ reads every `.meta` file under `shell/module.d/` and
 `shell/layers/<provider>/module.d/` and writes the registry from them, in the
 C locale, so repeated generation is byte-identical. `valise registry --check`
 compares the file against the metadata without rewriting it, which is what
-`valise status` reports as registry freshness. `assemble` and `build`
-regenerate the registry before compiling, so a project that contains only
+`valise status` reports as registry freshness. `build` regenerates the
+registry before compiling, so a project that contains only
 metadata and bodies still builds.
 
 This makes the `.meta` files the single source of truth. A hand-edited

@@ -31,8 +31,8 @@ also recorded in [CHANGELOG.md](../CHANGELOG.md).
 ### The registry is a generated artifact
 
 `shell/release/module-registry.tsv` is generated from the project's metadata
-by `valise registry`, and `valise build` and `valise assemble` regenerate and
-validate it. A hand-written registry is no longer the source of truth, and a
+by `valise registry`, and `valise build` regenerates it while `valise registry
+--check` validates it. A hand-written registry is no longer the source of truth, and a
 project needs no registry file at all to build: only `.meta` files and their
 bodies. A committed registry is still accepted for compatibility, but it is
 overwritten on the next build.
@@ -61,16 +61,15 @@ loader load finishes. A module may call `sp_cap_os` and the other helpers
 from its own functions. A plan that removed them at the end of the load left
 module functions unusable.
 
-### Startup integration is explicit
+### Startup integration is managed
 
-`valise install` takes `--integration=<mode>`: `auto` (the previous
-behavior), `profile` (one shared `~/.profile` snippet), or `none` (no startup
-file). `--no-shell-integration` remains as the equivalent legacy spelling.
+`valise install` writes a managed startup block for the shells it finds and
+takes `--no-integration` to write no startup file and no Fish hook.
 
-`valise apply` writes the `~/.profile` integration plus the one-line
-`~/.zprofile` pointer that zsh needs, because zsh does not read `~/.profile`
-on its own. It does not create `.bash_profile`, whose presence would stop
-bash from reading `~/.profile`.
+`valise apply` writes the managed block to every startup file install
+manages, including `~/.zprofile` when zsh is present, because zsh does not
+read `~/.profile` on its own. It does not create `.bash_profile`, whose
+presence would stop bash from reading `~/.profile`.
 
 The integration is written as a managed block between
 `# BEGIN valise managed block` and `# END valise managed block`, so repeat
@@ -79,7 +78,7 @@ installs are idempotent and existing profile content is preserved.
 ### New commands
 
 `valise new`, `valise module`, `valise build`, `valise apply`,
-`valise status`, `valise registry`, `valise doctor`, `valise variant prune`,
+`valise status`, `valise registry`, `valise doctor`, `valise release prune`,
 `valise explain-bundles`, and `valise layer-lint` are new in 0.2.0. A
 consumer that scripted the 0.1.0 CLI is unaffected by the additions, but
 `valise doctor` reports a missing active release as a failure where an
@@ -106,7 +105,7 @@ Before tagging or publishing a release:
    release evidence for every lane, including Fish, zsh, BusyBox, dash, and
    ksh.
 3. Run the README isolated quickstart from a clean checkout and verify that
-   install, `verify-active`, and example module loading work in the temporary
+   install, `release verify`, and example module loading work in the temporary
    home. Confirm cleanup removes the entire demo state.
 4. Inspect the result of `npm pack --dry-run` and install/test the packed
    tarball. The CLI's tests currently cover pack contents, installation, and

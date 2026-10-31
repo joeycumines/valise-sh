@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: MIT
 # Contract test for the CLI gaps closed in the profile-management overhaul:
 # doctor fails without a usable release and checks the running shell's
-# startup file, `variant prune` keeps the active release and never removes a
+# startup file, `release prune` keeps the active release and never removes a
 # release that fails verification, explain-bundles and layer-lint run
 # natively without python3, and every command has its own --help.
 #
@@ -127,7 +127,7 @@ if _env; then
   fi
 
   # The active pointer must name the release that was just installed, and
-  # verify-active must resolve that pointer to a directory that verifies.
+  # release verify must resolve that pointer to a directory that verifies.
   # The comparison is on the resolved directories, not on their spellings:
   # the CLI writes a normalized target, so a raw comparison fails whenever
   # the test's own path spelling differs (a TMPDIR ending in a slash, for
@@ -145,11 +145,11 @@ if _env; then
       "pointer=$_active_target expected=$_expected_target"
   fi
   unset _active_resolved _expected_resolved
-  if "$_valise" verify-active >"$_test_root/verify-active.out" 2>&1; then
-    pass "verify-active resolves the active pointer to a verifying release"
+  if "$_valise" release verify >"$_test_root/release-verify.out" 2>&1; then
+    pass "release verify resolves the active pointer to a verifying release"
   else
-    fail "verify-active resolves the active pointer to a verifying release"
-    cat "$_test_root/verify-active.out" >&2
+    fail "release verify resolves the active pointer to a verifying release"
+    cat "$_test_root/release-verify.out" >&2
   fi
 
   # --no-integration must skip the startup-file check, not merely the
@@ -227,7 +227,7 @@ if _env; then
   fi
 fi
 
-# --- variant prune ---
+# --- release prune ---
 
 # Install four distinct releases so prune has something to choose between.
 _prune_home="$_test_root/prune-home"
@@ -269,7 +269,7 @@ if [ -n "$_prune_active_id" ]; then
         XDG_DATA_HOME="$_prune_home/.local/share" \
         XDG_CONFIG_HOME="$_prune_home/.config" \
         XDG_STATE_HOME="$_prune_home/.local/state" \
-        "$_valise" variant prune --keep=1
+        "$_valise" release prune --keep=1
   ) >"$_test_root/prune.out" 2>&1 || true
   _prune_after=$(find "$_prune_releases" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
   if [ "$_prune_after" -eq 2 ]; then
@@ -307,7 +307,7 @@ if [ -n "$_prune_corrupt" ]; then
         XDG_DATA_HOME="$_prune_home/.local/share" \
         XDG_CONFIG_HOME="$_prune_home/.config" \
         XDG_STATE_HOME="$_prune_home/.local/state" \
-        "$_valise" variant prune --keep=0
+        "$_valise" release prune --keep=0
   ) >"$_test_root/prune-corrupt.out" 2>&1 || true
   if [ -d "$_prune_releases/$_prune_corrupt" ]; then
     pass "prune keeps a release that fails verification"
@@ -358,7 +358,7 @@ printf '%s\n' \
 printf 'dep_mod_ready() { :; }\n' >"$_project/shell/modules/dep_mod.sh"
 printf '# bundle\tshell\troots\ndefault\tbash\tdep_mod\ndefault\tzsh\tdep_mod\n' \
   >"$_project/shell/release/bundle-roots"
-printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll modules\t\n' \
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll modules\t\n' \
   >"$_project/shell/release/install-variants"
 
 # A PATH without python3 proves the native implementation is used.
@@ -685,7 +685,7 @@ else
   cat "$_test_root/layer-lint-order.out" >&2
 fi
 
-# (6) `variant prune --keep=N` must reject a value beyond the shell's
+# (6) `release prune --keep=N` must reject a value beyond the shell's
 # integer range instead of reading it as "keep nothing".
 _prune_home="$_test_root/prune-range-home"
 mkdir -p "$_prune_home"
@@ -700,7 +700,7 @@ _prune_env
 _prune_release="$_test_root/prune-range-release"
 _make_release "$_prune_release" '# prune range release'
 if (cd "$_prune_release" && "$_valise" install --no-integration) >"$_test_root/prune-range-install.out" 2>&1; then
-  if "$_valise" variant prune --keep=99999999999999999999 >"$_test_root/prune-range.out" 2>&1; then
+  if "$_valise" release prune --keep=99999999999999999999 >"$_test_root/prune-range.out" 2>&1; then
     fail "prune rejects a --keep value beyond the integer range"
   else
     pass "prune rejects a --keep value beyond the integer range"
@@ -762,7 +762,7 @@ if (
       XDG_DATA_HOME=../reldata \
       XDG_CONFIG_HOME=../relconf \
       XDG_STATE_HOME=../relstate \
-      "$_valise" variant prune --keep=0
+      "$_valise" release prune --keep=0
 ) >"$_test_root/relative-prune.out" 2>&1; then
   _rel_after=$(readlink "$_rel_work/relconf/valise/active" 2>/dev/null || :)
   if [ -n "$_rel_after" ] && [ -d "$_rel_after" ]; then
@@ -808,10 +808,27 @@ else
   find "$_leak_tmp" -type f >&2 2>/dev/null || :
 fi
 
+# Removed spellings fail as unknown commands, not as silent aliases.
+_removed_tree_build_cmd='assem''ble'
+_removed_verify='verify''-active'
+_removed_variant='vari''ant'
+for _removed_cmd in "$_removed_tree_build_cmd" "$_removed_verify" "$_removed_variant"; do
+  if "$_valise" "$_removed_cmd" >"$_test_root/removed-$_removed_cmd.out" 2>&1; then
+    fail "removed command $_removed_cmd fails"
+  else
+    if grep -F "unknown command: $_removed_cmd" "$_test_root/removed-$_removed_cmd.out" >/dev/null 2>&1; then
+      pass "removed command $_removed_cmd fails as an unknown command"
+    else
+      fail "removed command $_removed_cmd fails as an unknown command"
+      cat "$_test_root/removed-$_removed_cmd.out" >&2
+    fi
+  fi
+done
+
 # --- command-specific --help ---
 
-for _help_cmd in compile assemble install init new module variant doctor status \
-  verify-active registry build apply make-manifest explain-variant explain-bundles layer-lint; do
+for _help_cmd in compile build install init new module release doctor status \
+  registry apply make-manifest explain-variant explain-bundles layer-lint; do
   if "$_valise" "$_help_cmd" --help >"$_test_root/help-$_help_cmd.out" 2>&1; then
     pass "$_help_cmd --help succeeds"
   else
@@ -828,6 +845,22 @@ for _help_cmd in compile assemble install init new module variant doctor status 
     fail "$_help_cmd --help does not print the global usage"
   else
     pass "$_help_cmd --help does not print the global usage"
+  fi
+done
+
+# Every release subcommand owns its help, including prune.
+for _release_sub in list use prune verify; do
+  if "$_valise" release "$_release_sub" --help >"$_test_root/help-release-$_release_sub.out" 2>&1; then
+    pass "release $_release_sub --help succeeds"
+  else
+    fail "release $_release_sub --help succeeds"
+    cat "$_test_root/help-release-$_release_sub.out" >&2
+  fi
+  if grep -F 'usage: valise release' "$_test_root/help-release-$_release_sub.out" >/dev/null 2>&1; then
+    pass "release $_release_sub --help prints the release usage"
+  else
+    fail "release $_release_sub --help prints the release usage"
+    cat "$_test_root/help-release-$_release_sub.out" >&2
   fi
 done
 

@@ -71,17 +71,17 @@ valise apply
 ```
 
 `apply` builds the release, installs it under your XDG data directory, and
-writes a managed block into `~/.profile`. It prints what it changed and
-where.
+writes a managed block into the startup files your shells read. It prints
+what it changed and where.
 
 The managed block is guarded by a source-once variable, so your login shell
 loads the profile exactly once. It prefers the compiled plan for your shell
 and falls back to the loader if the release has no compiled plan.
 
 zsh does not read `~/.profile` on its own, so when zsh is present `apply`
-also writes a one-line `~/.zprofile` that sources `~/.profile`. bash reads
-`~/.profile` only when no `~/.bash_profile` exists; `apply` never creates
-one, so it does not shadow your `~/.profile`.
+writes the same managed block to `~/.zprofile`. bash reads `~/.profile` only
+when no `~/.bash_profile` exists; `apply` never creates one, so it does not
+shadow your `~/.profile`.
 
 Now open a new login shell:
 
@@ -94,7 +94,8 @@ greet
 The same works in zsh and ksh. It does not work in dash: the plans are
 compiled for bash, zsh and ksh, and dash is not one of them.
 
-To undo it, remove the managed block from `~/.profile` (and `~/.zprofile`).
+To undo it, remove the managed block from every startup file `apply`
+reported.
 
 To check the current state:
 
@@ -104,10 +105,10 @@ valise status
 
 ```
 project: /path/to/profile-project
-variant: workstation-full
+variant: default
 bundle: default
-integration target: /home/you/.profile
-integration state: managed block present
+integration: /home/you/.profile: managed block present
+integration: /home/you/.zprofile: managed block present
 registry: up to date
 active release: 0a723dcb0860bcae3ea259c631aaa76ce8e0b4e6991448979018c1d08fc35802
 build output: /path/to/profile-project/build/release
@@ -121,7 +122,7 @@ active release is no longer the one you built.
 
 ## Try a variant
 
-The project ships two variants. `workstation-full` loads everything;
+The project ships two variants. `default` loads everything;
 `workstation-lean` leaves out the provider layer:
 
 ```sh
@@ -174,7 +175,7 @@ valise layer-lint demo
 
 - [The module ABI](../../docs/module-abi.md) — every metadata field.
 - [The authoring guide](../../docs/contrib-modules.md) — writing modules.
-- [The compile and assemble contract](../../docs/variants.md) — the registry,
+- [The compile and build contract](../../docs/variants.md) — the registry,
   bundles, variants, and what a compiled plan contains.
 - [Shared modules](../../docs/shared-modules.md) — how layer modules are
   named and owned.

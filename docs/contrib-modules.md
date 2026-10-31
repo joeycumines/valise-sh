@@ -112,7 +112,7 @@ valise module new hello --exports=hello
 export name. Edit the body, then:
 
 ```sh
-valise build                    # assemble to build/release
+valise build                    # build to build/release
 valise apply                    # build, install, integrate, verify
 ```
 
@@ -165,11 +165,11 @@ regenerate `shell/release/module-registry.tsv` from the metadata.
    `ksh -n`) and confirm each one accepts it.
 
 5. Publish a release containing your module tree and prove the whole
-   path end to end (make-manifest, install, verify-active):
+   path end to end (make-manifest, install, release verify):
 
    ```sh
    valise make-manifest ./mytree
-   cd mytree && valise install && valise verify-active
+   cd mytree && valise install && valise release verify
    ```
 
    See [installation.md](installation.md) for release integrity and

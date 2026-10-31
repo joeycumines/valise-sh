@@ -411,7 +411,7 @@ exports=
 updates=
 load=
 EOF
-printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll\t\nminimal\tMinimal\tgone\nsmall\tSmall\tgone keeper\n' \
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\nminimal\tMinimal\tgone\nsmall\tSmall\tgone keeper\n' \
   >"$_rm_project/shell/release/install-variants"
 printf '# bundle\tshell\troots\ndefault\tbash\tprofile_main gone\ndefault\tzsh\tprofile_main\ndefault\tksh\tprofile_main\n' \
   >"$_rm_project/shell/release/bundle-roots"

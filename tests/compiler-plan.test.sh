@@ -223,19 +223,19 @@ _bundle_row conflict-function conflict_function
 _bundle_row conflict-alias conflict_alias
 _bundle_row bodyless bodyless_orphan
 
-printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll\t\n' \
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' \
   >"$_project/shell/release/install-variants"
 
-_assemble() {
+_build() {
   _as_bundle=$1
   _as_out=$2
   rm -rf "$_as_out"
-  if (cd "$_project" && "$_valise" assemble --bundle="$_as_bundle" "$_as_out") \
-    >"$_tmp/$_as_bundle.assemble.out" 2>"$_tmp/$_as_bundle.assemble.err"; then
-    pass "assemble bundle $_as_bundle"
+  if (cd "$_project" && "$_valise" build --bundle="$_as_bundle" "$_as_out") \
+    >"$_tmp/$_as_bundle.build.out" 2>"$_tmp/$_as_bundle.build.err"; then
+    pass "build bundle $_as_bundle"
   else
-    fail "assemble bundle $_as_bundle"
-    cat "$_tmp/$_as_bundle.assemble.err" >&2
+    fail "build bundle $_as_bundle"
+    cat "$_tmp/$_as_bundle.build.err" >&2
   fi
   unset _as_bundle _as_out
 }
@@ -264,25 +264,25 @@ _reject_registry_row() {
 
 printf '=== compiled-plan contract ===\n'
 
-_assemble behavior "$_tmp/release-behavior"
-_assemble missing "$_tmp/release-missing"
-_assemble meta "$_tmp/release-meta"
-_assemble platform "$_tmp/release-platform"
-_assemble blocked-platform "$_tmp/release-blocked-platform"
-_assemble platform-chain "$_tmp/release-platform-chain"
-_assemble platform-optional "$_tmp/release-platform-optional"
-_assemble blocked-failed "$_tmp/release-blocked-failed"
-_assemble blocked-meta "$_tmp/release-blocked-meta"
-_assemble optional "$_tmp/release-optional"
-_assemble optional-fail "$_tmp/release-optional-fail"
-_assemble optional-cycle "$_tmp/release-optional-cycle"
-_assemble layer-meta "$_tmp/release-layer-meta"
-_assemble capability "$_tmp/release-capability"
-_assemble reload "$_tmp/release-reload"
-_assemble wrapper-ok "$_tmp/release-wrapper-ok"
-_assemble wrapper-missing "$_tmp/release-wrapper-missing"
-_assemble conflict-function "$_tmp/release-conflict-function"
-_assemble conflict-alias "$_tmp/release-conflict-alias"
+_build behavior "$_tmp/release-behavior"
+_build missing "$_tmp/release-missing"
+_build meta "$_tmp/release-meta"
+_build platform "$_tmp/release-platform"
+_build blocked-platform "$_tmp/release-blocked-platform"
+_build platform-chain "$_tmp/release-platform-chain"
+_build platform-optional "$_tmp/release-platform-optional"
+_build blocked-failed "$_tmp/release-blocked-failed"
+_build blocked-meta "$_tmp/release-blocked-meta"
+_build optional "$_tmp/release-optional"
+_build optional-fail "$_tmp/release-optional-fail"
+_build optional-cycle "$_tmp/release-optional-cycle"
+_build layer-meta "$_tmp/release-layer-meta"
+_build capability "$_tmp/release-capability"
+_build reload "$_tmp/release-reload"
+_build wrapper-ok "$_tmp/release-wrapper-ok"
+_build wrapper-missing "$_tmp/release-wrapper-missing"
+_build conflict-function "$_tmp/release-conflict-function"
+_build conflict-alias "$_tmp/release-conflict-alias"
 
 # Strict mode stops at the first failing module and names it.
 if VALISE_MODULE_ROOT="$_tmp/release-behavior" /bin/bash -c '
@@ -649,7 +649,7 @@ fi
 # A module with neither a load path nor dependencies has nothing to load.
 # The compiler rejects it by name instead of emitting a plan that silently
 # does nothing for that module. The row is appended to the registry because
-# assemble regenerates the registry from the metadata, and a malformed module
+# build regenerates the registry from the metadata, and a malformed module
 # has no metadata to generate it from.
 _bodyless_saved="$_tmp/module-registry.bodyless.saved"
 cp "$_project/shell/release/module-registry.tsv" "$_bodyless_saved"
@@ -706,13 +706,13 @@ else
   head -5 "$_tmp/release-reload/generated/installed-modules.bash" >&2
 fi
 rm -rf "$_tmp/release-reload-2"
-if (cd "$_project" && "$_valise" assemble --bundle=reload "$_tmp/release-reload-2") \
+if (cd "$_project" && "$_valise" build --bundle=reload "$_tmp/release-reload-2") \
   >"$_tmp/reload-2.out" 2>"$_tmp/reload-2.err" &&
   cmp -s "$_tmp/release-reload/shell/install/profile-release.manifest" \
     "$_tmp/release-reload-2/shell/install/profile-release.manifest"; then
-  pass "repeated assemble produces an identical manifest"
+  pass "repeated build produces an identical manifest"
 else
-  fail "repeated assemble produces an identical manifest"
+  fail "repeated build produces an identical manifest"
   cat "$_tmp/reload-2.err" >&2
 fi
 

@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Joseph Cumines
 # SPDX-License-Identifier: MIT
 # Registry generation contract: metadata is the source of truth, the TSV is a
-# deterministic generated artifact, and assemble keeps it current.
+# deterministic generated artifact, and build keeps it current.
 
 set -eu
 
@@ -63,7 +63,7 @@ _meta "$_project/shell/layers/vendor/module.d/contrib_vendor_tool.meta" \
 printf '%s\n' 'vendor_tool_ready() { :; }' \
   >"$_project/shell/layers/vendor/modules/contrib_vendor_tool.sh"
 
-printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll\t\n' \
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' \
   >"$_project/shell/release/install-variants"
 printf '# bundle\tshell\troots\ndefault\tbash\troot\n' \
   >"$_project/shell/release/bundle-roots"
@@ -122,20 +122,20 @@ else
 fi
 cp "$_test_home/registry.valid-before-drift" "$_registry"
 
-# Assemble must not invent a project from an unrelated working directory.
-_assemble_elsewhere="$_test_home/elsewhere"
-mkdir -p "$_assemble_elsewhere"
-if (cd "$_assemble_elsewhere" && "$_valise" assemble "$_test_home/no-project-release") \
+# Build must not invent a project from an unrelated working directory.
+_build_elsewhere="$_test_home/elsewhere"
+mkdir -p "$_build_elsewhere"
+if (cd "$_build_elsewhere" && "$_valise" build "$_test_home/no-project-release") \
   >"$_test_home/elsewhere.out" 2>"$_test_home/elsewhere.err"; then
-  fail "assemble rejects a directory without shell/module.d"
+  fail "build rejects a directory without shell/module.d"
 else
   if grep -F 'run from the consuming project root (need shell/module.d)' \
     "$_test_home/elsewhere.err" >/dev/null &&
-    [ ! -e "$_assemble_elsewhere/shell" ] &&
+    [ ! -e "$_build_elsewhere/shell" ] &&
     [ ! -e "$_test_home/no-project-release" ]; then
-    pass "assemble rejects a directory without shell/module.d without writing"
+    pass "build rejects a directory without shell/module.d without writing"
   else
-    fail "assemble rejects a directory without shell/module.d without writing"
+    fail "build rejects a directory without shell/module.d without writing"
     cat "$_test_home/elsewhere.err" >&2
   fi
 fi
@@ -144,15 +144,15 @@ fi
 _invalid_out="$_test_home/occupied-out"
 mkdir -p "$_invalid_out/sentinel"
 cp "$_registry" "$_test_home/registry.before-invalid-out"
-if (cd "$_project" && "$_valise" assemble --bundle=default "$_invalid_out") \
+if (cd "$_project" && "$_valise" build --bundle=default "$_invalid_out") \
   >"$_test_home/invalid-out.out" 2>"$_test_home/invalid-out.err"; then
-  fail "assemble rejects a non-empty output directory before regenerating the registry"
+  fail "build rejects a non-empty output directory before regenerating the registry"
 else
   if grep -F 'output directory must be empty' "$_test_home/invalid-out.err" >/dev/null &&
     cmp -s "$_registry" "$_test_home/registry.before-invalid-out"; then
-    pass "assemble rejects a non-empty output directory before regenerating the registry"
+    pass "build rejects a non-empty output directory before regenerating the registry"
   else
-    fail "assemble rejects a non-empty output directory before regenerating the registry"
+    fail "build rejects a non-empty output directory before regenerating the registry"
     cat "$_test_home/invalid-out.err" >&2
   fi
 fi
@@ -320,32 +320,32 @@ else
 fi
 rm -f "$_project/shell/module.d/bridge_mod.meta"
 
-# Restore the valid registry and prove assemble regenerates it by default.
+# Restore the valid registry and prove build regenerates it by default.
 (cd "$_project" && "$_valise" registry) >/dev/null 2>&1
-cp "$_registry" "$_test_home/registry.assemble-baseline"
+cp "$_registry" "$_test_home/registry.build-baseline"
 rm -f "$_registry"
 rm -rf "$_test_home/release1" "$_test_home/release2"
-if (cd "$_project" && "$_valise" assemble --bundle=default "$_test_home/release1") \
-  >"$_test_home/assemble1.out" 2>"$_test_home/assemble1.err" &&
-  cmp -s "$_registry" "$_test_home/registry.assemble-baseline"; then
-  pass "assemble regenerates a missing registry from metadata"
+if (cd "$_project" && "$_valise" build --bundle=default "$_test_home/release1") \
+  >"$_test_home/build1.out" 2>"$_test_home/build1.err" &&
+  cmp -s "$_registry" "$_test_home/registry.build-baseline"; then
+  pass "build regenerates a missing registry from metadata"
 else
-  fail "assemble regenerates a missing registry from metadata"
-  cat "$_test_home/assemble1.err" >&2
+  fail "build regenerates a missing registry from metadata"
+  cat "$_test_home/build1.err" >&2
 fi
-if (cd "$_project" && "$_valise" assemble --bundle=default "$_test_home/release2") \
-  >"$_test_home/assemble2.out" 2>"$_test_home/assemble2.err" &&
+if (cd "$_project" && "$_valise" build --bundle=default "$_test_home/release2") \
+  >"$_test_home/build2.out" 2>"$_test_home/build2.err" &&
   cmp -s "$_test_home/release1/shell/install/profile-release.manifest" \
     "$_test_home/release2/shell/install/profile-release.manifest"; then
-  pass "repeated assemble produces a byte-identical manifest"
+  pass "repeated build produces a byte-identical manifest"
 else
-  fail "repeated assemble produces a byte-identical manifest"
-  cat "$_test_home/assemble2.err" >&2
+  fail "repeated build produces a byte-identical manifest"
+  cat "$_test_home/build2.err" >&2
 fi
 if cmp -s "$_test_home/release1/shell/release/module-registry.tsv" "$_registry"; then
-  pass "assembled release carries the generated registry"
+  pass "built release carries the generated registry"
 else
-  fail "assembled release carries the generated registry"
+  fail "built release carries the generated registry"
 fi
 
 printf '\n=== valise registry summary ===\n'
