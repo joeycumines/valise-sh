@@ -3965,7 +3965,6 @@ registry_generate() {
       _rg_platforms=
       _rg_exports=
       _rg_load=
-      _rg_load_hook=
       _rg_updates=
       while IFS= read -r _rg_line; do
         case "$_rg_line" in
@@ -3978,7 +3977,6 @@ registry_generate() {
         platforms=*) _rg_platforms=${_rg_line#platforms=} ;;
         exports=*) _rg_exports=${_rg_line#exports=} ;;
         load=*) _rg_load=${_rg_line#load=} ;;
-        load_hook=*) _rg_load_hook=${_rg_line#load_hook=} ;;
         updates=*) _rg_updates=${_rg_line#updates=} ;;
         esac
       done <<EOF
@@ -3998,14 +3996,6 @@ EOF
           exit 1
           ;;
         esac
-      fi
-      # A hook is a function the loader resolves in the running shell. A static
-      # plan cannot call it or check its exports, and the registry has no field
-      # for it, so the row would read as a dependency-only meta module and the
-      # plan would silently load nothing for it.
-      if [ -n "$_rg_load_hook" ]; then
-        printf 'valise: error: %s: load_hook modules are loader-only and cannot be compiled: %s\n' "$_rg_rel" "$_rg_load_hook" >&2
-        exit 1
       fi
       if [ -n "$_rg_load" ]; then
         _rg_module_root=${_rg_source%/module.d}
@@ -4187,7 +4177,7 @@ project_meta_remove_module() {
 project_meta_loses_all_targets() {
   _pl_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   "$_pl_awk" -v module="$2" '
-    /^load=./ || /^load_hook=./ { target = 1 }
+    /^load=./ { target = 1 }
     /^requires=/ {
       count = split(substr($0, 10), parts, " ")
       for (i = 1; i <= count; i++) {

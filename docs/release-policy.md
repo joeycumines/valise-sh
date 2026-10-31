@@ -43,10 +43,9 @@ primary modules of `shell/module.d/` first, then the layer modules of each
 
 ### The metadata ABI gained fields and classes
 
-- **Meta modules.** Metadata with `requires=` and neither `load` nor
-  `load_hook` is a dependency-only aggregator. It loads successfully without
-  a body. Only `load` and `load_hook` are mutually exclusive; `load` and
-  `requires` may be combined.
+- **Meta modules.** Metadata with `requires=` and no `load` is a
+  dependency-only aggregator. It loads successfully without a body. `load`
+  and `requires` may be combined.
 - **`side_effect=local-state`.** A source-safe class for modules that write
   under the XDG state directory. It loads in the ordinary phase where
   `generated-file` still fails.

@@ -19,7 +19,7 @@ Required fields:
 | `shells` | Space-separated supported shell identifiers. |
 | `platforms` | Space-separated supported platform identifiers. |
 | `side_effect` | Startup/install/update side-effect class. |
-| `load` or `load_hook` | Exactly one load target: a relative module body path or a validated shell function hook. |
+| `load` | Repository-relative path to the module body. |
 | `requires` | Required when the module is a **meta module** (see below). |
 
 Optional fields:
@@ -38,8 +38,8 @@ A **meta module** declares dependencies and has no body. It is the natural
 way to write an aggregator: instead of an empty shell file whose only job is
 to name a dependency, the aggregator is metadata alone.
 
-A meta module has `requires=` with at least one entry and **no** `load=` and
-**no** `load_hook=`. The loader and the compiler treat it as a dependency-only
+A meta module has `requires=` with at least one entry and **no** `load=`.
+The loader and the compiler treat it as a dependency-only
 record: the module itself has nothing to source, but its required closure
 loads normally and in the right order.
 
@@ -55,9 +55,8 @@ exports=
 updates=
 ```
 
-`load` and `load_hook` are mutually exclusive. At least one of `load`,
-`load_hook`, or `requires` is required: a module with neither a load target
-nor dependencies is malformed.
+At least one of `load` or `requires` is required: a module with neither a
+body nor dependencies is malformed.
 
 `load` and `requires` are **not** mutually exclusive. A module that declares
 both loads its own body *and* its dependencies, in dependency-first order.
@@ -72,8 +71,7 @@ non-empty list containing only whitespace is malformed. Required `shells` and
 `platforms` lists must contain at least one parsed value. Empty identifiers,
 whitespace inside one identifier, path separators, quotes, shell metacharacters,
 glob characters, and control characters are invalid. Invalid identifiers are
-rejected before the loader can build function names or compatibility
-bridge hooks.
+rejected before the loader can build function names or source a body.
 
 Accepted `shells` values are `sh`, `bash`, `zsh`, `ksh`, and `fish`.
 `shells=sh` means the module body is POSIX-shell syntax, and it is loaded by
@@ -273,7 +271,7 @@ follow the same rules.
 `exports` lists public commands or shell functions the module declares. The loader
 uses this list for post-load export checks and failure cleanup; project catalogs
 and wrapper manifests use it for documentation and registration. An exported name
-must be defined by the load hook/body before the module is considered
+must be defined by the module body before the module is considered
 successfully loaded.
 
 `updates` lists update registrations declared by the module. Each value is an ABI
@@ -309,7 +307,7 @@ which the source phase rejects.
 
 The enforcement hook is
 `sp_metadata_validate_source_side_effect <side_effect>`. The loader calls it
-before ordinary source invokes a load path or compatibility load hook.
+before ordinary source invokes a load path.
 
 ## Capability layer available to modules
 
@@ -353,18 +351,11 @@ the loader after metadata validation, dependency sorting, shell/platform matchin
 and phase side-effect checks have passed. The ABI has no unload hook: the loader
 does not implement module rollback or unload semantics.
 
-Bridge-backed records include `load_hook=_shell_module_<name>` instead of a
-`load` path. `load` and `load_hook` are mutually exclusive; at least one of
-`load`, `load_hook`, or `requires` is required. A `load_hook` value must match
-the same identifier grammar as exported functions. The bridge hook is invoked
-only after the same identifier, dependency, shell/platform, and phase checks
-that protect file-backed modules.
+A meta module has no `load`; it has `requires` and no body. Nothing is
+sourced for it, but its dependency closure loads and its dependencies'
+export checks still apply.
 
-A meta module has neither `load` nor `load_hook`; it has `requires` and no
-body. Nothing is sourced for it, but its dependency closure loads and its
-dependencies' export checks still apply.
-
-Module bodies and bridge hooks must treat `_spl_*`, `_sp_loader_*`, and
+Module bodies must treat `_spl_*`, `_sp_loader_*`, and
 `_SP_LOADER_*` names as loader-private reserved namespaces. Native Fish
 transactions additionally reserve `_sp_fish_loader_scope_before_*`,
 `__sp_fish_loader_scope_before_*`, `_sp_fish_loader_scope_after_*`, and
@@ -377,8 +368,8 @@ module and must never use module-controlled private state for recursive cleanup.
 Modules must also not define shell functions that shadow critical shell control
 utilities (`command`, `unset`, `readonly`, `return`, or `eval`) or mark those
 functions readonly. Those names are reserved because the loader must recover
-control after sourcing a module; direct definitions in file-backed modules and
-inspectable bridge hooks are rejected before the module body or hook is invoked.
+control after sourcing a module; direct definitions in module bodies are
+rejected before the body is invoked.
 
 Failure handling is selected once by the loader caller with
 `VALISE_MODE=strict|permissive`; it is not a per-module metadata promise.
@@ -391,21 +382,6 @@ Permissive mode reports the affected module and continues with unrelated modules
 paths, `..` path segments, spaces, quotes, shell metacharacters, and glob
 characters are invalid. Reading metadata must not source these paths.
 
-## Compatibility bridge
-
-The legacy flat-gist modules expose dependencies by executing `_shell_module_*`
-functions with `_SHMOD_GET_DEPS=1`. That behavior is compatibility evidence, not
-the target discovery model. The bridge serializes each legacy module into the
-same metadata shape with:
-
-- `name=<legacy-name>`
-- `requires=<legacy _SHMOD_DEPS>`
-- `load_hook=_shell_module_<legacy-name>`
-
-The bridge exists to preserve current dependency edges and permissive warning
-behavior while the loader migrates to metadata. It must not be used to justify
-executing arbitrary new module bodies during discovery.
-
 ## Validation implementation
 
 `lib/metadata.sh` provides the current metadata parser and validator:
@@ -414,9 +390,5 @@ executing arbitrary new module bodies during discovery.
 - `sp_metadata_validate_identifier <identifier>` validates ABI identifiers.
 - `sp_metadata_validate_source_side_effect <side_effect>` rejects phase-unsafe
   classes before ordinary startup can source a module body.
-- `sp_metadata_legacy_bridge <name> <requires> <side-effect> <exports>` emits a
-  normalized compatibility record for an existing `_shell_module_*` module. Bridge
-  records include empty `updates=` unless a later migration task explicitly maps
-  legacy update registration.
 
 The executable contract is `tests/loader/metadata-abi.test.sh`.

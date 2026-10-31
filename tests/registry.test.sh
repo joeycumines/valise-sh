@@ -296,9 +296,9 @@ else
 fi
 rm -f "$_project/shell/layers/vendor/module.d/bad_layer.meta"
 
-# A load_hook module cannot be compiled; it must not pass as a meta module.
-cat >"$_project/shell/module.d/bridge_mod.meta" <<'EOF'
-name=bridge_mod
+# A load_hook module is rejected by the metadata ABI before the registry.
+cat >"$_project/shell/module.d/load_hook_mod.meta" <<'EOF'
+name=load_hook_mod
 version=
 side_effect=read-only
 requires=
@@ -307,18 +307,18 @@ shells=bash
 platforms=any
 exports=
 updates=
-load_hook=_shell_module_bridge_mod
+load_hook=_shell_module_load_hook_mod
 EOF
 if (cd "$_project" && "$_valise" registry "$_test_home/hook-registry.tsv") \
   >"$_test_home/hook.out" 2>"$_test_home/hook.err"; then
   fail "registry rejects a load_hook module"
-elif grep -F 'shell/module.d/bridge_mod.meta: load_hook modules are loader-only' "$_test_home/hook.err" >/dev/null; then
+elif grep -F 'metadata field load_hook is not supported; use load' "$_test_home/hook.err" >/dev/null; then
   pass "registry rejects a load_hook module"
 else
   fail "registry rejects a load_hook module"
   cat "$_test_home/hook.err" >&2
 fi
-rm -f "$_project/shell/module.d/bridge_mod.meta"
+rm -f "$_project/shell/module.d/load_hook_mod.meta"
 
 # Restore the valid registry and prove build regenerates it by default.
 (cd "$_project" && "$_valise" registry) >/dev/null 2>&1

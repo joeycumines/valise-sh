@@ -434,28 +434,7 @@ assert_eq 'unsearchable layer directory fails closed' 1 "$CASE_STATUS"
 assert_contains 'unsearchable-dir diagnostic explains the requirement' "$CASE_STDERR" \
   'must be a non-empty readable, executable directory'
 
-# Contract 16: a layer module using load_hook loads through the hook.
-write_layer_module contrib_hooked ''
-{
-  printf 'name=contrib_hooked\nrequires=\noptional=\nshells=sh\nplatforms=any\n'
-  printf 'side_effect=read-only\nexports=contrib_hooked_loaded\nupdates=\n'
-  printf 'load_hook=_shell_module_contrib_hooked\n'
-} >"$_tmp_dir/layer/module.d/contrib_hooked.meta"
-rm -f "$_tmp_dir/layer/modules/contrib_hooked.sh"
-HOOK_SRC=$_tmp_dir/hook.sh
-cat >"$HOOK_SRC" <<'HOOK'
-_shell_module_contrib_hooked() {
-  printf '%s\n' contrib_hooked >>"${SP_LOADER_TEST_TRACE:?}"
-  contrib_hooked_loaded() { :; }
-}
-HOOK
-run_case layer_hook "VALISE_MODULE_PATH=\$LAYER_ROOT
-HOOK_SRC=\$HOOK_SRC
-. \"\$HOOK_SRC\"" contrib_hooked strict
-assert_eq 'layer load_hook module loads through the hook' 0 "$CASE_STATUS"
-assert_eq 'layer load_hook executed the hook body' 'contrib_hooked' "$CASE_TRACE"
-
-# Contract 17: a primary module whose requires= names a layer contrib module
+# Contract 16: a primary module whose requires= names a layer contrib module
 # discovers it across roots (primary -> layer direction).
 cat >"$_tmp_dir/layer/module.d/contrib_up.meta" <<'META'
 name=contrib_up

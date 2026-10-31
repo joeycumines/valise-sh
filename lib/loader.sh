@@ -97,7 +97,6 @@ _sp_loader_read_record() {
   _splrr_updates=
   _splrr_version=
   _splrr_load=
-  _splrr_load_hook=
   while IFS= read -r _splrr_line || [ -n "$_splrr_line" ]; do
     case $_splrr_line in
     '' | '#'* | *=*) ;;
@@ -116,7 +115,6 @@ _sp_loader_read_record() {
     updates) _splrr_updates=$_splrr_value ;;
     version) _splrr_version=$_splrr_value ;;
     load) _splrr_load=$_splrr_value ;;
-    load_hook) _splrr_load_hook=$_splrr_value ;;
     esac
   done <"$_splrr_file"
   _spl_record_name=$_splrr_name
@@ -129,10 +127,9 @@ _sp_loader_read_record() {
   _spl_record_updates=$_splrr_updates
   _spl_record_version=$_splrr_version
   _spl_record_load=$_splrr_load
-  _spl_record_load_hook=$_splrr_load_hook
   unset _splrr_file _splrr_line _splrr_key _splrr_value _splrr_name _splrr_requires \
     _splrr_optional _splrr_shells _splrr_platforms _splrr_side_effect _splrr_exports \
-    _splrr_updates _splrr_version _splrr_load _splrr_load_hook
+    _splrr_updates _splrr_version _splrr_load
 }
 
 _sp_loader_reserved_scan() {
@@ -615,8 +612,8 @@ sp_loader_load_modules() {
         continue
       fi
       _sp_loader_read_record "$_spl_record"
-      command printf 'load=%s\nload_hook=%s\nexports=%s\n' \
-        "$_spl_record_load" "$_spl_record_load_hook" "$_spl_record_exports" \
+      command printf 'load=%s\nexports=%s\n' \
+        "$_spl_record_load" "$_spl_record_exports" \
         >"$_spl_tmp/run/$_spl_mod"
       if [ "$_spl_record_name" != "$_spl_mod" ]; then
         command printf 'loader: %s\n' "$_spl_mod: metadata name mismatch: $_spl_record_name" >&2
@@ -746,7 +743,7 @@ sp_loader_load_modules() {
       done
       unset _spl_record_name _spl_record_requires _spl_record_optional _spl_record_shells \
         _spl_record_platforms _spl_record_side_effect _spl_record_exports _spl_record_updates \
-        _spl_record_version _spl_record_load _spl_record_load_hook
+        _spl_record_version _spl_record_load
       if [ "$_spl_dep_ifs_was_set" -eq 1 ]; then
         IFS=$_spl_dep_old_ifs
       else
@@ -1058,12 +1055,10 @@ sp_loader_load_modules() {
       fi
       _spl_record=$_spl_tmp/meta/$_spl_mod
       _spl_load=
-      _spl_load_hook=
       _spl_exports=
       while IFS= read -r _spl_run_line || [ -n "$_spl_run_line" ]; do
         case $_spl_run_line in
         load=*) _spl_load=${_spl_run_line#load=} ;;
-        load_hook=*) _spl_load_hook=${_spl_run_line#load_hook=} ;;
         exports=*) _spl_exports=${_spl_run_line#exports=} ;;
         esac
       done <"$_spl_tmp/run/$_spl_mod"
@@ -1125,7 +1120,6 @@ sp_loader_load_modules() {
       _spl_expected_mod=$_spl_mod
       _spl_expected_record=$_spl_record
       _spl_expected_load=$_spl_load
-      _spl_expected_load_hook=$_spl_load_hook
       _spl_expected_exports=$_spl_exports
       _spl_expected_exports_to_cleanup=$_spl_exports_to_cleanup
       _spl_guard_tmp=$_spl_expected_tmp
@@ -1148,7 +1142,6 @@ sp_loader_load_modules() {
       _spl_guard_mod=$_spl_expected_mod
       _spl_guard_record=$_spl_expected_record
       _spl_guard_load=$_spl_expected_load
-      _spl_guard_load_hook=$_spl_expected_load_hook
       _spl_guard_exports=$_spl_expected_exports
       _spl_guard_exports_to_cleanup=$_spl_expected_exports_to_cleanup
       _spl_guard_wrapper_exports=$_spl_wrapper_exports
@@ -1213,26 +1206,7 @@ sp_loader_load_modules() {
       *x*) _spl_expected_xtrace_was_set=1 ;;
       *) _spl_expected_xtrace_was_set=0 ;;
       esac
-      if [ "$_spl_load_status" -eq 0 ] && [ -n "$_spl_load_hook" ]; then
-        if command -v "$_spl_load_hook" >/dev/null 2>&1; then
-          _spl_hook_body=$_spl_tmp/hook-body
-          : >"$_spl_hook_body"
-          case $_spl_current_shell in
-          bash) command declare -f "$_spl_load_hook" >"$_spl_hook_body" 2>/dev/null || : ;;
-          zsh) functions "$_spl_load_hook" >"$_spl_hook_body" 2>/dev/null || : ;;
-          ksh) command typeset -f "$_spl_load_hook" >"$_spl_hook_body" 2>/dev/null || : ;;
-          esac
-          if [ -s "$_spl_hook_body" ] && ! _sp_loader_reserved_scan "$_spl_hook_body"; then
-            command printf 'loader: %s\n' "$_spl_mod: load hook defines reserved shell utility" >&2
-            _spl_load_status=126
-          else
-            "$_spl_load_hook" || _spl_load_status=$?
-          fi
-        else
-          command printf 'loader: %s\n' "$_spl_mod: load hook not found: $_spl_load_hook" >&2
-          _spl_load_status=127
-        fi
-      elif [ "$_spl_load_status" -eq 0 ] && [ -n "$_spl_load" ]; then
+      if [ "$_spl_load_status" -eq 0 ] && [ -n "$_spl_load" ]; then
         if [ ! -f "$_spl_tmp/roots/$_spl_mod" ]; then
           command printf 'loader: %s\n' "$_spl_mod: providing module root was not recorded during discovery" >&2
           _spl_load_status=126
@@ -1269,7 +1243,7 @@ sp_loader_load_modules() {
       *) _spl_after_nounset_was_set=0 ;;
       esac
       _spl_private_modified=0
-      if [ "${_spl_expected_tmp-}" != "${_spl_guard_tmp-}" ] || [ "${_spl_expected_cleanup_tmp-}" != "${_spl_guard_cleanup_tmp-}" ] || [ "${_spl_expected_tmp_parent-}" != "${_spl_guard_tmp_parent-}" ] || [ "${_spl_expected_tmp_sentinel-}" != "${_spl_guard_tmp_sentinel-}" ] || [ "${_spl_expected_root-}" != "${_spl_guard_root-}" ] || [ "${_spl_expected_wanted-}" != "${_spl_guard_wanted-}" ] || [ "${_spl_expected_mode-}" != "${_spl_guard_mode-}" ] || [ "${_spl_expected_phase-}" != "${_spl_guard_phase-}" ] || [ "${_spl_expected_return-}" != "${_spl_guard_return-}" ] || [ "${_spl_expected_strict_error-}" != "${_spl_guard_strict_error-}" ] || [ "${_spl_expected_current_shell-}" != "${_spl_guard_current_shell-}" ] || [ "${_spl_expected_current_platform-}" != "${_spl_guard_current_platform-}" ] || [ "${_spl_expected_mod-}" != "${_spl_guard_mod-}" ] || [ "${_spl_expected_record-}" != "${_spl_guard_record-}" ] || [ "${_spl_expected_load-}" != "${_spl_guard_load-}" ] || [ "${_spl_expected_load_hook-}" != "${_spl_guard_load_hook-}" ] || [ "${_spl_expected_exports-}" != "${_spl_guard_exports-}" ] || [ "${_spl_expected_exports_to_cleanup-}" != "${_spl_guard_exports_to_cleanup-}" ] || [ "${_spl_wrapper_exports-}" != "${_spl_guard_wrapper_exports-}" ] || [ "${_spl_seen_words-}" != "${_spl_guard_seen_words-}" ] || [ "${_spl_strict_required_words-}" != "${_spl_guard_strict_required_words-}" ] || [ "${_spl_blocked_words-}" != "${_spl_guard_blocked_words-}" ] || [ "${_spl_modules_words-}" != "${_spl_guard_modules_words-}" ] || [ "${_spl_order_words-}" != "${_spl_guard_order_words-}" ] || [ "${_spl_failed_words-}" != "${_spl_guard_failed_words-}" ] || [ "${_spl_expected_pwd_was_set-}" != "${_spl_guard_expected_pwd_was_set-}" ] || [ "${_spl_expected_pwd-}" != "${_spl_guard_expected_pwd-}" ] || [ "${_spl_expected_oldpwd_was_set-}" != "${_spl_guard_expected_oldpwd_was_set-}" ] || [ "${_spl_expected_oldpwd-}" != "${_spl_guard_expected_oldpwd-}" ] || [ "${_spl_expected_pwd_physical-}" != "${_spl_guard_expected_pwd_physical-}" ] || [ "${_spl_expected_pwd_status-}" != "${_spl_guard_expected_pwd_status-}" ] || [ "${_spl_expected_search_path-}" != "${_spl_guard_search_path-}" ] || [ "${_spl_expected_meta_file-}" != "${_spl_guard_meta_file-}" ] || [ "${_spl_expected_meta_root-}" != "${_spl_guard_meta_root-}" ] || [ "${_spl_expected_layer-}" != "${_spl_guard_layer-}" ] || [ "${_spl_expected_dep_exists-}" != "${_spl_guard_dep_exists-}" ]; then
+      if [ "${_spl_expected_tmp-}" != "${_spl_guard_tmp-}" ] || [ "${_spl_expected_cleanup_tmp-}" != "${_spl_guard_cleanup_tmp-}" ] || [ "${_spl_expected_tmp_parent-}" != "${_spl_guard_tmp_parent-}" ] || [ "${_spl_expected_tmp_sentinel-}" != "${_spl_guard_tmp_sentinel-}" ] || [ "${_spl_expected_root-}" != "${_spl_guard_root-}" ] || [ "${_spl_expected_wanted-}" != "${_spl_guard_wanted-}" ] || [ "${_spl_expected_mode-}" != "${_spl_guard_mode-}" ] || [ "${_spl_expected_phase-}" != "${_spl_guard_phase-}" ] || [ "${_spl_expected_return-}" != "${_spl_guard_return-}" ] || [ "${_spl_expected_strict_error-}" != "${_spl_guard_strict_error-}" ] || [ "${_spl_expected_current_shell-}" != "${_spl_guard_current_shell-}" ] || [ "${_spl_expected_current_platform-}" != "${_spl_guard_current_platform-}" ] || [ "${_spl_expected_mod-}" != "${_spl_guard_mod-}" ] || [ "${_spl_expected_record-}" != "${_spl_guard_record-}" ] || [ "${_spl_expected_load-}" != "${_spl_guard_load-}" ] || [ "${_spl_expected_exports-}" != "${_spl_guard_exports-}" ] || [ "${_spl_expected_exports_to_cleanup-}" != "${_spl_guard_exports_to_cleanup-}" ] || [ "${_spl_wrapper_exports-}" != "${_spl_guard_wrapper_exports-}" ] || [ "${_spl_seen_words-}" != "${_spl_guard_seen_words-}" ] || [ "${_spl_strict_required_words-}" != "${_spl_guard_strict_required_words-}" ] || [ "${_spl_blocked_words-}" != "${_spl_guard_blocked_words-}" ] || [ "${_spl_modules_words-}" != "${_spl_guard_modules_words-}" ] || [ "${_spl_order_words-}" != "${_spl_guard_order_words-}" ] || [ "${_spl_failed_words-}" != "${_spl_guard_failed_words-}" ] || [ "${_spl_expected_pwd_was_set-}" != "${_spl_guard_expected_pwd_was_set-}" ] || [ "${_spl_expected_pwd-}" != "${_spl_guard_expected_pwd-}" ] || [ "${_spl_expected_oldpwd_was_set-}" != "${_spl_guard_expected_oldpwd_was_set-}" ] || [ "${_spl_expected_oldpwd-}" != "${_spl_guard_expected_oldpwd-}" ] || [ "${_spl_expected_pwd_physical-}" != "${_spl_guard_expected_pwd_physical-}" ] || [ "${_spl_expected_pwd_status-}" != "${_spl_guard_expected_pwd_status-}" ] || [ "${_spl_expected_search_path-}" != "${_spl_guard_search_path-}" ] || [ "${_spl_expected_meta_file-}" != "${_spl_guard_meta_file-}" ] || [ "${_spl_expected_meta_root-}" != "${_spl_guard_meta_root-}" ] || [ "${_spl_expected_layer-}" != "${_spl_guard_layer-}" ] || [ "${_spl_expected_dep_exists-}" != "${_spl_guard_dep_exists-}" ]; then
         _spl_private_modified=1
         _spl_expected_tmp=$_spl_guard_tmp
         _spl_expected_cleanup_tmp=$_spl_guard_cleanup_tmp
@@ -1291,7 +1265,6 @@ sp_loader_load_modules() {
         _spl_expected_mod=$_spl_guard_mod
         _spl_expected_record=$_spl_guard_record
         _spl_expected_load=$_spl_guard_load
-        _spl_expected_load_hook=$_spl_guard_load_hook
         _spl_expected_exports=$_spl_guard_exports
         _spl_expected_exports_to_cleanup=$_spl_guard_exports_to_cleanup
         _spl_wrapper_exports=$_spl_guard_wrapper_exports
@@ -1308,7 +1281,7 @@ sp_loader_load_modules() {
         _spl_expected_pwd_physical=$_spl_guard_expected_pwd_physical
         _spl_expected_pwd_status=$_spl_guard_expected_pwd_status
       fi
-      if [ "$_spl_tmp" != "$_spl_expected_tmp" ] || [ "$_spl_cleanup_tmp" != "$_spl_expected_cleanup_tmp" ] || [ "$_spl_tmp_parent" != "$_spl_expected_tmp_parent" ] || [ "$_spl_tmp_sentinel" != "$_spl_expected_tmp_sentinel" ] || [ "$_spl_root" != "$_spl_expected_root" ] || [ "$_spl_wanted" != "$_spl_expected_wanted" ] || [ "$_spl_mode" != "$_spl_expected_mode" ] || [ "$_spl_phase" != "$_spl_expected_phase" ] || [ "$_spl_return" != "$_spl_expected_return" ] || [ "$_spl_strict_error" != "$_spl_expected_strict_error" ] || [ "$_spl_current_shell" != "$_spl_expected_current_shell" ] || [ "$_spl_current_platform" != "$_spl_expected_current_platform" ] || [ "$_spl_mod" != "$_spl_expected_mod" ] || [ "$_spl_record" != "$_spl_expected_record" ] || [ "$_spl_load" != "$_spl_expected_load" ] || [ "$_spl_load_hook" != "$_spl_expected_load_hook" ] || [ "$_spl_exports" != "$_spl_expected_exports" ] || [ "$_spl_exports_to_cleanup" != "$_spl_expected_exports_to_cleanup" ] || [ "${_spl_search_path-}" != "${_spl_expected_search_path-}" ] || [ "${_spl_meta_file-}" != "${_spl_expected_meta_file-}" ] || [ "${_spl_meta_root-}" != "${_spl_expected_meta_root-}" ] || [ "${_spl_layer-}" != "${_spl_expected_layer-}" ] || [ "${_spl_dep_exists-}" != "${_spl_expected_dep_exists-}" ]; then
+      if [ "$_spl_tmp" != "$_spl_expected_tmp" ] || [ "$_spl_cleanup_tmp" != "$_spl_expected_cleanup_tmp" ] || [ "$_spl_tmp_parent" != "$_spl_expected_tmp_parent" ] || [ "$_spl_tmp_sentinel" != "$_spl_expected_tmp_sentinel" ] || [ "$_spl_root" != "$_spl_expected_root" ] || [ "$_spl_wanted" != "$_spl_expected_wanted" ] || [ "$_spl_mode" != "$_spl_expected_mode" ] || [ "$_spl_phase" != "$_spl_expected_phase" ] || [ "$_spl_return" != "$_spl_expected_return" ] || [ "$_spl_strict_error" != "$_spl_expected_strict_error" ] || [ "$_spl_current_shell" != "$_spl_expected_current_shell" ] || [ "$_spl_current_platform" != "$_spl_expected_current_platform" ] || [ "$_spl_mod" != "$_spl_expected_mod" ] || [ "$_spl_record" != "$_spl_expected_record" ] || [ "$_spl_load" != "$_spl_expected_load" ] || [ "$_spl_exports" != "$_spl_expected_exports" ] || [ "$_spl_exports_to_cleanup" != "$_spl_expected_exports_to_cleanup" ] || [ "${_spl_search_path-}" != "${_spl_expected_search_path-}" ] || [ "${_spl_meta_file-}" != "${_spl_expected_meta_file-}" ] || [ "${_spl_meta_root-}" != "${_spl_expected_meta_root-}" ] || [ "${_spl_layer-}" != "${_spl_expected_layer-}" ] || [ "${_spl_dep_exists-}" != "${_spl_expected_dep_exists-}" ]; then
         _spl_private_modified=1
         _spl_tmp=$_spl_expected_tmp
         _spl_cleanup_tmp=$_spl_expected_cleanup_tmp
@@ -1330,7 +1303,6 @@ sp_loader_load_modules() {
         _spl_mod=$_spl_expected_mod
         _spl_record=$_spl_expected_record
         _spl_load=$_spl_expected_load
-        _spl_load_hook=$_spl_expected_load_hook
         _spl_exports=$_spl_expected_exports
         _spl_exports_to_cleanup=$_spl_expected_exports_to_cleanup
       fi
@@ -1536,13 +1508,13 @@ sp_loader_load_modules() {
       _spl_expected_root _spl_expected_wanted _spl_expected_mode _spl_expected_phase \
       _spl_expected_search_path _spl_expected_meta_file _spl_expected_meta_root _spl_expected_layer _spl_expected_dep_exists \
       _spl_expected_return _spl_expected_strict_error _spl_expected_current_shell _spl_expected_current_platform \
-      _spl_expected_mod _spl_expected_record _spl_expected_load _spl_expected_load_hook \
+      _spl_expected_mod _spl_expected_record _spl_expected_load \
       _spl_expected_exports _spl_expected_exports_to_cleanup \
       _spl_guard_tmp _spl_guard_cleanup_tmp _spl_guard_tmp_parent _spl_guard_tmp_sentinel \
       _spl_guard_root _spl_guard_wanted _spl_guard_mode _spl_guard_phase \
       _spl_guard_search_path _spl_guard_meta_file _spl_guard_meta_root _spl_guard_layer _spl_guard_dep_exists \
       _spl_guard_return _spl_guard_strict_error _spl_guard_current_shell _spl_guard_current_platform \
-      _spl_guard_mod _spl_guard_record _spl_guard_load _spl_guard_load_hook \
+      _spl_guard_mod _spl_guard_record _spl_guard_load \
       _spl_guard_exports _spl_guard_exports_to_cleanup _spl_guard_wrapper_exports \
       _spl_guard_expected_pwd_was_set _spl_guard_expected_pwd \
       _spl_guard_expected_oldpwd_was_set _spl_guard_expected_oldpwd \
@@ -1563,17 +1535,17 @@ sp_loader_load_modules() {
       _spl_value _spl_requires _spl_optional \
       _spl_dep_ifs_was_set _spl_dep_old_ifs _spl_dep _spl_progress _spl_ready \
       _spl_blocked_by _spl_topo_ifs_was_set _spl_topo_old_ifs _spl_runtime_skip \
-      _spl_run_ifs_was_set _spl_run_old_ifs _spl_load _spl_load_hook \
+      _spl_run_ifs_was_set _spl_run_old_ifs _spl_load \
       _spl_exports _spl_exports_to_cleanup _spl_wrapper_exports _spl_export_ifs_was_set _spl_export_old_ifs _spl_export \
       _spl_export_lookup _spl_export_conflict _spl_reload_ifs_was_set _spl_reload_old_ifs \
-      _spl_load_status _spl_load_path _spl_hook_body \
+      _spl_load_status _spl_load_path \
       _spl_search_path _spl_layer _spl_meta_file _spl_meta_root _spl_dep_exists _spl_existing_load _spl_layer_load _spl_conflict _spl_layer_ifs_was_set _spl_layer_old_ifs _spl_existing_version _spl_layer_version _spl_existing_version_display _spl_layer_version_display _spl_layer_glob_was_set
     unset _spl_seen_words _spl_strict_required_words _spl_blocked_words _spl_modules_words \
       _spl_order_words _spl_failed_words _spl_guard_seen_words _spl_guard_strict_required_words \
       _spl_guard_blocked_words _spl_guard_modules_words _spl_guard_order_words _spl_guard_failed_words \
       _spl_record_name _spl_record_requires _spl_record_optional _spl_record_shells \
       _spl_record_platforms _spl_record_side_effect _spl_record_exports _spl_record_updates \
-      _spl_record_version _spl_record_load _spl_record_load_hook _spl_run_line _spl_module_root
+      _spl_record_version _spl_record_load _spl_run_line _spl_module_root
     unset -f _sp_loader_path_is_physical _sp_loader_read_record _sp_loader_reserved_scan 2>/dev/null || :
     return 0
   fi
@@ -1584,13 +1556,13 @@ sp_loader_load_modules() {
     _spl_expected_root _spl_expected_wanted _spl_expected_mode _spl_expected_phase \
       _spl_expected_search_path _spl_expected_meta_file _spl_expected_meta_root _spl_expected_layer _spl_expected_dep_exists \
     _spl_expected_return _spl_expected_strict_error _spl_expected_current_shell _spl_expected_current_platform \
-    _spl_expected_mod _spl_expected_record _spl_expected_load _spl_expected_load_hook \
+    _spl_expected_mod _spl_expected_record _spl_expected_load \
     _spl_expected_exports _spl_expected_exports_to_cleanup \
     _spl_guard_tmp _spl_guard_cleanup_tmp _spl_guard_tmp_parent _spl_guard_tmp_sentinel \
     _spl_guard_root _spl_guard_wanted _spl_guard_mode _spl_guard_phase \
       _spl_guard_search_path _spl_guard_meta_file _spl_guard_meta_root _spl_guard_layer _spl_guard_dep_exists \
     _spl_guard_return _spl_guard_strict_error _spl_guard_current_shell _spl_guard_current_platform \
-    _spl_guard_mod _spl_guard_record _spl_guard_load _spl_guard_load_hook \
+    _spl_guard_mod _spl_guard_record _spl_guard_load \
     _spl_guard_exports _spl_guard_exports_to_cleanup _spl_guard_wrapper_exports \
     _spl_guard_expected_pwd_was_set _spl_guard_expected_pwd \
     _spl_guard_expected_oldpwd_was_set _spl_guard_expected_oldpwd \
@@ -1611,17 +1583,17 @@ sp_loader_load_modules() {
     _spl_value _spl_requires _spl_optional \
     _spl_dep_ifs_was_set _spl_dep_old_ifs _spl_dep _spl_progress _spl_ready \
     _spl_blocked_by _spl_topo_ifs_was_set _spl_topo_old_ifs _spl_runtime_skip \
-    _spl_run_ifs_was_set _spl_run_old_ifs _spl_load _spl_load_hook \
+    _spl_run_ifs_was_set _spl_run_old_ifs _spl_load \
     _spl_exports _spl_exports_to_cleanup _spl_wrapper_exports _spl_export_ifs_was_set _spl_export_old_ifs _spl_export \
       _spl_export_lookup _spl_export_conflict _spl_reload_ifs_was_set _spl_reload_old_ifs \
-    _spl_load_status _spl_load_path _spl_hook_body \
+    _spl_load_status _spl_load_path \
       _spl_search_path _spl_layer _spl_meta_file _spl_meta_root _spl_dep_exists _spl_existing_load _spl_layer_load _spl_conflict _spl_layer_ifs_was_set _spl_layer_old_ifs _spl_existing_version _spl_layer_version _spl_existing_version_display _spl_layer_version_display _spl_layer_glob_was_set
   unset _spl_seen_words _spl_strict_required_words _spl_blocked_words _spl_modules_words \
     _spl_order_words _spl_failed_words _spl_guard_seen_words _spl_guard_strict_required_words \
     _spl_guard_blocked_words _spl_guard_modules_words _spl_guard_order_words _spl_guard_failed_words \
     _spl_record_name _spl_record_requires _spl_record_optional _spl_record_shells \
     _spl_record_platforms _spl_record_side_effect _spl_record_exports _spl_record_updates \
-    _spl_record_version _spl_record_load _spl_record_load_hook _spl_run_line _spl_module_root
+    _spl_record_version _spl_record_load _spl_run_line _spl_module_root
   unset -f _sp_loader_path_is_physical _sp_loader_read_record _sp_loader_reserved_scan 2>/dev/null || :
   return 1
 }

@@ -68,11 +68,6 @@ run_read() {
   _status=$?
 }
 
-run_bridge() {
-  _out=$(sp_metadata_legacy_bridge "$@" 2>&1)
-  _status=$?
-}
-
 printf '\n=== Metadata ABI library presence ===\n'
 _total=$((_total + 1))
 if [ -f "$METADATA_SH" ]; then
@@ -83,7 +78,7 @@ else
   fail 'metadata library exists' "$METADATA_SH"
 fi
 
-for _fn in sp_metadata_read sp_metadata_legacy_bridge sp_metadata_validate_identifier sp_metadata_validate_source_side_effect; do
+for _fn in sp_metadata_read sp_metadata_validate_identifier sp_metadata_validate_source_side_effect; do
   _total=$((_total + 1))
   if type "$_fn" >/dev/null 2>&1; then
     pass "metadata function exists: $_fn"
@@ -152,7 +147,7 @@ updates=
 META
 run_read "$_no_body_no_deps"
 assert_exit 'metadata rejects a module with no body and no dependencies' 1 "$_status"
-assert_contains 'missing load target diagnostic names the alternatives' "$_out" 'load, load_hook, or requires'
+assert_contains 'missing load target diagnostic names the alternatives' "$_out" 'load or requires'
 
 _optional_only_no_load="$_tmp/optional_only_no_load.meta"
 cat >"$_optional_only_no_load" <<'META'
@@ -167,7 +162,7 @@ updates=
 META
 run_read "$_optional_only_no_load"
 assert_exit 'metadata rejects an optional-only module without a load target' 1 "$_status"
-assert_contains 'optional-only diagnostic names the load-target alternatives' "$_out" 'load, load_hook, or requires'
+assert_contains 'optional-only diagnostic names the load-target alternatives' "$_out" 'load or requires'
 
 printf '\n=== Metadata version field ===\n'
 _versioned="$_tmp/versioned.meta"
@@ -186,9 +181,6 @@ META
 run_read "$_versioned"
 assert_exit 'versioned metadata parses' 0 "$_status"
 assert_contains 'versioned metadata emits version' "$_out" 'version=2.1.0-rc1'
-run_bridge versioned_bridge dep read-only versioned_bridge
-assert_exit 'legacy bridge serializes' 0 "$_status"
-assert_contains 'legacy bridge emits empty version' "$_out" 'version='
 for _bad_version in v1 '1.0 beta' '1.*' '-1' '-rc1'; do
   _bad_version_meta="$_tmp/bad-version.meta"
   cat >"$_bad_version_meta" <<META
@@ -214,10 +206,6 @@ _out=$(bash -uc '. "$1"; unset IFS; sp_metadata_read "$2"' _ "$METADATA_SH" "$_v
 _status=$?
 assert_exit 'valid metadata parses when caller IFS is unset under nounset' 0 "$_status"
 assert_contains 'unset-IFS metadata read emits module name' "$_out" 'name=path_utilities'
-_out=$(bash -uc '. "$1"; unset IFS; sp_metadata_legacy_bridge bridge_probe dep read-only bridge_probe' _ "$METADATA_SH" 2>&1)
-_status=$?
-assert_exit 'legacy bridge serializes when caller IFS is unset under nounset' 0 "$_status"
-assert_contains 'unset-IFS legacy bridge emits load hook' "$_out" 'load_hook=_shell_module_bridge_probe'
 _out=$(bash -uc '. "$1"; unset IFS; sp_metadata_validate_identifier_list "dep" dependency; case "${IFS+x}" in x) printf set ;; *) printf unset ;; esac' _ "$METADATA_SH" 2>&1)
 _status=$?
 assert_exit 'identifier list accepts valid value with unset IFS under nounset' 0 "$_status"
@@ -464,8 +452,8 @@ load=
 load_hook=bad/hook
 META
 run_read "$_bad_load_hook"
-assert_exit 'metadata rejects unsafe load_hook identifiers' 1 "$_status"
-assert_contains 'invalid load_hook diagnostic is explicit' "$_out" 'invalid load_hook'
+assert_exit 'metadata rejects the retired load_hook field' 1 "$_status"
+assert_contains 'load_hook diagnostic points at load' "$_out" 'metadata field load_hook is not supported; use load'
 
 _ambiguous_load="$_tmp/ambiguous-load.meta"
 cat >"$_ambiguous_load" <<'META'
@@ -480,8 +468,8 @@ load=modules/core/ambiguous_load.sh
 load_hook=_shell_module_ambiguous_load
 META
 run_read "$_ambiguous_load"
-assert_exit 'metadata rejects simultaneous load and load_hook targets' 1 "$_status"
-assert_contains 'ambiguous load target diagnostic is explicit' "$_out" 'load and load_hook are mutually exclusive'
+assert_exit 'metadata rejects load_hook even beside load' 1 "$_status"
+assert_contains 'load_hook beside load diagnostic points at load' "$_out" 'metadata field load_hook is not supported; use load'
 
 for _retired_field in unload failure_policy; do
   _retired_meta="$_tmp/retired-$_retired_field.meta"
@@ -526,32 +514,6 @@ _out=$(sp_metadata_validate_source_side_effect install-time 2>&1)
 _status=$?
 assert_exit 'ordinary source rejects install-time side-effect class' 1 "$_status"
 assert_contains 'install-time source rejection diagnostic is explicit' "$_out" 'side_effect not allowed during ordinary source: install-time'
-
-printf '\n=== Legacy compatibility bridge serialization ===\n'
-run_bridge remote_script_manager 'secure_local_bin' update-network 'remote_script_fetch remote_script_update remote_script_update_all remote_script_check remote_script_status'
-assert_exit 'legacy bridge serializes existing module metadata' 0 "$_status"
-assert_contains 'legacy bridge emits module name' "$_out" 'name=remote_script_manager'
-assert_contains 'legacy bridge emits dependencies' "$_out" 'requires=secure_local_bin'
-assert_contains 'legacy bridge emits side-effect class' "$_out" 'side_effect=update-network'
-assert_contains 'legacy bridge emits legacy load hook' "$_out" 'load_hook=_shell_module_remote_script_manager'
-assert_contains 'legacy bridge emits exported commands' "$_out" 'exports=remote_script_fetch remote_script_update remote_script_update_all remote_script_check remote_script_status'
-_bridge_meta="$_tmp/bridge.meta"
-printf '%s\n' "$_out" >"$_bridge_meta"
-run_read "$_bridge_meta"
-assert_exit 'legacy bridge output round-trips through metadata reader' 0 "$_status"
-assert_contains 'round-tripped bridge keeps load hook' "$_out" 'load_hook=_shell_module_remote_script_manager'
-_tab=$(printf '\t')
-run_bridge bridge_probe "dep${_tab}evil" read-only bridge_probe
-assert_exit 'legacy bridge rejects tab control character in dependencies' 1 "$_status"
-assert_contains 'legacy bridge dependency control diagnostic is explicit' "$_out" 'invalid dependency'
-run_bridge bridge_probe dep read-only "export${_tab}evil"
-assert_exit 'legacy bridge rejects tab control character in exports' 1 "$_status"
-assert_contains 'legacy bridge export control diagnostic is explicit' "$_out" 'invalid export'
-_out=$(IFS=/; sp_metadata_legacy_bridge bridge_probe 'ok/escape' read-only bridge_probe 2>&1)
-_status=$?
-assert_exit 'legacy bridge rejects dependency path separator with hostile IFS' 1 "$_status"
-assert_contains 'legacy bridge hostile IFS dependency diagnostic is explicit' "$_out" 'invalid dependency'
-unset _tab
 
 printf '\n=== metadata-abi summary ===\n'
 printf 'Total: %d  Pass: %d  Fail: %d\n' "$_total" "$_pass" "$_fail"

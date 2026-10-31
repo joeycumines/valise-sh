@@ -43,11 +43,10 @@ load=modules/system/example_tool.sh
 | `exports` | No | Public functions this module declares |
 | `updates` | No | Update registration identifiers mapped in the project update manifest |
 | `version` | No | Module version (digit-first, digits/letters/`.`/`_`/`-`); different versions of one name across roots fail closed with a skew diagnostic |
-| `load` | Conditionally | Repository-relative path to the module body (mutually exclusive with `load_hook`) |
-| `load_hook` | Conditionally | Shell function hook for bridge-backed records (mutually exclusive with `load`) |
+| `load` | Conditionally | Repository-relative path to the module body |
 
-At least one of `load`, `load_hook`, or `requires` must be present. `load` and
-`load_hook` are mutually exclusive; `load` and `requires` are not — a module
+At least one of `load` or `requires` must be present. `load` and `requires`
+are not mutually exclusive — a module
 may declare both and will load its dependencies first, then its own body. A
 module with `requires` and no load target is a **meta module**: it names
 dependencies and has no body. See

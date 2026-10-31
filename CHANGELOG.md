@@ -46,10 +46,9 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
   behavior), `profile` (one shared `~/.profile` snippet), and `none` (no
   startup file). `--no-shell-integration` remains as the equivalent legacy
   spelling.
-- Meta modules: metadata with `requires=` and neither `load` nor `load_hook`
-  is a dependency-only aggregator and loads successfully without a body.
-  `load` and `load_hook` are mutually exclusive; `load` and `requires` may
-  be combined.
+- Meta modules: metadata with `requires=` and no `load` is a
+  dependency-only aggregator and loads successfully without a body. `load`
+  and `requires` may be combined.
 - `side_effect=local-state`, a source-safe side-effect class for modules
   that write under the XDG state directory.
 - `VALISE_RELOAD=1`, which unsets the declared exports of the requested

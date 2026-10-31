@@ -89,6 +89,10 @@ _meta "$_fixture/module.d/local_state_skip.meta" local_state_skip "sh bash zsh k
 _meta "$_fixture/module.d/meta_only.meta" meta_only "sh bash zsh ksh" any read-only '' '' local_state_skip
 _meta "$_fixture/module.d/meta_dependent.meta" meta_dependent fish any read-only meta_dependent_loaded modules/fish/meta_dependent.fish meta_only
 _body "$_fixture/modules/fish/meta_dependent.fish" 'function meta_dependent_loaded; end'
+# A Fish-native dependency-only meta record has no body; its requires edge
+# still loads normally.
+_meta "$_fixture/module.d/fish_meta.meta" fish_meta fish any read-only '' '' clean
+_meta "$_fixture/module.d/fish_meta_exports.meta" fish_meta_exports fish any read-only fish_meta_exports_loaded '' clean
 # An optional-only cycle pins the native Fish ordering contract: the
 # single-pass Kahn sort has no optional-relaxed fallback (unlike the POSIX
 # loader's two-pass sort), so a stall quarantines its members — strict mode
@@ -1835,6 +1839,13 @@ set -q shell_skip_sourced; and exit 1
 bootstrap strict meta_dependent
 or exit 1
 functions -q meta_dependent_loaded; or exit 1
+bootstrap strict fish_meta
+or exit 1
+functions -q clean_loaded; or exit 1
+# A meta record cannot claim exports it has no body to define.
+bootstrap strict fish_meta_exports
+and exit 1
+functions -q fish_meta_exports_loaded; and exit 1
 
 # Directly-requested non-Fish seeds follow the ABI mode contract, aligned
 # with the POSIX loader's strict-required failure for shell-mismatched

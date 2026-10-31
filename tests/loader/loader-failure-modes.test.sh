@@ -141,9 +141,6 @@ for _fixture in \
   module.d/platform_nested_mid_linux.meta \
   module.d/platform_nested_root_linux.meta \
   module.d/zzz_platform_nested_bridge_linux.meta \
-  module.d/bridge_ok.meta \
-  module.d/bridge_command_hijack.meta \
-  module.d/bridge_fail.meta \
   modules/core.sh \
   modules/alpha.sh \
   modules/beta.sh \
@@ -258,25 +255,6 @@ run_loader() {
     . "$METADATA_SH"
     # shellcheck disable=SC1090
     . "$LOADER_SH"
-    _shell_module_bridge_ok() {
-      printf '%s\n' bridge_ok >>"$SP_LOADER_TEST_TRACE"
-      bridge_ok_loaded() { :; }
-    }
-    _shell_module_bridge_fail() {
-      printf '%s\n' bridge_fail_started >>"$SP_LOADER_TEST_TRACE"
-      bridge_fail_loaded() { :; }
-      return 29
-    }
-    _shell_module_bridge_command_hijack() {
-      printf '%s\n' bridge_command_hijack_started >>"$SP_LOADER_TEST_TRACE"
-      bridge_command_hijack_loaded() { :; }
-      command() {
-        printf '%s\n' bridge_command_hijack_marker >>"$SP_LOADER_TEST_TRACE"
-        "$@"
-      }
-      readonly -f command 2>/dev/null || :
-      return 38
-    }
     if [ "$_case" = preexisting_function_export ]; then
       preexisting_function_loaded() { :; }
     fi
@@ -362,7 +340,7 @@ run_loader() {
     if [ -n "$_leaked_internal_funcs" ]; then
       printf 'LEAKED_INTERNAL_FUNCS=%s\n' "$_leaked_internal_funcs"
     fi
-    for _failed_export in bridge_fail_loaded bridge_command_hijack_loaded failed_hook_loaded optional_failed_dep_loaded optional_required_runtime_req_loaded command_hijack_dep_loaded readonly_command_loaded unset_command_loaded clobber_utility_loaded clobber_shell_state_loaded clobber_expected_loaded clobber_state_loaded clobber_search_path_loaded clobber_unset_loaded clobber_private_loaded clobber_cleanup_loaded printf_hijack_dep_loaded; do
+    for _failed_export in failed_hook_loaded optional_failed_dep_loaded optional_required_runtime_req_loaded command_hijack_dep_loaded readonly_command_loaded unset_command_loaded clobber_utility_loaded clobber_shell_state_loaded clobber_expected_loaded clobber_state_loaded clobber_search_path_loaded clobber_unset_loaded clobber_private_loaded clobber_cleanup_loaded printf_hijack_dep_loaded; do
       if command -v "$_failed_export" >/dev/null 2>&1; then
         printf 'LEAKED_FAILED_EXPORT=%s\n' "$_failed_export"
       fi
@@ -721,10 +699,10 @@ assert_eq 'invalid dependency never loads module body' '' "$_trace_out"
 assert_no_loader_leaks 'invalid dependency failure'
 
 run_loader failed_hook 'core failed_hook' permissive ordinary
-assert_eq 'permissive failed load hook remains non-fatal for unrelated modules' 0 "$_status"
-assert_contains 'failed hook diagnostic names module' "$_err" 'failed_hook'
-assert_eq 'failed hook attempts only dependency and failing hook' $'core\nfailed_hook_started' "$_trace_out"
-assert_no_loader_leaks 'permissive failed hook'
+assert_eq 'permissive failed file-backed import remains non-fatal for unrelated modules' 0 "$_status"
+assert_contains 'failed file-backed import diagnostic names module' "$_err" 'failed_hook'
+assert_eq 'failed import attempts only dependency and failing body' $'core\nfailed_hook_started' "$_trace_out"
+assert_no_loader_leaks 'permissive failed file-backed import'
 
 run_loader strict_failed_file_import 'core failed_hook' strict ordinary
 assert_eq 'strict file-backed import failure returns failure' 1 "$_status"
@@ -931,29 +909,6 @@ assert_eq 'strict fails for a platform skip under a promoted required module' 1 
 assert_contains 'nested platform skip diagnostic names the skipped module' "$_err" "platform_edge_blocked_$_edge_blocked_suffix: unsupported platform"
 assert_eq 'strict nested platform skip runs no module bodies' '' "$_trace_out"
 assert_no_loader_leaks 'strict nested platform skip'
-
-run_loader bridge_hook bridge_ok strict ordinary
-assert_eq 'bridge load_hook module loads through hook' 0 "$_status"
-assert_eq 'bridge load_hook records expected trace' 'bridge_ok' "$_trace_out"
-assert_no_loader_leaks 'bridge load_hook success'
-
-run_loader failed_bridge_hook_strict bridge_fail strict ordinary
-assert_eq 'strict failed load_hook returns failure' 1 "$_status"
-assert_contains 'strict failed load_hook diagnostic names module' "$_err" 'bridge_fail'
-assert_eq 'strict failed load_hook records dependency and failed hook only' $'core\nbridge_fail_started' "$_trace_out"
-assert_no_loader_leaks 'strict failed load_hook'
-
-run_loader failed_bridge_hook_permissive bridge_fail permissive ordinary
-assert_eq 'permissive failed load_hook remains non-fatal' 0 "$_status"
-assert_contains 'permissive failed load_hook diagnostic names module' "$_err" 'bridge_fail'
-assert_eq 'permissive failed load_hook records dependency and failed hook only' $'core\nbridge_fail_started' "$_trace_out"
-assert_no_loader_leaks 'permissive failed load_hook'
-
-run_loader bridge_command_hijack bridge_command_hijack strict ordinary
-assert_eq 'strict reserved-utility load_hook fails before invocation' 1 "$_status"
-assert_contains 'reserved-utility load_hook diagnostic names reserved shell utility' "$_err" 'reserved shell utility'
-assert_eq 'reserved-utility load_hook body never executes' '' "$_trace_out"
-assert_no_loader_leaks 'reserved-utility load_hook leaves no command function or failed export'
 
 printf '\n=== Loader reload contract ===\n'
 _reload_trace="$_tmp/reload.trace"
