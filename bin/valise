@@ -986,7 +986,8 @@ print_fish_integration() {
   _fish_cli_literal=$(fish_quote "$_fish_cli_path") || return 1
   _fish_source_tree_mode=${_fish_source_tree_mode:-0}
   printf '%s\n' \
-    "# valise shell integration" \
+    "# valise Fish integration. Do not edit." \
+    "# This hook loads the active valise release for Fish sessions." \
     "begin" \
     "set -l _valise_fish_source_tree_mode $_fish_source_tree_mode" \
     "set -l _valise_fish_previous_root ''" \
@@ -2742,7 +2743,7 @@ integration_has_managed_block() {
   _ihb_awk=$(trusted_utility_path awk) || return 1
   "$_ihb_awk" '
     index($0, "# BEGIN valise managed block") { found = 1; exit }
-    index($0, "Managed by valise install") { found = 1; exit }
+    index($0, "# valise Fish integration") { found = 1; exit }
     END { exit !found }
   ' "$1" 2>/dev/null
 }
@@ -2781,9 +2782,9 @@ integration_shell_files() {
 # for the user's own shell, except ~/.zprofile, because zsh reads nothing else at
 # login. Existing files are always kept current.
 #
-# posix_integration_targets <home>
+# posix_startup_targets <home>
 # prints one path per line.
-posix_integration_targets() {
+posix_startup_targets() {
   printf '%s\n' "$1/.profile"
   if [ -e "$1/.bash_profile" ] || [ -L "$1/.bash_profile" ]; then
     printf '%s\n' "$1/.bash_profile"
@@ -2811,7 +2812,7 @@ write_posix_integration() {
   fi
   _wpi_home=$(path_normalize "$HOME") || die "cannot resolve HOME"
   _wpi_snippet=$(print_posix_integration) || die "cannot generate integration block"
-  _wpi_targets=$(posix_integration_targets "$_wpi_home")
+  _wpi_targets=$(posix_startup_targets "$_wpi_home")
   while IFS= read -r _wpi_target; do
     [ -n "$_wpi_target" ] || continue
     project_write_integration "$_wpi_target" "$_wpi_snippet"
@@ -3411,9 +3412,9 @@ cmd_install() {
     info "active release set to $_release_id"
   fi
 
-  # Deploy the Fish conf.d hook when Fish is available. Installed releases
-  # currently expose the generated Fish plan; older releases may expose the
-  # project Fish entrypoint, so the emitted integration handles both.
+  # Deploy the Fish conf.d hook when Fish is available. A built release has no
+  # Fish surface; an engine release exposes the project Fish entrypoint, so the
+  # emitted integration handles that shape.
   _fish_path=$(trusted_utility_path fish 2>/dev/null || :)
   if [ "$_install_integration" -eq 1 ] && [ -n "$_fish_path" ]; then
     _fish_conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
@@ -3429,12 +3430,7 @@ cmd_install() {
     # shell redirection below into an attacker-selected victim.
     _hook_tmp=$(trusted_mktemp_at "$_fish_conf_dir" file "$_fish_conf_dir/.valise-hook.XXXXXX") || die "cannot create Fish hook staging file"
     [ -f "$_hook_tmp" ] && [ ! -L "$_hook_tmp" ] || die "Fish hook staging path is unsafe"
-    {
-      printf '%s\n' \
-        "# Managed by valise install — do not edit." \
-        "# This hook loads the active valise release for Fish sessions."
-      print_fish_integration
-    } >"$_hook_tmp" || die "cannot write Fish hook"
+    print_fish_integration >"$_hook_tmp" || die "cannot write Fish hook"
     _chmod_path=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
     "$_chmod_path" 0644 "$_hook_tmp" || die "cannot set Fish hook mode"
     _cat_path=$(trusted_utility_path cat) || die "no trusted cat utility available"
@@ -4621,7 +4617,7 @@ cmd_status() {
   printf 'variant: %s\n' "$_project_variant"
   printf 'bundle: %s\n' "$_project_bundle"
   _status_home=$(path_normalize "$HOME") || die "cannot resolve HOME"
-  _status_targets=$(posix_integration_targets "$_status_home")
+  _status_targets=$(posix_startup_targets "$_status_home")
   while IFS= read -r _status_target; do
     [ -n "$_status_target" ] || continue
     if [ -L "$_status_target" ]; then

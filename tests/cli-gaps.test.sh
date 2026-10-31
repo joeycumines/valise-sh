@@ -634,6 +634,31 @@ else
   cat "$_test_root/doctor-fish.out" >&2
 fi
 
+# A user who follows the manual instructions saves `valise init fish`
+# output as the hook. It must carry the same header install writes, or
+# doctor rejects the very file the docs told the user to create.
+if (
+  HOME="$_fish_home" \
+    XDG_DATA_HOME="$_fish_home/.local/share" \
+    XDG_CONFIG_HOME="$_fish_home/.config" \
+    XDG_STATE_HOME="$_fish_home/.local/state" \
+    SHELL=/usr/local/bin/fish \
+    "$_valise" init fish
+) >"$_fish_home/.config/fish/conf.d/valise.fish" 2>"$_test_root/init-fish.err" &&
+  (
+    HOME="$_fish_home" \
+      XDG_DATA_HOME="$_fish_home/.local/share" \
+      XDG_CONFIG_HOME="$_fish_home/.config" \
+      XDG_STATE_HOME="$_fish_home/.local/state" \
+      SHELL=/usr/local/bin/fish \
+      "$_valise" doctor
+  ) >"$_test_root/doctor-fish-manual.out" 2>&1; then
+  pass "doctor accepts a hand-saved init fish hook"
+else
+  fail "doctor accepts a hand-saved init fish hook"
+  cat "$_test_root/doctor-fish-manual.out" "$_test_root/init-fish.err" >&2 2>/dev/null || :
+fi
+
 # (4) `layer-lint` with no argument must print its usage and fail on
 # every shell. A failing shift is a special-builtin error, so the guard
 # has to check the argument count before shifting.
