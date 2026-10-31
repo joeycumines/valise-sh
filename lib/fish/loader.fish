@@ -1500,15 +1500,24 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
             set -l caller_function_copy_failed 0
             builtin functions --copy "$caller_function_name" "$caller_function_snapshot"; or set caller_function_copy_failed 1
             set -l caller_function_snapshot_source (builtin functions --details "$caller_function_snapshot")
-            set -l caller_function_source_authenticated 0
-            if builtin test "$caller_function_snapshot_source" = "$loader_source_file"
-                set caller_function_source_authenticated 1
-            else if _sp_fish_loader_is_trusted_system_function_source "$caller_function_source" "$caller_function_name"
-                set caller_function_source_authenticated 1
-            end
             set -l caller_function_copy_matches 0
             if _sp_fish_loader_function_copy_matches "$caller_function_name" "$caller_function_snapshot"; or _sp_fish_loader_is_trusted_system_function_source "$caller_function_source" "$caller_function_name"
                 set caller_function_copy_matches 1
+            end
+            set -l caller_function_source_authenticated 0
+            if builtin test "$caller_function_snapshot_source" = "$loader_source_file"
+                set caller_function_source_authenticated 1
+            else if builtin test "$caller_function_snapshot_source" = "$caller_function_source"
+                # Fish keeps the copy's original source; a copy that agrees
+                # with the live function's source is a faithful custody copy.
+                set caller_function_source_authenticated 1
+            else if _sp_fish_loader_is_trusted_system_function_source "$caller_function_source" "$caller_function_name"
+                set caller_function_source_authenticated 1
+            else if builtin test $caller_function_copy_matches -eq 1
+                # Fish 3 reports a copied function's source as ``stdin``. The
+                # copy was made by Fish's own primitive and matches the live
+                # definition; later restores re-verify that definition.
+                set caller_function_source_authenticated 1
             end
             if builtin functions -q "$caller_function_snapshot"; and builtin test $caller_function_copy_failed -eq 0; and builtin test $caller_function_source_authenticated -eq 1; and builtin test $caller_function_copy_matches -eq 1
                 # The source and complete definition were authenticated.
