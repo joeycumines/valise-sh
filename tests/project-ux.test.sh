@@ -283,6 +283,125 @@ else
 fi
 unset _slash_home _slash_project
 
+# --- Managed block markers ---------------------------------------------------
+_marker_home="$_test_home/marker-home"
+_marker_project="$_test_home/marker-project"
+mkdir -p "$_marker_home"
+(cd "$_test_home" && _env new marker-project) >/dev/null 2>&1 || :
+_marker_env() {
+  HOME="$_marker_home" \
+  XDG_DATA_HOME="$_marker_home/.local/share" \
+  XDG_CONFIG_HOME="$_marker_home/.config" \
+  XDG_STATE_HOME="$_marker_home/.local/state" \
+  "$_valise" "$@"
+}
+for _marker_case in unpaired_begin altered_end orphan_end nested_begin; do
+  case "$_marker_case" in
+  unpaired_begin) printf '%s\n' '# BEGIN valise managed block' 'old' 'export USER_LINE=1' ;;
+  altered_end) printf '%s\n' '# BEGIN valise managed block' 'old' '# END valise managed block trimmed' 'export USER_LINE=1' ;;
+  orphan_end) printf '%s\n' 'old' '# END valise managed block' 'export USER_LINE=1' ;;
+  nested_begin) printf '%s\n' '# BEGIN valise managed block' '# BEGIN valise managed block' '# END valise managed block' 'export USER_LINE=1' ;;
+  esac >"$_marker_home/.profile"
+  cp "$_marker_home/.profile" "$_test_home/marker.before"
+  if (cd "$_marker_project" && _marker_env apply) \
+    >"$_test_home/marker.out" 2>"$_test_home/marker.err"; then
+    fail "apply refuses $_marker_case markers"
+  elif grep -F 'unpaired valise managed block markers' "$_test_home/marker.err" >/dev/null &&
+    cmp -s "$_test_home/marker.before" "$_marker_home/.profile"; then
+    pass "apply refuses $_marker_case markers and leaves the file unchanged"
+  else
+    fail "apply refuses $_marker_case markers and leaves the file unchanged"
+    cat "$_test_home/marker.err" >&2
+  fi
+done
+unset _marker_case
+
+# --- module remove ------------------------------------------------------------
+_rm_project="$_test_home/rm-project"
+(cd "$_test_home" && _env new rm-project) >/dev/null 2>&1 || :
+(cd "$_rm_project" && _env module new keeper --exports=keeper_fn && _env module new gone --exports=gone_fn &&
+  _env module new only_root --exports=only_root_fn) >/dev/null 2>&1 || :
+cat >"$_rm_project/shell/module.d/only_child_meta.meta" <<'EOF'
+name=only_child_meta
+version=
+side_effect=read-only
+requires=only_root
+optional=
+shells=sh
+platforms=any
+exports=
+updates=
+load=
+EOF
+printf 'variant_name\tdescription\texcluded_modules\nworkstation-full\tAll\t\nminimal\tMinimal\tgone\nsmall\tSmall\tgone keeper\n' \
+  >"$_rm_project/shell/release/install-variants"
+printf '# bundle\tshell\troots\ndefault\tbash\tprofile_main gone\ndefault\tzsh\tprofile_main\ndefault\tksh\tprofile_main\n' \
+  >"$_rm_project/shell/release/bundle-roots"
+if (cd "$_rm_project" && _env module remove only_root) \
+  >"$_test_home/rm-refuse.out" 2>"$_test_home/rm-refuse.err"; then
+  fail "module remove refuses to empty a meta module"
+elif grep -F 'only_child_meta requires only this module' "$_test_home/rm-refuse.err" >/dev/null &&
+  [ -f "$_rm_project/shell/modules/only_root.sh" ] &&
+  [ -f "$_rm_project/shell/module.d/only_root.meta" ] &&
+  grep -Fx 'requires=only_root' "$_rm_project/shell/module.d/only_child_meta.meta" >/dev/null; then
+  pass "module remove refuses to empty a meta module and changes nothing"
+else
+  fail "module remove refuses to empty a meta module and changes nothing"
+  cat "$_test_home/rm-refuse.err" >&2
+fi
+rm -f "$_rm_project/shell/module.d/only_child_meta.meta"
+if (cd "$_rm_project" && _env module remove profile_main) \
+  >"$_test_home/rm-root.out" 2>"$_test_home/rm-root.err"; then
+  fail "module remove refuses to empty a bundle"
+elif grep -F 'only root of a bundle' "$_test_home/rm-root.err" >/dev/null &&
+  [ -f "$_rm_project/shell/module.d/profile_main.meta" ]; then
+  pass "module remove refuses to empty a bundle and changes nothing"
+else
+  fail "module remove refuses to empty a bundle and changes nothing"
+  cat "$_test_home/rm-root.err" >&2
+fi
+if (cd "$_rm_project" && _env module remove gone && _env build) \
+  >"$_test_home/rm-refs.out" 2>"$_test_home/rm-refs.err" &&
+  (cd "$_rm_project" && _env build --variant=minimal "$_test_home/rm-minimal") \
+  >>"$_test_home/rm-refs.out" 2>>"$_test_home/rm-refs.err" &&
+  grep -F "$(printf 'default\tbash\tprofile_main')" "$_rm_project/shell/release/bundle-roots" >/dev/null &&
+  ! grep -F 'gone' "$_rm_project/shell/release/bundle-roots" >/dev/null &&
+  grep -F "$(printf 'small\tSmall\tkeeper')" "$_rm_project/shell/release/install-variants" >/dev/null &&
+  ! grep -F 'gone' "$_rm_project/shell/release/install-variants" >/dev/null; then
+  pass "module remove strips bundle roots and variant exclusions, and the project builds"
+else
+  fail "module remove strips bundle roots and variant exclusions, and the project builds"
+  cat "$_test_home/rm-refs.err" >&2
+  cat "$_rm_project/shell/release/bundle-roots" "$_rm_project/shell/release/install-variants" >&2
+fi
+
+# --- apply in a vendored layout -----------------------------------------------
+# An older manifest at the project root is found first by locate_manifest. Apply
+# must still install the manifest it just built.
+_vendor_home="$_test_home/vendor-home"
+_vendor_project="$_test_home/vendor-project"
+mkdir -p "$_vendor_home"
+(cd "$_test_home" && _env new vendor-project) >/dev/null 2>&1 || :
+mkdir -p "$_vendor_project/valise-sh"
+cp -R "$_repo/bin" "$_repo/lib" "$_vendor_project/valise-sh/"
+_vendor_env() {
+  HOME="$_vendor_home" \
+  XDG_DATA_HOME="$_vendor_home/.local/share" \
+  XDG_CONFIG_HOME="$_vendor_home/.config" \
+  XDG_STATE_HOME="$_vendor_home/.local/state" \
+  "$_vendor_project/valise-sh/bin/valise" "$@"
+}
+if (cd "$_vendor_project" && _vendor_env build) >"$_test_home/vendor.out" 2>"$_test_home/vendor.err" &&
+  (cd "$_vendor_project/build/release" && tar cf - .) | (cd "$_vendor_project" && tar xf -) &&
+  (cd "$_vendor_project" && _vendor_env module new fresh --exports=fresh_fn && _vendor_env apply) \
+    >>"$_test_home/vendor.out" 2>>"$_test_home/vendor.err" &&
+  HOME="$_vendor_home" /bin/bash -c '. "$HOME/.profile"; command -v fresh_fn >/dev/null'; then
+  pass "apply installs the manifest it built, not a stale one at the project root"
+else
+  fail "apply installs the manifest it built, not a stale one at the project root"
+  cat "$_test_home/vendor.err" >&2
+fi
+
 printf '\n=== valise project UX summary ===\n'
 printf 'Total: %d  Pass: %d  Skip: %d  Fail: %d\n' "$_total" "$_pass" "$_skip" "$_fail"
 [ "$_fail" -eq 0 ] || exit 1

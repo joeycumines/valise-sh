@@ -296,6 +296,30 @@ else
 fi
 rm -f "$_project/shell/layers/vendor/module.d/bad_layer.meta"
 
+# A load_hook module cannot be compiled; it must not pass as a meta module.
+cat >"$_project/shell/module.d/bridge_mod.meta" <<'EOF'
+name=bridge_mod
+version=
+side_effect=read-only
+requires=
+optional=
+shells=bash
+platforms=any
+exports=
+updates=
+load_hook=_shell_module_bridge_mod
+EOF
+if (cd "$_project" && "$_valise" registry "$_test_home/hook-registry.tsv") \
+  >"$_test_home/hook.out" 2>"$_test_home/hook.err"; then
+  fail "registry rejects a load_hook module"
+elif grep -F 'shell/module.d/bridge_mod.meta: load_hook modules are loader-only' "$_test_home/hook.err" >/dev/null; then
+  pass "registry rejects a load_hook module"
+else
+  fail "registry rejects a load_hook module"
+  cat "$_test_home/hook.err" >&2
+fi
+rm -f "$_project/shell/module.d/bridge_mod.meta"
+
 # Restore the valid registry and prove assemble regenerates it by default.
 (cd "$_project" && "$_valise" registry) >/dev/null 2>&1
 cp "$_registry" "$_test_home/registry.assemble-baseline"

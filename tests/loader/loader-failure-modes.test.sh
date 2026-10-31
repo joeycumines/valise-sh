@@ -64,6 +64,10 @@ for _fixture in \
   module.d/alpha.meta \
   module.d/beta.meta \
   module.d/cwd_mover.meta \
+  module.d/tab_name_hijack.meta \
+  module.d/tab_function_hijack.meta \
+  module.d/tab_readonly_hijack.meta \
+  module.d/cwd_roundtrip.meta \
   module.d/cwd_readonly_builtin.meta \
   module.d/local_state.meta \
   module.d/missing_required_user.meta \
@@ -124,6 +128,10 @@ for _fixture in \
   modules/alpha.sh \
   modules/beta.sh \
   modules/cwd_mover.sh \
+  modules/tab_name_hijack.sh \
+  modules/tab_function_hijack.sh \
+  modules/tab_readonly_hijack.sh \
+  modules/cwd_roundtrip.sh \
   modules/cwd_readonly_builtin.sh \
   modules/local_state.sh \
   modules/missing_required_user.sh \
@@ -246,7 +254,7 @@ run_loader() {
       XDG_STATE_HOME="$_tmp/xdg-state"
       export XDG_STATE_HOME
     fi
-    if [ "$_case" = cwd_mover ] || [ "$_case" = clobber_wrapper_state ] || [ "$_case" = cwd_readonly_builtin ]; then
+    if [ "$_case" = cwd_mover ] || [ "$_case" = cwd_roundtrip ] || [ "$_case" = clobber_wrapper_state ] || [ "$_case" = cwd_readonly_builtin ]; then
       SP_LOADER_TEST_STATE_CWD="$_tmp/cwd-mover-target"
       mkdir -p "$SP_LOADER_TEST_STATE_CWD" || exit 97
       export SP_LOADER_TEST_STATE_CWD
@@ -392,7 +400,7 @@ run_loader() {
         printf 'LOCAL_STATE_DIR=missing\n'
       fi
       ;;
-    cwd_mover | clobber_wrapper_state | cwd_readonly_builtin)
+    cwd_mover | cwd_roundtrip | clobber_wrapper_state | cwd_readonly_builtin)
       printf 'PWD_AFTER=%s\n' "${PWD-}"
       printf 'OLDPWD_AFTER=%s\n' "${OLDPWD-}"
       ;;
@@ -746,6 +754,20 @@ assert_eq 'module changing cwd fails closed' 1 "$_status"
 assert_contains 'cwd change diagnostic names caller shell state' "$_err" 'caller shell state modified'
 assert_eq 'cwd change attempts module body before detection' 'cwd_mover_started' "$_trace_out"
 assert_no_loader_leaks_with_output 'cwd change preserves logical PWD and OLDPWD' "$(printf 'LOADER_RETURNED=%s\nPWD_AFTER=/tmp\nOLDPWD_AFTER=/var' "$_status")"
+
+run_loader cwd_roundtrip cwd_roundtrip strict ordinary
+assert_eq 'module returning to its starting directory loads' 0 "$_status"
+assert_eq 'cwd round trip reports no diagnostic' '' "$_err"
+assert_eq 'cwd round trip runs the module body' 'cwd_roundtrip_started' "$_trace_out"
+assert_no_loader_leaks_with_output 'cwd round trip restores logical PWD and OLDPWD' "$(printf 'LOADER_RETURNED=%s\nPWD_AFTER=/tmp\nOLDPWD_AFTER=/var' "$_status")"
+
+for _tab_case in tab_name_hijack tab_function_hijack tab_readonly_hijack; do
+  run_loader "$_tab_case" "$_tab_case" strict ordinary
+  assert_eq "$_tab_case: tab-separated reserved definition fails closed" 1 "$_status"
+  assert_contains "$_tab_case: diagnostic names the reserved utility" "$_err" 'load path defines reserved shell utility'
+  assert_eq "$_tab_case: module body is never sourced" '' "$_trace_out"
+done
+unset _tab_case
 
 run_loader cwd_readonly_builtin cwd_readonly_builtin strict ordinary
 assert_eq 'dynamic readonly builtin hijack fails closed' 1 "$_status"

@@ -254,12 +254,13 @@ END {
     printf "%sstatus=0\n", prefix
     printf "%sfailed=0\n", prefix
     printf "%sfirst_status=0\n", prefix
+    printf "%sunavailable=\n", prefix
     printf "%smode=${VALISE_MODE:-strict}\n", prefix
     printf "case \"$%smode\" in\n", prefix
     printf "strict | permissive) ;;\n"
     printf "*)\n"
     printf "  printf '%%s\\n' \"valise: invalid mode: $%smode\" >&2\n", prefix
-    printf "  unset %sstatus %sfailed %sfirst_status %smode\n", prefix, prefix, prefix, prefix
+    printf "  unset %sstatus %sfailed %sfirst_status %sunavailable %smode\n", prefix, prefix, prefix, prefix, prefix
     printf "  return 1\n"
     printf "  ;;\n"
     printf "esac\n"
@@ -316,21 +317,44 @@ END {
         }
         export_count = split(mod_exports[name], module_exports, " ")
         body_indent = platform_any == 0 ? "        " : "      "
-        if (mod_load[name] != "") {
-            if (platform_any == 0) {
-                printf "      %splatform_match=0\n", prefix
-                for (pi = 1; pi <= n_platforms; pi++) {
-                    platform = platform_values[pi]
-                    if (platform == "bsd") {
-                        printf "      case \"$%splatform\" in bsd | freebsd | openbsd | netbsd) %splatform_match=1 ;; esac\n", prefix, prefix
-                    } else if (platform != "any") {
-                        printf "      [ \"$%splatform\" = %s ] && %splatform_match=1\n", prefix, platform, prefix
-                    }
-                }
-                printf "      if [ \"$%splatform_match\" -ne 1 ]; then\n", prefix
-                printf "        %sstatus=0\n", prefix
-                printf "      else\n"
+
+        # A module whose required dependency is unavailable must not run: its
+        # body would call functions that were never defined. In strict mode a
+        # real failure has already stopped the plan, so the cause here is a
+        # platform skip, and the loader fails that case too. In permissive mode
+        # the module is reported and the plan continues.
+        n_req = split(mod_req[name], reqs, " ")
+        if (n_req > 0) {
+            printf "      %sblocked_by=\n", prefix
+            for (rqi = 1; rqi <= n_req; rqi++) {
+                printf "      case \" $%sunavailable \" in *\" %s \"*) %sblocked_by=%s ;; esac\n", prefix, reqs[rqi], prefix, mod_display[reqs[rqi]]
             }
+            printf "      if [ -n \"$%sblocked_by\" ]; then\n", prefix
+            printf "        printf 'valise: module %%s skipped: required dependency unavailable: %%s\\n' '%s' \"$%sblocked_by\" >&2\n", display, prefix
+            printf "        %sunavailable=\"$%sunavailable %s\"\n", prefix, prefix, name
+            printf "        if [ \"$%smode\" = strict ]; then\n", prefix
+            printf "          %sstatus=1\n", prefix
+            printf "        fi\n"
+            printf "      else\n"
+            # A meta module on any platform has no statement for this branch.
+            if (mod_load[name] == "" && platform_any == 1) printf "        :\n"
+        }
+
+        if (platform_any == 0) {
+            printf "      %splatform_match=0\n", prefix
+            for (pi = 1; pi <= n_platforms; pi++) {
+                platform = platform_values[pi]
+                if (platform == "bsd") {
+                    printf "      case \"$%splatform\" in bsd | freebsd | openbsd | netbsd) %splatform_match=1 ;; esac\n", prefix, prefix
+                } else if (platform != "any") {
+                    printf "      [ \"$%splatform\" = %s ] && %splatform_match=1\n", prefix, platform, prefix
+                }
+            }
+            printf "      if [ \"$%splatform_match\" -ne 1 ]; then\n", prefix
+            printf "        %sunavailable=\"$%sunavailable %s\"\n", prefix, prefix, name
+            if (mod_load[name] != "") printf "      else\n"
+        }
+        if (mod_load[name] != "") {
             if (export_count == 0) {
                 printf "%s. \"${VALISE_MODULE_ROOT%%/}/%s\"\n", body_indent, mod_load[name]
                 printf "%s%sstatus=$?\n", body_indent, prefix
@@ -393,15 +417,19 @@ END {
                 printf "%s  printf 'valise: module %%s failed with status %%s\\n' '%s' \"\$%sstatus\" >&2\n", body_indent, display, prefix
                 printf "%sfi\n", body_indent
             }
-            if (platform_any == 0) {
-                printf "      fi\n"
-            }
+        }
+        if (platform_any == 0) {
+            printf "      fi\n"
+        }
+        if (n_req > 0) {
+            printf "      fi\n"
         }
         printf "      ;;\n"
     }
 
     printf "    esac\n"
     printf "    if [ \"$%sstatus\" -ne 0 ]; then\n", prefix
+    printf "      %sunavailable=\"$%sunavailable $%smodule\"\n", prefix, prefix, prefix
     printf "      if [ \"$%sfailed\" -eq 0 ]; then\n", prefix
     printf "        %sfailed=1\n", prefix
     printf "        %sfirst_status=$%sstatus\n", prefix, prefix
@@ -419,7 +447,7 @@ END {
     printf "else\n"
     printf "  %sreturn=0\n", prefix
     printf "fi\n"
-    printf "unset %sstatus %sfailed %sfirst_status %smode %splatform\n", prefix, prefix, prefix, prefix, prefix
-    printf "unset %smodule %splatform_match %sexport %slookup %sconflict %swrapper_exports\n", prefix, prefix, prefix, prefix, prefix, prefix
+    printf "unset %sstatus %sfailed %sfirst_status %sunavailable %smode %splatform\n", prefix, prefix, prefix, prefix, prefix, prefix
+    printf "unset %smodule %sblocked_by %splatform_match %sexport %slookup %sconflict %swrapper_exports\n", prefix, prefix, prefix, prefix, prefix, prefix, prefix
     printf "eval \"unset %sreturn; return $%sreturn\"\n", prefix, prefix
 }

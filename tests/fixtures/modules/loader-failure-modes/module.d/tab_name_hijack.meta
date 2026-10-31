@@ -1,0 +1,9 @@
+name=tab_name_hijack
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=tab_name_hijack_loaded
+updates=
+load=modules/tab_name_hijack.sh

@@ -156,8 +156,18 @@ _sp_loader_reserved_scan() {
       _splrs_ifs_was_set=0
       _splrs_old_ifs=
     fi
-    IFS=' '
+    # Tokens are separated by any blank, as the shell itself treats them. The
+    # line is data, so pathname expansion must not run on it.
+    IFS=" $_splrs_tab"
+    case $- in
+    *f*) _splrs_noglob_was_set=1 ;;
+    *)
+      _splrs_noglob_was_set=0
+      set -f
+      ;;
+    esac
     set -- $_splrs_trimmed
+    [ "$_splrs_noglob_was_set" -eq 1 ] || set +f
     if [ "$_splrs_ifs_was_set" -eq 1 ]; then
       IFS=$_splrs_old_ifs
     else
@@ -261,12 +271,12 @@ _sp_loader_reserved_scan() {
   if [ "$_splrs_found" -eq 0 ]; then
     unset _splrs_file _splrs_tab _splrs_found _splrs_line _splrs_trimmed \
       _splrs_first _splrs_second _splrs_seen_f _splrs_word \
-      _splrs_ifs_was_set _splrs_old_ifs
+      _splrs_ifs_was_set _splrs_old_ifs _splrs_noglob_was_set
     return 0
   fi
   unset _splrs_file _splrs_tab _splrs_found _splrs_line _splrs_trimmed \
     _splrs_first _splrs_second _splrs_seen_f _splrs_word \
-    _splrs_ifs_was_set _splrs_old_ifs
+    _splrs_ifs_was_set _splrs_old_ifs _splrs_noglob_was_set
   return 1
 }
 
@@ -1272,25 +1282,31 @@ sp_loader_load_modules() {
           _spl_shell_state_modified=1
         fi
       fi
-      if [ "${PWD+x}" = x ]; then
-        _spl_after_pwd_was_set=1
-      else
-        _spl_after_pwd_was_set=0
-      fi
-      if [ "$_spl_after_pwd_was_set" -ne "$_spl_expected_pwd_was_set" ]; then
-        _spl_shell_state_modified=1
-      elif [ "$_spl_expected_pwd_was_set" -eq 1 ] && [ "${PWD-}" != "$_spl_expected_pwd" ]; then
-        _spl_shell_state_modified=1
-      fi
-      if [ "${OLDPWD+x}" = x ]; then
-        _spl_after_oldpwd_was_set=1
-      else
-        _spl_after_oldpwd_was_set=0
-      fi
-      if [ "$_spl_after_oldpwd_was_set" -ne "$_spl_expected_oldpwd_was_set" ]; then
-        _spl_shell_state_modified=1
-      elif [ "$_spl_expected_oldpwd_was_set" -eq 1 ] && [ "${OLDPWD-}" != "$_spl_expected_oldpwd" ]; then
-        _spl_shell_state_modified=1
+      # A module may change directory and come back; that leaves the physical
+      # cwd intact and only moves the logical PWD and OLDPWD, which are restored
+      # below. The logical values are evidence of a move only when the physical
+      # cwd could not be read before the module ran.
+      if [ "$_spl_expected_pwd_status" -ne 0 ]; then
+        if [ "${PWD+x}" = x ]; then
+          _spl_after_pwd_was_set=1
+        else
+          _spl_after_pwd_was_set=0
+        fi
+        if [ "$_spl_after_pwd_was_set" -ne "$_spl_expected_pwd_was_set" ]; then
+          _spl_shell_state_modified=1
+        elif [ "$_spl_expected_pwd_was_set" -eq 1 ] && [ "${PWD-}" != "$_spl_expected_pwd" ]; then
+          _spl_shell_state_modified=1
+        fi
+        if [ "${OLDPWD+x}" = x ]; then
+          _spl_after_oldpwd_was_set=1
+        else
+          _spl_after_oldpwd_was_set=0
+        fi
+        if [ "$_spl_after_oldpwd_was_set" -ne "$_spl_expected_oldpwd_was_set" ]; then
+          _spl_shell_state_modified=1
+        elif [ "$_spl_expected_oldpwd_was_set" -eq 1 ] && [ "${OLDPWD-}" != "$_spl_expected_oldpwd" ]; then
+          _spl_shell_state_modified=1
+        fi
       fi
       _spl_pwd_cwd_restored=1
       if [ "$_spl_expected_pwd_status" -eq 0 ]; then

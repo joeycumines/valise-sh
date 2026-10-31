@@ -100,6 +100,51 @@ load=
 EOF
 rm -f "$_project/shell/modules/meta_parent.sh"
 _module platform_other '' platform_other_loaded "$_other_platform" read-only 'platform_other_loaded() { :; }'
+_module platform_user platform_other platform_user_loaded any read-only 'platform_user_loaded() { :; }
+printf "platform_user body\n" >>"'"$_tmp"'/blocked.trace"'
+_module platform_user_user platform_user platform_user_user_loaded any read-only 'platform_user_user_loaded() { :; }
+printf "platform_user_user body\n" >>"'"$_tmp"'/blocked.trace"'
+_module failed_user first_fail failed_user_loaded any read-only 'failed_user_loaded() { :; }
+printf "failed_user body\n" >>"'"$_tmp"'/blocked.trace"'
+cat >"$_project/shell/module.d/meta_other.meta" <<EOF
+name=meta_other
+version=
+side_effect=read-only
+requires=meta_child
+optional=
+shells=bash
+platforms=$_other_platform
+exports=
+updates=
+load=
+EOF
+_module meta_other_user meta_other meta_other_user_loaded any read-only 'meta_other_user_loaded() { :; }'
+mkdir -p "$_project/shell/layers/demo/module.d" "$_project/shell/layers/demo/modules"
+cat >"$_project/shell/layers/demo/module.d/contrib_demo_child.meta" <<'EOF'
+name=contrib_demo_child
+version=
+side_effect=read-only
+requires=
+optional=
+shells=bash
+platforms=any
+exports=contrib_demo_child_loaded
+updates=
+load=modules/contrib_demo_child.sh
+EOF
+printf 'contrib_demo_child_loaded() { :; }\n' >"$_project/shell/layers/demo/modules/contrib_demo_child.sh"
+cat >"$_project/shell/layers/demo/module.d/contrib_demo_meta.meta" <<'EOF'
+name=contrib_demo_meta
+version=
+side_effect=read-only
+requires=contrib_demo_child
+optional=
+shells=bash
+platforms=any
+exports=
+updates=
+load=
+EOF
 _module capability_user '' capability_user_loaded any read-only 'capability_user_loaded() { sp_cap_os; }'
 _module reload_probe '' reload_probe_loaded any read-only 'reload_probe_loaded() { :; }'
 _module generated_bad '' generated_bad_loaded any generated-file 'generated_bad_loaded() { :; }'
@@ -135,6 +180,10 @@ _bundle_row behavior 'first_fail later_ok'
 _bundle_row missing missing_export
 _bundle_row meta meta_parent
 _bundle_row platform platform_other
+_bundle_row blocked-platform 'later_ok platform_user_user'
+_bundle_row blocked-failed 'failed_user later_ok'
+_bundle_row blocked-meta 'meta_other_user'
+_bundle_row layer-meta 'contrib_demo_meta@shell/layers/demo/module.d'
 _bundle_row capability capability_user
 _bundle_row reload reload_probe
 _bundle_row unsafe generated_bad
@@ -189,6 +238,10 @@ _assemble behavior "$_tmp/release-behavior"
 _assemble missing "$_tmp/release-missing"
 _assemble meta "$_tmp/release-meta"
 _assemble platform "$_tmp/release-platform"
+_assemble blocked-platform "$_tmp/release-blocked-platform"
+_assemble blocked-failed "$_tmp/release-blocked-failed"
+_assemble blocked-meta "$_tmp/release-blocked-meta"
+_assemble layer-meta "$_tmp/release-layer-meta"
 _assemble capability "$_tmp/release-capability"
 _assemble reload "$_tmp/release-reload"
 _assemble wrapper-ok "$_tmp/release-wrapper-ok"
@@ -286,6 +339,86 @@ if VALISE_MODULE_ROOT="$_tmp/release-platform" /bin/bash -c '
 else
   fail "runtime platform gating skips a nonmatching module"
   cat "$_tmp/platform.err" >&2
+fi
+
+# A module whose required dependency was skipped by platform does not run, and
+# neither does anything that depends on it. Strict mode fails as the loader does.
+: >"$_tmp/blocked.trace"
+if VALISE_MODULE_ROOT="$_tmp/release-blocked-platform" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  _status=$?
+  printf "status=%s\n" "$_status"
+  exit "$_status"
+' >"$_tmp/blocked-strict.out" 2>"$_tmp/blocked-strict.err"; then
+  fail "strict plan fails when a required dependency is platform-skipped"
+else
+  if grep -F 'status=1' "$_tmp/blocked-strict.out" >/dev/null &&
+    grep -F 'module platform_user skipped: required dependency unavailable: platform_other' "$_tmp/blocked-strict.err" >/dev/null &&
+    [ ! -s "$_tmp/blocked.trace" ]; then
+    pass "strict plan fails when a required dependency is platform-skipped"
+  else
+    fail "strict plan fails when a required dependency is platform-skipped"
+    cat "$_tmp/blocked-strict.out" "$_tmp/blocked-strict.err" "$_tmp/blocked.trace" >&2
+  fi
+fi
+
+# Permissive mode skips the whole dependent chain and still loads unrelated modules.
+: >"$_tmp/blocked.trace"
+if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-platform" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  printf "status=%s\n" "$?"
+  command -v later_ok_loaded >/dev/null && printf "later=loaded\n"
+  set | grep "^_shell_installed_plan_" || printf "leaks=none\n"
+' >"$_tmp/blocked-permissive.out" 2>"$_tmp/blocked-permissive.err" &&
+  grep -F 'status=0' "$_tmp/blocked-permissive.out" >/dev/null &&
+  grep -F 'later=loaded' "$_tmp/blocked-permissive.out" >/dev/null &&
+  grep -F 'leaks=none' "$_tmp/blocked-permissive.out" >/dev/null &&
+  grep -F 'module platform_user_user skipped: required dependency unavailable: platform_user' "$_tmp/blocked-permissive.err" >/dev/null &&
+  [ ! -s "$_tmp/blocked.trace" ]; then
+  pass "permissive plan skips a platform-blocked chain and continues"
+else
+  fail "permissive plan skips a platform-blocked chain and continues"
+  cat "$_tmp/blocked-permissive.out" "$_tmp/blocked-permissive.err" "$_tmp/blocked.trace" >&2
+fi
+
+# Permissive mode does not run a dependent of a failed module.
+: >"$_tmp/blocked.trace"
+VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-failed" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  printf "status=%s\n" "$?"
+  command -v later_ok_loaded >/dev/null && printf "later=loaded\n"
+' >"$_tmp/blocked-failed.out" 2>"$_tmp/blocked-failed.err" || :
+if grep -F 'status=1' "$_tmp/blocked-failed.out" >/dev/null &&
+  grep -F 'later=loaded' "$_tmp/blocked-failed.out" >/dev/null &&
+  grep -F 'module failed_user skipped: required dependency unavailable: first_fail' "$_tmp/blocked-failed.err" >/dev/null &&
+  [ ! -s "$_tmp/blocked.trace" ]; then
+  pass "permissive plan does not run a dependent of a failed module"
+else
+  fail "permissive plan does not run a dependent of a failed module"
+  cat "$_tmp/blocked-failed.out" "$_tmp/blocked-failed.err" "$_tmp/blocked.trace" >&2
+fi
+
+# A meta module's platforms= gates it too, so its dependents are blocked.
+if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-meta" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  ! command -v meta_other_user_loaded >/dev/null
+' >"$_tmp/blocked-meta.out" 2>"$_tmp/blocked-meta.err" &&
+  grep -F 'module meta_other_user skipped: required dependency unavailable: meta_other' "$_tmp/blocked-meta.err" >/dev/null; then
+  pass "platform-gated meta module blocks its dependents"
+else
+  fail "platform-gated meta module blocks its dependents"
+  cat "$_tmp/blocked-meta.err" >&2
+fi
+
+# A layer meta module has no body, so the plan must not source a directory.
+if ! grep -F 'layers/demo/"' "$_tmp/release-layer-meta/generated/installed-modules.bash" >/dev/null &&
+  VALISE_MODULE_ROOT="$_tmp/release-layer-meta" /bin/bash -c '
+    . "$VALISE_MODULE_ROOT/generated/installed-modules.bash" && command -v contrib_demo_child_loaded >/dev/null
+  ' >"$_tmp/layer-meta.out" 2>"$_tmp/layer-meta.err"; then
+  pass "layer meta module compiles without a load path"
+else
+  fail "layer meta module compiles without a load path"
+  cat "$_tmp/layer-meta.err" >&2
 fi
 
 # Capability functions remain available after the plan finishes.
