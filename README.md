@@ -42,28 +42,43 @@ export PATH="$PWD/bin:$PATH"
   export XDG_CONFIG_HOME="$_demo_state/config"
   export XDG_STATE_HOME="$_demo_state/state"
 
-  # Build, install, and verify the sample release.
-  sh examples/e2e/build-manifest.sh
-  (cd examples/e2e && valise install)
-  valise verify-active
+  # Build, install, and apply the sample profile project.
+  (cd examples/profile-project && valise apply)
 
-  # Load two shipped utilities from the installed release.
-  _active=$(cd "$XDG_CONFIG_HOME/valise/active" && pwd -P)
-  VALISE_MODULE_ROOT="$_active" \
-    VALISE_MODULES='contrib_path contrib_editor' \
-    VALISE_MODE=strict \
-    . "$_active/entrypoints/profile.sh"
-  contrib_path_prepend "$HOME/.local/bin"
-  contrib_editor_defaults
-  printf 'EDITOR=%s\nPATH=%s\n' "${EDITOR-(unset: no supported editor found on PATH)}" "$PATH"
+  # Run the greeting function exposed by the active profile.
+  bash -l -c 'greet'
 )
 ```
 
-The end-to-end example documents Fish startup, shared-provider composition,
-and other modules in
+For the multi-shell test fixture and verification scenarios, see
 [examples/e2e/README.md](examples/e2e/README.md). For the smallest possible
 loader example without installation, use `examples/local/` as described in
 [examples/README.md](examples/README.md).
+
+## Build your own profile
+
+The sample above loads modules from an example profile. To build your own,
+start from the project scaffold:
+
+```sh
+export PATH="$PWD/bin:$PATH"
+valise new my-profile
+cd my-profile
+```
+
+That writes a project with a metadata directory, a module body, bundle
+roots, variants, and `project.conf`. Add modules with `valise module new`,
+then build and install:
+
+```sh
+valise build   # build a release under build/release/
+valise apply   # install it and write the managed shell integration
+```
+
+`examples/profile-project/` is a worked version of this: it has two modules,
+a provider layer, two variants, and a bundle. Its
+[README](examples/profile-project/README.md) walks through each step and
+explains what the generated release contains.
 
 ## Repository layout
 
@@ -79,14 +94,16 @@ loader example without installation, use `examples/local/` as described in
   instead of platform-specific commands.
 - `lib/fish/` — native Fish loader and metadata reader. The Fish path never
   sources POSIX shell bodies.
-- `bin/valise` — the CLI: init, install, doctor, variant, make-manifest,
-  compile, verify-active, explain-variant, explain-bundles, layer-lint,
-  version. `init`, `install`, `doctor`, `variant`, `make-manifest`,
-  `verify-active`, and `version` run from a bare checkout; `compile`,
-  `explain-variant`, `explain-bundles`, and `layer-lint` require the
-  consuming project's source tree (see
-  [docs/variants.md](docs/variants.md) and
-  [docs/contrib-modules.md](docs/contrib-modules.md).
+- `bin/valise` — the CLI: init, install, release, doctor, make-manifest,
+  registry, new, module, build, apply, status, compile, explain-variant,
+  explain-bundles, layer-lint, version.
+  `init`, `install`, `release`, `doctor`, `make-manifest`, `new`, and
+  `version` run from a bare checkout. `registry`, `module`, `build`, `apply`,
+  `status`, `compile`, `explain-variant`,
+  `explain-bundles`, and `layer-lint` require the consuming project's source
+  tree (see [docs/variants.md](docs/variants.md) and
+  [docs/contrib-modules.md](docs/contrib-modules.md)). No command requires
+  Python 3.
 - `module.d/` and `modules/platform/` — generic platform modules
   (`platform_posix`, `platform_macos`, `platform_linux`, `platform_bsd`).
 - `manifests/parser-support.tsv` — declares the shell parsers used to check
@@ -95,6 +112,10 @@ loader example without installation, use `examples/local/` as described in
   fresh temporary HOME, controlled TMPDIR and PATH, cleared startup hooks.
 - `examples/local/` — a minimal runnable module demonstrating the metadata
   contract.
+- `examples/profile-project/` — a complete consuming project: metadata,
+  bodies, a provider layer, bundles, variants, and project defaults. Its
+  [README](examples/profile-project/README.md) walks from clone to a loaded
+  profile.
 
 Product-specific modules, adapters, release packaging, and installer
 transactions belong in the consuming project, not here. See
@@ -120,6 +141,9 @@ transactions belong in the consuming project, not here. See
 - [CHANGELOG.md](CHANGELOG.md) — user-facing changes.
 
 ## Running the tests
+
+The Makefile and the test suite live in the source repository. The npm
+package ships the runtime, the docs, and the examples, not the Makefile.
 
 ```sh
 make check-fast  # quick contributor lane; no optional shells required

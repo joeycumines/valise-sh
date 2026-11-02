@@ -2,9 +2,20 @@
 
 - `local/` is the smallest example: one metadata file and one POSIX shell
   module. It demonstrates sourcing a module without installing a release.
+- `profile-project/` is a complete consuming project: metadata-driven
+  modules, a provider layer, a bundle, a variant, and project defaults.
+  It is the shortest path from a clone to a loaded profile.
 - `e2e/` is a sample consumer profile. Its twelve modules cover dependency
   resolution, platform and shell selection, exports, optional dependencies,
   release installation, and shared-module composition.
+
+## Complete project
+
+`profile-project/` is the one to read if you want to see what a profile
+project looks like end to end. Its
+[README](profile-project/README.md) walks from a fresh checkout through
+`valise build` and `valise apply` to a `greet` function that works in a new
+login shell.
 
 ## Minimal module
 

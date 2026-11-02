@@ -60,8 +60,16 @@ assert_file() {
 printf '\n=== Loader failure-mode fixture presence ===\n'
 for _fixture in \
   module.d/core.meta \
+  module.d/aggregator.meta \
   module.d/alpha.meta \
   module.d/beta.meta \
+  module.d/cwd_mover.meta \
+  module.d/tab_name_hijack.meta \
+  module.d/tab_function_hijack.meta \
+  module.d/tab_readonly_hijack.meta \
+  module.d/cwd_roundtrip.meta \
+  module.d/cwd_readonly_builtin.meta \
+  module.d/local_state.meta \
   module.d/missing_required_user.meta \
   module.d/missing_optional_user.meta \
   module.d/optional_failed_user.meta \
@@ -87,6 +95,8 @@ for _fixture in \
   module.d/clobber_utility.meta \
   module.d/clobber_shell_state.meta \
   module.d/clobber_expected.meta \
+  module.d/clobber_wrapper_state.meta \
+  module.d/clobber_word_state.meta \
   module.d/clobber_state.meta \
   module.d/clobber_search_path.meta \
   module.d/clobber_unset.meta \
@@ -98,20 +108,52 @@ for _fixture in \
   module.d/invalid_dependency.meta \
   module.d/failed_hook.meta \
   module.d/export_missing.meta \
+  module.d/preexisting_alias_export.meta \
   module.d/preexisting_export.meta \
+  module.d/builtin_hijack.meta \
   module.d/preexisting_function_export.meta \
+  module.d/reload_probe.meta \
+  module.d/wrapper_export.meta \
+  module.d/wrapper_export_missing.meta \
   module.d/duplicate_export_first.meta \
   module.d/duplicate_export_second.meta \
   module.d/generated_writer.meta \
   module.d/fish_only.meta \
   module.d/platform_darwin_only.meta \
   module.d/platform_linux_only.meta \
-  module.d/bridge_ok.meta \
-  module.d/bridge_command_hijack.meta \
-  module.d/bridge_fail.meta \
+  module.d/platform_edge_optional_darwin.meta \
+  module.d/platform_edge_optional_linux.meta \
+  module.d/platform_edge_bridge_darwin.meta \
+  module.d/platform_edge_bridge_linux.meta \
+  module.d/platform_edge_root_darwin.meta \
+  module.d/platform_edge_root_linux.meta \
+  module.d/platform_edge_blocked_darwin.meta \
+  module.d/platform_edge_blocked_linux.meta \
+  module.d/required_edge_optional.meta \
+  module.d/required_edge_mid.meta \
+  module.d/zzz_required_edge_bridge.meta \
+  module.d/required_edge_root.meta \
+  module.d/platform_nested_optional_darwin.meta \
+  module.d/platform_nested_mid_darwin.meta \
+  module.d/platform_nested_root_darwin.meta \
+  module.d/zzz_platform_nested_bridge_darwin.meta \
+  module.d/platform_nested_optional_linux.meta \
+  module.d/platform_nested_mid_linux.meta \
+  module.d/platform_nested_root_linux.meta \
+  module.d/zzz_platform_nested_bridge_linux.meta \
   modules/core.sh \
   modules/alpha.sh \
   modules/beta.sh \
+  modules/cwd_mover.sh \
+  modules/readonly_pwd.sh \
+  modules/readonly_oldpwd.sh \
+  modules/readonly_ifs.sh \
+  modules/tab_name_hijack.sh \
+  modules/tab_function_hijack.sh \
+  modules/tab_readonly_hijack.sh \
+  modules/cwd_roundtrip.sh \
+  modules/cwd_readonly_builtin.sh \
+  modules/local_state.sh \
   modules/missing_required_user.sh \
   modules/missing_optional_user.sh \
   modules/optional_failed_user.sh \
@@ -137,6 +179,8 @@ for _fixture in \
   modules/clobber_utility.sh \
   modules/clobber_shell_state.sh \
   modules/clobber_expected.sh \
+  modules/clobber_wrapper_state.sh \
+  modules/clobber_word_state.sh \
   modules/clobber_search_path.sh \
   modules/clobber_state.sh \
   modules/clobber_unset.sh \
@@ -148,13 +192,38 @@ for _fixture in \
   modules/invalid_dependency.sh \
   modules/failed_hook.sh \
   modules/export_missing.sh \
+  modules/preexisting_alias_export.sh \
   modules/preexisting_export.sh \
+  modules/builtin_hijack.sh \
   modules/preexisting_function_export.sh \
+  modules/reload_probe.sh \
+  modules/wrapper_export.sh \
+  modules/wrapper_export_missing.sh \
   modules/duplicate_export_first.sh \
   modules/duplicate_export_second.sh \
   modules/generated_writer.sh \
   modules/fish_only.sh \
   modules/platform_darwin_only.sh \
+  modules/platform_edge_optional_darwin.sh \
+  modules/platform_edge_optional_linux.sh \
+  modules/platform_edge_bridge_darwin.sh \
+  modules/platform_edge_bridge_linux.sh \
+  modules/platform_edge_root_darwin.sh \
+  modules/platform_edge_root_linux.sh \
+  modules/platform_edge_blocked_darwin.sh \
+  modules/platform_edge_blocked_linux.sh \
+  modules/required_edge_optional.sh \
+  modules/required_edge_mid.sh \
+  modules/zzz_required_edge_bridge.sh \
+  modules/required_edge_root.sh \
+  modules/platform_nested_optional_darwin.sh \
+  modules/platform_nested_mid_darwin.sh \
+  modules/platform_nested_root_darwin.sh \
+  modules/zzz_platform_nested_bridge_darwin.sh \
+  modules/platform_nested_optional_linux.sh \
+  modules/platform_nested_mid_linux.sh \
+  modules/platform_nested_root_linux.sh \
+  modules/zzz_platform_nested_bridge_linux.sh \
   modules/platform_linux_only.sh; do
   assert_file "fixture exists: $_fixture" "$FIXTURE_ROOT/$_fixture"
 done
@@ -189,27 +258,30 @@ run_loader() {
     . "$METADATA_SH"
     # shellcheck disable=SC1090
     . "$LOADER_SH"
-    _shell_module_bridge_ok() {
-      printf '%s\n' bridge_ok >>"$SP_LOADER_TEST_TRACE"
-      bridge_ok_loaded() { :; }
-    }
-    _shell_module_bridge_fail() {
-      printf '%s\n' bridge_fail_started >>"$SP_LOADER_TEST_TRACE"
-      bridge_fail_loaded() { :; }
-      return 29
-    }
-    _shell_module_bridge_command_hijack() {
-      printf '%s\n' bridge_command_hijack_started >>"$SP_LOADER_TEST_TRACE"
-      bridge_command_hijack_loaded() { :; }
-      command() {
-        printf '%s\n' bridge_command_hijack_marker >>"$SP_LOADER_TEST_TRACE"
-        "$@"
-      }
-      readonly -f command 2>/dev/null || :
-      return 38
-    }
     if [ "$_case" = preexisting_function_export ]; then
       preexisting_function_loaded() { :; }
+    fi
+    if [ "$_case" = preexisting_alias_export ]; then
+      alias preexisting_alias_loaded=/bin/true
+    fi
+    if [ "$_case" = wrapper_export ] || [ "$_case" = wrapper_export_missing ] || [ "$_case" = clobber_wrapper_state ]; then
+      mkdir -p "$_tmp/bin" || exit 97
+      printf '%s\n' '#!/bin/sh' 'exit 0' >"$_tmp/bin/mvn" || exit 97
+      chmod +x "$_tmp/bin/mvn" || exit 97
+      PATH="$_tmp/bin:$PATH"
+      export PATH
+    fi
+    if [ "$_case" = local_state ]; then
+      XDG_STATE_HOME="$_tmp/xdg-state"
+      export XDG_STATE_HOME
+    fi
+    if [ "$_case" = cwd_mover ] || [ "$_case" = cwd_roundtrip ] || [ "$_case" = clobber_wrapper_state ] || [ "$_case" = cwd_readonly_builtin ]; then
+      SP_LOADER_TEST_STATE_CWD="$_tmp/cwd-mover-target"
+      mkdir -p "$SP_LOADER_TEST_STATE_CWD" || exit 97
+      export SP_LOADER_TEST_STATE_CWD
+      cd /tmp || exit 97
+      OLDPWD=/var
+      export OLDPWD
     fi
     if [ "$_case" = wanted_glob_invalid ]; then
       mkdir -p "$_tmp/hostile-cwd" || exit 97
@@ -256,7 +328,7 @@ run_loader() {
       ;;
     esac
     _leaked_upper_vars=$(compgen -A variable _SP_LOADER_ 2>/dev/null | tr '\n' ' ')
-    _leaked_spl_vars=$(compgen -A variable _spl_ 2>/dev/null | tr '\n' ' ')
+    _leaked_spl_vars=$(compgen -A variable _spl 2>/dev/null | tr '\n' ' ')
     _leaked_lower_vars=$(compgen -A variable _sp_loader_ 2>/dev/null | tr '\n' ' ')
     _leaked_internal_funcs=$(compgen -A function _sp_loader_ 2>/dev/null | tr '\n' ' ')
     if [ -n "$_leaked_upper_vars" ]; then
@@ -271,7 +343,7 @@ run_loader() {
     if [ -n "$_leaked_internal_funcs" ]; then
       printf 'LEAKED_INTERNAL_FUNCS=%s\n' "$_leaked_internal_funcs"
     fi
-    for _failed_export in bridge_fail_loaded bridge_command_hijack_loaded failed_hook_loaded optional_failed_dep_loaded optional_required_runtime_req_loaded command_hijack_dep_loaded readonly_command_loaded unset_command_loaded clobber_utility_loaded clobber_shell_state_loaded clobber_expected_loaded clobber_state_loaded clobber_search_path_loaded clobber_unset_loaded clobber_private_loaded clobber_cleanup_loaded printf_hijack_dep_loaded; do
+    for _failed_export in failed_hook_loaded optional_failed_dep_loaded optional_required_runtime_req_loaded command_hijack_dep_loaded readonly_command_loaded unset_command_loaded clobber_utility_loaded clobber_shell_state_loaded clobber_expected_loaded clobber_state_loaded clobber_search_path_loaded clobber_unset_loaded clobber_private_loaded clobber_cleanup_loaded printf_hijack_dep_loaded; do
       if command -v "$_failed_export" >/dev/null 2>&1; then
         printf 'LEAKED_FAILED_EXPORT=%s\n' "$_failed_export"
       fi
@@ -334,6 +406,24 @@ run_loader() {
       else
         printf 'PREEXISTING_EXPORT_PRESENT=no\n'
       fi
+      ;;
+    wrapper_export)
+      if [ "$(command -v mvn 2>/dev/null)" = mvn ]; then
+        printf 'WRAPPER_EXPORT_FUNCTION=yes\n'
+      else
+        printf 'WRAPPER_EXPORT_FUNCTION=no\n'
+      fi
+      ;;
+    local_state)
+      if [ -d "$XDG_STATE_HOME/shell-profile" ]; then
+        printf 'LOCAL_STATE_DIR=present\n'
+      else
+        printf 'LOCAL_STATE_DIR=missing\n'
+      fi
+      ;;
+    cwd_mover | cwd_roundtrip | clobber_wrapper_state | cwd_readonly_builtin)
+      printf 'PWD_AFTER=%s\n' "${PWD-}"
+      printf 'OLDPWD_AFTER=%s\n' "${OLDPWD-}"
       ;;
     duplicate_export_permissive | duplicate_export_strict)
       if command -v duplicate_shared_loaded >/dev/null 2>&1; then
@@ -557,6 +647,18 @@ assert_contains 'expected-state clobber diagnostic names loader namespace' "$_er
 assert_eq 'expected-state clobber attempts module body before detection' 'clobber_expected_started' "$_trace_out"
 assert_no_loader_leaks 'expected-state clobber restores strict mode and failed-export cleanup'
 
+run_loader clobber_wrapper_state clobber_wrapper_state strict ordinary
+assert_eq 'module clobbering wrapper and cwd trust state fails closed' 1 "$_status"
+assert_contains 'wrapper/cwd guard clobber diagnostic names loader namespace' "$_err" 'loader private namespace modified'
+assert_eq 'wrapper/cwd guard clobber attempts module body before detection' 'clobber_wrapper_state_started' "$_trace_out"
+assert_no_loader_leaks_with_output 'wrapper/cwd guard clobber restores trusted state and caller cwd' "$(printf 'LOADER_RETURNED=%s\nPWD_AFTER=/tmp\nOLDPWD_AFTER=/var' "$_status")"
+
+run_loader clobber_word_state clobber_word_state strict ordinary
+assert_eq 'module clobbering loader word-state membership fails closed' 1 "$_status"
+assert_contains 'word-state clobber diagnostic names loader namespace' "$_err" 'loader private namespace modified'
+assert_eq 'word-state clobber attempts module body before detection' 'clobber_word_state_started' "$_trace_out"
+assert_no_loader_leaks 'word-state clobber restores loader membership words'
+
 run_loader private_state_clobber clobber_state strict ordinary
 assert_eq 'module clobbering loader non-cleanup private state fails closed' 1 "$_status"
 assert_contains 'state clobber diagnostic names loader namespace' "$_err" 'loader private namespace modified'
@@ -600,10 +702,10 @@ assert_eq 'invalid dependency never loads module body' '' "$_trace_out"
 assert_no_loader_leaks 'invalid dependency failure'
 
 run_loader failed_hook 'core failed_hook' permissive ordinary
-assert_eq 'permissive failed load hook remains non-fatal for unrelated modules' 0 "$_status"
-assert_contains 'failed hook diagnostic names module' "$_err" 'failed_hook'
-assert_eq 'failed hook attempts only dependency and failing hook' $'core\nfailed_hook_started' "$_trace_out"
-assert_no_loader_leaks 'permissive failed hook'
+assert_eq 'permissive failed file-backed import remains non-fatal for unrelated modules' 0 "$_status"
+assert_contains 'failed file-backed import diagnostic names module' "$_err" 'failed_hook'
+assert_eq 'failed import attempts only dependency and failing body' $'core\nfailed_hook_started' "$_trace_out"
+assert_no_loader_leaks 'permissive failed file-backed import'
 
 run_loader strict_failed_file_import 'core failed_hook' strict ordinary
 assert_eq 'strict file-backed import failure returns failure' 1 "$_status"
@@ -633,6 +735,73 @@ assert_eq 'strict module with pre-existing shell-function export fails closed' 1
 assert_contains 'pre-existing shell-function export diagnostic names export' "$_err" 'preexisting_function_loaded'
 assert_eq 'pre-existing shell-function export prevents module body execution' '' "$_trace_out"
 assert_no_loader_leaks_with_output 'pre-existing shell-function export failure preserves caller function' "$(printf 'LOADER_RETURNED=%s\nPREEXISTING_EXPORT_PRESENT=yes' "$_status")"
+
+run_loader preexisting_alias_export preexisting_alias_export strict ordinary
+assert_eq 'strict module with pre-existing alias export fails closed' 1 "$_status"
+assert_contains 'pre-existing alias export diagnostic names export' "$_err" 'preexisting_alias_loaded'
+assert_eq 'pre-existing alias export prevents module body execution' '' "$_trace_out"
+assert_no_loader_leaks 'pre-existing alias export failure'
+
+run_loader wrapper_export wrapper_export strict ordinary
+assert_eq 'strict module may wrap an existing external command export' 0 "$_status"
+assert_eq 'external-command wrapper module body executes' 'wrapper_export' "$_trace_out"
+assert_no_loader_leaks_with_output 'external-command wrapper replaces PATH resolution with a function' "$(printf 'LOADER_RETURNED=%s\nWRAPPER_EXPORT_FUNCTION=yes' "$_status")"
+
+run_loader wrapper_export_missing wrapper_export_missing strict ordinary
+assert_eq 'external-command export not provided by the module fails closed' 1 "$_status"
+assert_contains 'unprovided wrapper export diagnostic names the export' "$_err" 'declared export was not provided by module: mvn'
+assert_eq 'unprovided wrapper export still attempts the module body' 'wrapper_export_missing' "$_trace_out"
+assert_no_loader_leaks 'unprovided wrapper export failure'
+
+run_loader builtin_hijack builtin_hijack strict ordinary
+assert_eq 'module defining the builtin utility fails closed' 1 "$_status"
+assert_contains 'builtin utility hijack diagnostic is explicit' "$_err" 'reserved shell utility'
+assert_eq 'builtin utility hijack prevents module body execution' '' "$_trace_out"
+assert_no_loader_leaks 'builtin utility hijack failure'
+
+run_loader aggregator aggregator strict ordinary
+assert_eq 'meta module with only dependencies loads successfully' 0 "$_status"
+assert_eq 'meta module loads its dependency closure without a body' 'core' "$_trace_out"
+assert_eq 'meta module emits no diagnostic' '' "$_err"
+assert_no_loader_leaks 'meta module success'
+
+run_loader local_state local_state strict ordinary
+assert_eq 'ordinary source permits local-state module' 0 "$_status"
+assert_eq 'local-state module body executes' 'local_state_started' "$_trace_out"
+assert_no_loader_leaks_with_output 'local-state module creates its state directory' "$(printf 'LOADER_RETURNED=%s\nLOCAL_STATE_DIR=present' "$_status")"
+
+run_loader cwd_mover cwd_mover strict ordinary
+assert_eq 'module changing cwd fails closed' 1 "$_status"
+assert_contains 'cwd change diagnostic names caller shell state' "$_err" 'caller shell state modified'
+assert_eq 'cwd change attempts module body before detection' 'cwd_mover_started' "$_trace_out"
+assert_no_loader_leaks_with_output 'cwd change preserves logical PWD and OLDPWD' "$(printf 'LOADER_RETURNED=%s\nPWD_AFTER=/tmp\nOLDPWD_AFTER=/var' "$_status")"
+
+for _readonly_case in readonly_pwd readonly_oldpwd readonly_ifs; do
+  run_loader "$_readonly_case" "$_readonly_case" strict ordinary
+  assert_eq "$_readonly_case fails closed" 1 "$_status"
+  assert_contains "$_readonly_case diagnostic names caller shell state" "$_err" 'caller shell state modified'
+  assert_no_loader_leaks "$_readonly_case leaves no loader runtime state"
+done
+
+run_loader cwd_roundtrip cwd_roundtrip strict ordinary
+assert_eq 'module returning to its starting directory loads' 0 "$_status"
+assert_eq 'cwd round trip reports no diagnostic' '' "$_err"
+assert_eq 'cwd round trip runs the module body' 'cwd_roundtrip_started' "$_trace_out"
+assert_no_loader_leaks_with_output 'cwd round trip restores logical PWD and OLDPWD' "$(printf 'LOADER_RETURNED=%s\nPWD_AFTER=/tmp\nOLDPWD_AFTER=/var' "$_status")"
+
+for _tab_case in tab_name_hijack tab_function_hijack tab_readonly_hijack; do
+  run_loader "$_tab_case" "$_tab_case" strict ordinary
+  assert_eq "$_tab_case: tab-separated reserved definition fails closed" 1 "$_status"
+  assert_contains "$_tab_case: diagnostic names the reserved utility" "$_err" 'load path defines reserved shell utility'
+  assert_eq "$_tab_case: module body is never sourced" '' "$_trace_out"
+done
+unset _tab_case
+
+run_loader cwd_readonly_builtin cwd_readonly_builtin strict ordinary
+assert_eq 'dynamic readonly builtin hijack fails closed' 1 "$_status"
+assert_contains 'dynamic readonly builtin diagnostic names caller shell state' "$_err" 'caller shell state modified'
+assert_eq 'dynamic readonly builtin attempts module body before detection' 'cwd_readonly_builtin_started' "$_trace_out"
+assert_no_loader_leaks_with_output 'dynamic readonly builtin cannot prevent physical cwd restoration' "$(printf 'LOADER_RETURNED=%s\nPWD_AFTER=/tmp\nOLDPWD_AFTER=/var' "$_status")"
 
 run_loader duplicate_export_permissive 'duplicate_export_first duplicate_export_second' permissive ordinary
 assert_eq 'permissive duplicate export skips second module without failing' 0 "$_status"
@@ -706,28 +875,78 @@ assert_eq 'unsupported platform rejection prevents module body execution' '' "$_
 assert_no_loader_leaks 'unsupported platform rejection'
 unset _unsupported_platform_module
 
-run_loader bridge_hook bridge_ok strict ordinary
-assert_eq 'bridge load_hook module loads through hook' 0 "$_status"
-assert_eq 'bridge load_hook records expected trace' 'bridge_ok' "$_trace_out"
-assert_no_loader_leaks 'bridge load_hook success'
+# A platform-skipped module can be reached through an optional edge first and
+# a required edge later. The required-closure decision must use every edge,
+# not the discovery order: strict fails with the platform diagnostic, and the
+# optional-only case stays silent.
+case "$(uname -s 2>/dev/null || printf unknown)" in
+Darwin) _edge_suffix=darwin; _edge_blocked_suffix=linux ;;
+*) _edge_suffix=linux; _edge_blocked_suffix=darwin ;;
+esac
 
-run_loader failed_bridge_hook_strict bridge_fail strict ordinary
-assert_eq 'strict failed load_hook returns failure' 1 "$_status"
-assert_contains 'strict failed load_hook diagnostic names module' "$_err" 'bridge_fail'
-assert_eq 'strict failed load_hook records dependency and failed hook only' $'core\nbridge_fail_started' "$_trace_out"
-assert_no_loader_leaks 'strict failed load_hook'
+run_loader platform_edge_optional "platform_edge_optional_$_edge_suffix" strict ordinary
+assert_eq 'a platform-skipped optional dependency is silent in strict mode' 0 "$_status"
+assert_eq 'a platform-skipped optional dependency writes no diagnostic' '' "$_err"
+assert_eq 'a platform-skipped optional dependency still loads its declaring module' "platform_edge_optional_$_edge_suffix" "$_trace_out"
+assert_no_loader_leaks 'platform-skipped optional dependency'
 
-run_loader failed_bridge_hook_permissive bridge_fail permissive ordinary
-assert_eq 'permissive failed load_hook remains non-fatal' 0 "$_status"
-assert_contains 'permissive failed load_hook diagnostic names module' "$_err" 'bridge_fail'
-assert_eq 'permissive failed load_hook records dependency and failed hook only' $'core\nbridge_fail_started' "$_trace_out"
-assert_no_loader_leaks 'permissive failed load_hook'
+run_loader platform_edge_required "platform_edge_optional_$_edge_suffix platform_edge_root_$_edge_suffix" strict ordinary
+assert_eq 'strict fails when a platform skip is required through a later edge' 1 "$_status"
+assert_contains 'required platform skip diagnostic names the skipped module' "$_err" "platform_edge_blocked_$_edge_blocked_suffix: unsupported platform"
+assert_eq 'strict required platform skip runs no module bodies' '' "$_trace_out"
+assert_no_loader_leaks 'strict required platform skip failure'
 
-run_loader bridge_command_hijack bridge_command_hijack strict ordinary
-assert_eq 'strict reserved-utility load_hook fails before invocation' 1 "$_status"
-assert_contains 'reserved-utility load_hook diagnostic names reserved shell utility' "$_err" 'reserved shell utility'
-assert_eq 'reserved-utility load_hook body never executes' '' "$_trace_out"
-assert_no_loader_leaks 'reserved-utility load_hook leaves no command function or failed export'
+run_loader platform_edge_required_permissive "platform_edge_optional_$_edge_suffix platform_edge_root_$_edge_suffix" permissive ordinary
+assert_eq 'permissive platform-required skip continues' 0 "$_status"
+assert_contains 'permissive required platform skip still names the skipped module' "$_err" "platform_edge_blocked_$_edge_blocked_suffix: unsupported platform"
+assert_eq 'permissive required platform skip loads the independent module only' "platform_edge_optional_$_edge_suffix" "$_trace_out"
+assert_no_loader_leaks 'permissive required platform skip'
+
+# A module discovered through an optional edge keeps its own required child
+# when a later edge makes the module required. The topological failure must
+# fail strict mode even though the child was walked before that promotion.
+run_loader required_edge_missing "required_edge_optional required_edge_root" strict ordinary
+assert_eq 'strict fails when a required edge is discovered after an optional one' 1 "$_status"
+assert_contains 'required-edge failure names the missing leaf' "$_err" 'missing_edge_leaf'
+assert_eq 'strict required-edge failure runs no module bodies' '' "$_trace_out"
+assert_no_loader_leaks 'strict required-edge failure'
+
+# The fixpoint matters one level deeper: the required module's own required
+# child was walked while the parent was still optional, so the closure must
+# re-walk it before deciding whether the platform skip is reportable.
+run_loader platform_nested "platform_nested_optional_$_edge_suffix platform_nested_root_$_edge_suffix" strict ordinary
+assert_eq 'strict fails for a platform skip under a promoted required module' 1 "$_status"
+assert_contains 'nested platform skip diagnostic names the skipped module' "$_err" "platform_edge_blocked_$_edge_blocked_suffix: unsupported platform"
+assert_eq 'strict nested platform skip runs no module bodies' '' "$_trace_out"
+assert_no_loader_leaks 'strict nested platform skip'
+
+printf '\n=== Loader reload contract ===\n'
+_reload_trace="$_tmp/reload.trace"
+: >"$_reload_trace"
+_reload_out=$(
+  . "$METADATA_SH" || exit 91
+  . "$LOADER_SH" || exit 92
+  SP_LOADER_TEST_TRACE=$_reload_trace
+  SP_LOADER_TEST_RELOAD_STAGE=first
+  export SP_LOADER_TEST_TRACE SP_LOADER_TEST_RELOAD_STAGE
+  sp_loader_load_modules "$FIXTURE_ROOT" 'core reload_probe' strict ordinary || exit 1
+  _reload_first=$(reload_probe_loaded 2>/dev/null) || _reload_first=missing
+  SP_LOADER_TEST_RELOAD_STAGE=second
+  export SP_LOADER_TEST_RELOAD_STAGE
+  VALISE_RELOAD=1
+  export VALISE_RELOAD
+  . "$LOADER_SH" || exit 2
+  sp_loader_load_modules "$FIXTURE_ROOT" 'core reload_probe' strict ordinary || exit 3
+  _reload_second=$(reload_probe_loaded 2>/dev/null) || _reload_second=missing
+  printf 'RELOAD_FIRST=%s\nRELOAD_SECOND=%s\n' "$_reload_first" "$_reload_second"
+) 2>"$_tmp/reload.stderr"
+_reload_status=$?
+_reload_err=$(cat "$_tmp/reload.stderr")
+assert_eq 'VALISE_RELOAD=1 re-sources an already loaded closure' 0 "$_reload_status"
+assert_eq 'VALISE_RELOAD=1 replaces declared exports from the closure' \
+  $'RELOAD_FIRST=first\nRELOAD_SECOND=second' "$_reload_out"
+assert_eq 'VALISE_RELOAD=1 re-load emits no diagnostic' '' "$_reload_err"
+unset _reload_trace _reload_out _reload_status _reload_err
 
 printf '\n=== loader-failure-modes summary ===\n'
 printf 'Total: %d  Pass: %d  XFail: %d  Fail: %d\n' "$_total" "$_pass" "$_xfail" "$_fail"

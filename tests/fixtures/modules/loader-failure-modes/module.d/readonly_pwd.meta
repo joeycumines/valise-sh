@@ -1,0 +1,10 @@
+name=readonly_pwd
+version=
+side_effect=read-only
+requires=
+optional=
+shells=sh
+platforms=any
+exports=readonly_pwd_loaded
+updates=
+load=modules/readonly_pwd.sh

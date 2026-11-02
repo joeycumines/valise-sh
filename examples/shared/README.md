@@ -26,9 +26,9 @@ level README).
 
 ```sh
 sh examples/e2e/build-manifest.sh
-cd examples/e2e
+cd examples/e2e/build/release
 valise install
-valise verify-active
+valise release verify
 ```
 
 Then load the shared modules from a POSIX shell. The active release path

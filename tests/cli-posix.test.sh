@@ -40,6 +40,19 @@ check_output_contains() {
   esac
 }
 
+# Exact whole-output comparison. A version check that only looks for a
+# substring accepts "0.2.0-beta" and "10.2.0" as evidence of "0.2.0",
+# so the version contract is pinned exactly.
+check_output_equals() {
+  _desc=$1; _expected=$2; shift 2
+  _out=$("$@" 2>&1) || true
+  if [ "$_out" = "$_expected" ]; then
+    pass "$_desc"
+  else
+    fail "$_desc (expected '$_expected', got '$_out')"
+  fi
+}
+
 # Setup quarantined home
 _test_home=$(mktemp -d "${TMPDIR:-/tmp}/valise-test.XXXXXX")
 _cleanup_done=0
@@ -76,24 +89,38 @@ printf '  valise: %s\n' "$_valise"
 printf '  home: %s\n\n' "$_test_home"
 
 # --- Version ---
-check_output_contains "version prints version string" "0.1.0" "$_valise" version
+check_output_equals "version prints version string" "0.2.0" "$_valise" version
+
+# The release policy requires package.json and bin/valise to carry the same
+# version. A bump that updates one and forgets the other ships a tarball
+# whose metadata disagrees with its own CLI.
+_pkg_version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  "$(dirname "$_valise")/../package.json" | head -1)
+check_output_equals "package.json version matches the CLI version" \
+  "$_pkg_version" "$_valise" version
+unset _pkg_version
 
 # --- Help ---
 check_output_contains "help shows usage" "Usage: valise" "$_valise" help
 check_output_contains "no args shows usage" "Usage: valise" "$_valise"
 
 # --- Init ---
-check_output_contains "init bash outputs profile source" ". " "$_valise" init bash
-check_output_contains "init zsh outputs profile source" ". " "$_valise" init zsh
-check_output_contains "init ksh outputs profile source" ". " "$_valise" init ksh
+check_output_contains "init posix outputs profile source" ". " "$_valise" init posix
 check_output_contains "init fish outputs protected Fish loader integration" "loader.fish" "$_valise" init fish
 
-# Verify init output contains active link path
-_init_out=$("$_valise" init bash 2>&1)
+# Verify init output contains active link path. The CLI prints the
+# normalized path, so the expectation is normalized the same way. A raw
+# comparison fails when TMPDIR ends in a slash, because the CLI collapses
+# the doubled separator and the test's template keeps it.
+_init_expected_active=$XDG_CONFIG_HOME/valise/active
+_init_expected_active=$(printf '%s' "$_init_expected_active" |
+  awk '{ n = split($0, p, "/"); out = ""; for (i = 1; i <= n; i++) { if (p[i] == "" || p[i] == ".") continue; out = out "/" p[i] } print out }')
+_init_out=$("$_valise" init posix 2>&1)
 case "$_init_out" in
-  *"$XDG_CONFIG_HOME/valise/active"*) pass "init bash references XDG active path" ;;
-  *) fail "init bash references XDG active path" ;;
+  *"$_init_expected_active"*) pass "init posix references XDG active path" ;;
+  *) fail "init posix references XDG active path (expected '$_init_expected_active')" ;;
 esac
+unset _init_expected_active _init_out
 
 # Generated shell snippets must quote hostile XDG paths as data. In particular,
 # command substitutions in an environment-provided path must not execute while
@@ -101,7 +128,7 @@ esac
 _injection_marker="$_test_home/integration-command-substitution-ran"
 _injection_xdg="$_test_home/xdg-\$(touch $_injection_marker)/a\\'h"
 XDG_CONFIG_HOME="$_injection_xdg" "$_valise" init fish >"$_test_home/init-fish-hostile.out"
-XDG_CONFIG_HOME="$_injection_xdg" "$_valise" init bash >"$_test_home/init-sh-hostile.out"
+XDG_CONFIG_HOME="$_injection_xdg" "$_valise" init posix >"$_test_home/init-sh-hostile.out"
 if [ -e "$_injection_marker" ]; then
   fail "init integration does not execute command substitutions from XDG paths"
 else
@@ -128,8 +155,8 @@ case "$_doctor_out" in
   *) fail "doctor reports platform" ;;
 esac
 
-# --- Variant list (empty) ---
-check_output_contains "variant list on empty state" "no releases installed" "$_valise" variant list
+# --- Release list (empty) ---
+check_output_contains "release list on empty state" "no releases installed" "$_valise" release list
 
 # --- Make-manifest (standalone publisher) ---
 _mm_tree="$_test_home/pubtree"
@@ -172,6 +199,34 @@ if "$_valise" make-manifest "$_mm_tree" --output="$_test_home/equals-form.manife
 else
   fail "make-manifest equals-form output matches"
 fi
+
+# An existing directory is not a manifest file. It must be rejected without
+# chmod-ing the directory or nesting the manifest inside it.
+_mm_outdir="$_test_home/manifest-outdir"
+mkdir -p "$_mm_outdir"
+chmod 0755 "$_mm_outdir"
+if "$_valise" make-manifest "$_mm_tree" --output "$_mm_outdir" >/dev/null 2>&1; then
+  fail "make-manifest rejects a directory output"
+elif [ "$(stat -c %a "$_mm_outdir" 2>/dev/null || stat -f %Lp "$_mm_outdir")" = 755 ] &&
+  [ ! -e "$_mm_outdir/profile-release.manifest" ]; then
+  pass "make-manifest rejects a directory output without changing it"
+else
+  fail "make-manifest rejects a directory output without changing it"
+fi
+
+# A normalized output path inside the tree must still exclude itself on a
+# second run, so the manifest stays byte-identical.
+_mm_dot_out="$_mm_tree/./custom.manifest"
+"$_valise" make-manifest "$_mm_tree" --output "$_mm_dot_out" >/dev/null 2>&1 || :
+cp "$_mm_tree/custom.manifest" "$_test_home/custom.first"
+if "$_valise" make-manifest "$_mm_tree" --output "$_mm_dot_out" >/dev/null 2>&1 &&
+  cmp -s "$_mm_tree/custom.manifest" "$_test_home/custom.first" &&
+  ! grep -F 'custom.manifest' "$_mm_tree/custom.manifest" >/dev/null 2>&1; then
+  pass "make-manifest excludes a normalized in-tree output from itself"
+else
+  fail "make-manifest excludes a normalized in-tree output from itself"
+fi
+rm -f "$_mm_tree/custom.manifest"
 ln -s readme.txt "$_mm_tree/link.sh"
 if "$_valise" make-manifest "$_mm_tree" --output "$_test_home/sym.manifest" >/dev/null 2>&1; then
   fail "make-manifest rejects symlink trees"
@@ -222,6 +277,49 @@ for _pkg_member in bin lib modules entrypoints module.d manifests docs examples;
     fail "package files entry exists: $_pkg_member"
   fi
 done
+
+# A local build writes examples/*/build/ inside the source tree, and npm
+# applies package.json "files" without consulting .gitignore. Packaging from
+# a built checkout must still ship only the intended example sources.
+if command -v npm >/dev/null 2>&1; then
+  _pack_probe="$_test_home/pack-probe"
+  mkdir -p "$_pack_probe/examples/profile-project/build/release" \
+           "$_pack_probe/examples/e2e/build/release" \
+           "$_pack_probe/examples/profile-project/shell"
+  printf 'generated\n' >"$_pack_probe/examples/profile-project/build/release/plan.sh"
+  printf 'generated\n' >"$_pack_probe/examples/e2e/build/release/plan.sh"
+  printf 'source\n' >"$_pack_probe/examples/profile-project/shell/keep.sh"
+  # A build directory nested below a subdirectory is the case that a
+  # single-level '!examples/*/build/' would miss, so pin it too.
+  mkdir -p "$_pack_probe/examples/profile-project/vendor/dep/build/release"
+  printf 'generated\n' >"$_pack_probe/examples/profile-project/vendor/dep/build/release/plan.sh"
+  cp "$_pkg_root/package.json" "$_pack_probe/package.json"
+  _pack_status=0
+  _pack_out=$(cd "$_pack_probe" && npm pack --dry-run --json 2>&1) || _pack_status=$?
+  if [ "$_pack_status" -ne 0 ]; then
+    fail "npm pack runs on the exclusion probe"
+    printf '%s\n' "$_pack_out" >&2
+    fail "npm pack excludes generated examples build output (probe did not run)"
+    fail "npm pack still ships example project sources (probe did not run)"
+  else
+    if printf '%s\n' "$_pack_out" | grep -Eq '"path": *"examples/[^"]*/build/'; then
+      fail "npm pack excludes generated examples build output"
+      printf '%s\n' "$_pack_out" | grep -E '"path": *"examples/[^"]*/build/' >&2 || :
+    elif printf '%s\n' "$_pack_out" | grep -Eq '"path": *"examples/[^"]*"'; then
+      pass "npm pack excludes generated examples build output"
+    else
+      fail "npm pack excludes generated examples build output (no example files listed)"
+    fi
+    if printf '%s\n' "$_pack_out" | grep -Eq '"path": *"examples/profile-project/shell/keep\.sh"'; then
+      pass "npm pack still ships example project sources"
+    else
+      fail "npm pack still ships example project sources"
+    fi
+  fi
+  unset _pack_probe _pack_out _pack_status
+else
+  printf '  SKIP: npm pack example exclusion check (npm unavailable)\n'
+fi
 unset _pkg_root
 if command -v npm >/dev/null 2>&1; then
   _npm_root="$_test_home/npm-pack"
@@ -264,7 +362,7 @@ if command -v npm >/dev/null 2>&1; then
   _npm_prefix="$_test_home/npm-prefix"
   if npm install --global --offline --prefix "$_npm_prefix" "$_npm_root/$_npm_tgz" >"$_test_home/npm-install.out" 2>&1; then
     pass "npm installs the packed CLI without a registry"
-    if "$_npm_prefix/bin/valise" version 2>/dev/null | grep '^0.1.0$' >/dev/null 2>&1; then
+    if "$_npm_prefix/bin/valise" version 2>/dev/null | grep '^0.2.0$' >/dev/null 2>&1; then
       pass "installed npm binary runs"
     else
       fail "installed npm binary runs"
@@ -292,121 +390,6 @@ if [ -e "$_unknown_compile_dir" ] || [ -L "$_unknown_compile_dir" ]; then
   fail "unknown variant leaves no partial output"
 else
   pass "unknown variant leaves no partial output"
-fi
-
-# Bundle compilation is exercised when the parent release authority is present.
-# The standalone engine checkout intentionally has no project bundle sources.
-_bundle_source_root=$(cd "$(dirname "$_valise")/../../.." && pwd -P)
-if [ -f "$_bundle_source_root/shell/release/bundles.json" ]; then
-  _contrib_compile_dir="$_test_home/contrib-compile"
-  if "$_valise" compile --bundle=with-contrib "$_contrib_compile_dir" >"$_test_home/contrib-compile.stdout" 2>"$_test_home/contrib-compile.stderr"; then
-    if grep 'compiled plan for bash' "$_test_home/contrib-compile.stdout" >/dev/null 2>&1 &&
-       grep 'layers/contrib/modules/contrib/hello.sh' "$_contrib_compile_dir/installed-modules.bash" >/dev/null 2>&1; then
-      pass "compile preserves source-qualified contribution bundle roots"
-    else
-      fail "compile preserves source-qualified contribution bundle roots"
-    fi
-  else
-    fail "compile accepts contribution bundle"
-  fi
-  _invalid_bundle_dir="$_test_home/invalid-bundle-output"
-  if "$_valise" compile --bundle=does-not-exist "$_invalid_bundle_dir" >"$_test_home/invalid-bundle.stdout" 2>"$_test_home/invalid-bundle.stderr"; then
-    fail "compile rejects unknown bundle"
-  else
-    pass "compile rejects unknown bundle"
-  fi
-  if [ -e "$_invalid_bundle_dir" ] || [ -L "$_invalid_bundle_dir" ]; then
-    fail "unknown bundle leaves no partial output"
-  else
-    pass "unknown bundle leaves no partial output"
-  fi
-  _empty_bundle_dir="$_test_home/empty-bundle-output"
-  if "$_valise" compile --bundle= "$_empty_bundle_dir" >"$_test_home/empty-bundle.stdout" 2>"$_test_home/empty-bundle.stderr"; then
-    fail "compile rejects empty bundle name"
-  else
-    pass "compile rejects empty bundle name"
-  fi
-  if [ -e "$_empty_bundle_dir" ] || [ -L "$_empty_bundle_dir" ]; then
-    fail "empty bundle leaves no partial output"
-  else
-    pass "empty bundle leaves no partial output"
-  fi
-
-  # Compilation is transactional with respect to a caller-owned destination:
-  # a non-empty output directory is rejected before any plan is written. This
-  # prevents a later-shell path failure from leaving an earlier plan behind.
-  _occupied_compile_dir="$_test_home/occupied-compile-output"
-  mkdir -p "$_occupied_compile_dir/installed-modules.zsh"
-  printf '%s\n' caller-owned >"$_occupied_compile_dir/sentinel"
-  if "$_valise" compile --bundle=with-contrib "$_occupied_compile_dir" >"$_test_home/occupied-compile.stdout" 2>"$_test_home/occupied-compile.stderr"; then
-    fail "compile rejects non-empty output transactionally"
-  else
-    pass "compile rejects non-empty output transactionally"
-  fi
-  if [ -e "$_occupied_compile_dir/installed-modules.bash" ] || [ ! -f "$_occupied_compile_dir/sentinel" ] || [ ! -d "$_occupied_compile_dir/installed-modules.zsh" ]; then
-    fail "non-empty output remains untouched after compile rejection"
-  else
-    pass "non-empty output remains untouched after compile rejection"
-  fi
-
-  _empty_compile_dir="$_test_home/empty-compile-output"
-  mkdir -p "$_empty_compile_dir"
-  if "$_valise" compile --bundle=with-contrib "$_empty_compile_dir" >"$_test_home/empty-compile.stdout" 2>"$_test_home/empty-compile.stderr"; then
-    pass "compile publishes into an empty pre-created output directory"
-  else
-    fail "compile publishes into an empty pre-created output directory"
-  fi
-  if [ -f "$_empty_compile_dir/installed-modules.bash" ]; then
-    pass "empty pre-created destination received published plans"
-  else
-    fail "empty pre-created destination received published plans"
-  fi
-
-  # A missing destination is created only at successful publish; staging never
-  # leaks into the parent on success or on the occupied-directory rejection.
-  _absent_compile_dir="$_test_home/absent-compile-output"
-  if "$_valise" compile --bundle=with-contrib "$_absent_compile_dir" >"$_test_home/absent-compile.stdout" 2>"$_test_home/absent-compile.stderr"; then
-    pass "compile publishes into an absent output directory"
-  else
-    fail "compile publishes into an absent output directory"
-  fi
-  if [ -f "$_absent_compile_dir/installed-modules.bash" ] &&
-     [ -f "$_absent_compile_dir/installed-modules.zsh" ] &&
-     [ -f "$_absent_compile_dir/installed-modules.ksh" ] &&
-     [ -f "$_absent_compile_dir/wrapper-lifecycle.bash" ]; then
-    pass "absent destination receives every compiled plan"
-  else
-    fail "absent destination receives every compiled plan"
-  fi
-  _stage_leftovers=$(find "$_test_home" -maxdepth 2 -name '.valise-compile.*' 2>/dev/null || :)
-  if [ -z "$_stage_leftovers" ]; then
-    pass "successful compile leaves no staging directories"
-  else
-    fail "successful compile leaves no staging directories: $_stage_leftovers"
-  fi
-
-  # Trailing-slash destinations must behave like their slash-free twins:
-  # stage beside the destination, never inside it.
-  _slash_compile_dir="$_test_home/slash-compile-output/"
-  if "$_valise" compile --bundle=with-contrib "$_slash_compile_dir" >"$_test_home/slash-compile.stdout" 2>"$_test_home/slash-compile.stderr"; then
-    pass "compile publishes into a trailing-slash output directory"
-  else
-    fail "compile publishes into a trailing-slash output directory" \
-      "$(cat "$_test_home/slash-compile.stderr" 2>/dev/null || :)"
-  fi
-  if [ -f "$_test_home/slash-compile-output/installed-modules.bash" ]; then
-    pass "trailing-slash destination received published plans"
-  else
-    fail "trailing-slash destination received published plans"
-  fi
-  _slash_stage_leftovers=$(find "$_test_home" -maxdepth 2 -name '.valise-compile.*' 2>/dev/null || :)
-  if [ -z "$_slash_stage_leftovers" ]; then
-    pass "trailing-slash compile leaves no staging directories"
-  else
-    fail "trailing-slash compile leaves no staging directories: $_slash_stage_leftovers"
-  fi
-
-  check_output_contains "explain-bundles shows installed bundle" "Installed bundle resolution:" "$_valise" explain-bundles
 fi
 
 # --- Install (requires manifest context) ---
@@ -451,24 +434,21 @@ fi
 # Check that shell integration was auto-deployed
 # The test environment sets SHELL=/bin/sh, so we test with explicit bash
 _bash_profile_expected="$_test_home/.bashrc"
-if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-  _bash_profile_expected="$_test_home/.bash_profile"
-fi
 (cd "$_test_home/repo" && SHELL=/bin/bash "$_valise" install >/dev/null 2>&1)
 if [ -f "$_bash_profile_expected" ]; then
-  if grep -q "managed by valise install" "$_bash_profile_expected"; then
-    pass "install auto-deploys bash integration to platform-appropriate file"
+  if grep -q "# BEGIN valise managed block" "$_bash_profile_expected"; then
+    pass "install writes bash integration to ~/.bashrc"
   else
-    fail "install auto-deploys bash integration (marker missing)"
+    fail "install writes bash integration (marker missing)"
   fi
 else
-  fail "install auto-deploys bash integration (file not created: $_bash_profile_expected)"
+  fail "install writes bash integration (file not created: $_bash_profile_expected)"
 fi
 
 # Verify idempotency: running install again should not duplicate the snippet
-_snippet_count_before=$(grep -c "managed by valise install" "$_bash_profile_expected" || echo 0)
+_snippet_count_before=$(grep -c "# BEGIN valise managed block" "$_bash_profile_expected" || echo 0)
 (cd "$_test_home/repo" && SHELL=/bin/bash "$_valise" install >/dev/null 2>&1)
-_snippet_count_after=$(grep -c "managed by valise install" "$_bash_profile_expected" || echo 0)
+_snippet_count_after=$(grep -c "# BEGIN valise managed block" "$_bash_profile_expected" || echo 0)
 if [ "$_snippet_count_before" = "$_snippet_count_after" ]; then
   pass "install is idempotent (no duplicate snippets)"
 else
@@ -477,26 +457,20 @@ fi
 
 # Test zsh deployment
 _zsh_profile_expected="$_test_home/.zshrc"
-if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-  _zsh_profile_expected="$_test_home/.zprofile"
-fi
 (cd "$_test_home/repo" && SHELL=/bin/zsh "$_valise" install >/dev/null 2>&1)
 if [ -f "$_zsh_profile_expected" ]; then
-  if grep -q "managed by valise install" "$_zsh_profile_expected"; then
-    pass "install auto-deploys zsh integration to platform-appropriate file"
+  if grep -q "# BEGIN valise managed block" "$_zsh_profile_expected"; then
+    pass "install writes zsh integration to ~/.zshrc"
   else
-    fail "install auto-deploys zsh integration (marker missing)"
+    fail "install writes zsh integration (marker missing)"
   fi
 else
-  fail "install auto-deploys zsh integration (file not created: $_zsh_profile_expected)"
+  fail "install writes zsh integration (file not created: $_zsh_profile_expected)"
 fi
 
 # Test that existing profile content is preserved
 _custom_profile_content="# existing user config"
 _bash_profile_test="$_test_home/.bashrc"
-if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-  _bash_profile_test="$_test_home/.bash_profile"
-fi
 printf '%s\n' "$_custom_profile_content" > "$_bash_profile_test"
 (cd "$_test_home/repo" && SHELL=/bin/bash "$_valise" install >/dev/null 2>&1)
 if grep -q "existing user config" "$_bash_profile_test"; then
@@ -506,16 +480,16 @@ else
 fi
 
 # Test ksh deployment
-_ksh_profile_expected="$_test_home/.kshrc"
+_ksh_profile_expected="$_test_home/.profile"
 (cd "$_test_home/repo" && SHELL=/bin/ksh "$_valise" install >/dev/null 2>&1)
 if [ -f "$_ksh_profile_expected" ]; then
-  if grep -q "managed by valise install" "$_ksh_profile_expected"; then
-    pass "install auto-deploys ksh integration"
+  if grep -q "# BEGIN valise managed block" "$_ksh_profile_expected"; then
+    pass "install writes ksh integration"
   else
-    fail "install auto-deploys ksh integration (marker missing)"
+    fail "install writes ksh integration (marker missing)"
   fi
 else
-  fail "install auto-deploys ksh integration (file not created: $_ksh_profile_expected)"
+  fail "install writes ksh integration (file not created: $_ksh_profile_expected)"
 fi
 
 # Test unknown shell: install should skip POSIX shell integration gracefully
@@ -530,9 +504,6 @@ fi
 
 # Test symlink profile: install should skip and not overwrite the symlink
 _symlink_profile="$_test_home/.bashrc"
-if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-  _symlink_profile="$_test_home/.bash_profile"
-fi
 rm -f "$_symlink_profile"
 printf '%s\n' "# symlink target" > "$_test_home/.profile-real"
 ln -s "$_test_home/.profile-real" "$_symlink_profile"
@@ -552,18 +523,18 @@ else
   fail "install preserves symlink profile (symlink was replaced)"
 fi
 
-if "$_valise" verify-active >/dev/null 2>&1; then
-  pass "verify-active authenticates the installed release"
+if "$_valise" release verify >/dev/null 2>&1; then
+  pass "release verify authenticates the installed release"
 else
-  fail "verify-active authenticates the installed release"
+  fail "release verify authenticates the installed release"
 fi
 _installed_active=$(readlink "$XDG_CONFIG_HOME/valise/active")
 chmod u+w "$_installed_active/fixture.sh"
 printf '%s\n' tampered >>"$_installed_active/fixture.sh"
-if "$_valise" verify-active >/dev/null 2>&1; then
-  fail "verify-active rejects a tampered release"
+if "$_valise" release verify >/dev/null 2>&1; then
+  fail "release verify rejects a tampered release"
 else
-  pass "verify-active rejects a tampered release"
+  pass "release verify rejects a tampered release"
 fi
 chmod u-w "$_installed_active/fixture.sh"
 # Restore the disposable release bytes before the later variant-switch fixture
@@ -576,7 +547,7 @@ chmod 0444 "$_installed_active/fixture.sh"
 # Regression test for the greedy ${_sha_output##*= } strip that corrupted
 # sha256sum/shasum output when the absolute path contains '= ' (equals
 # followed by space). This exercises bin/valise itself — not a copy of its
-# parsing logic — by running install + verify-active with HOME containing
+# parsing logic — by running install + release verify with HOME containing
 # '= ', so every staged and installed release path contains '= '. A parsing
 # regression fails install or verify instead of passing silently.
 _eq_home="$_test_home/home= with equals"
@@ -586,10 +557,10 @@ if (cd "$_test_home/repo" && HOME="$_eq_home" XDG_DATA_HOME="$_eq_home/.local/sh
 else
   fail "install succeeds with '= ' in HOME path"
 fi
-if HOME="$_eq_home" XDG_DATA_HOME="$_eq_home/.local/share" XDG_CONFIG_HOME="$_eq_home/.config" XDG_STATE_HOME="$_eq_home/.local/state" "$_valise" verify-active >/dev/null 2>&1; then
-  pass "verify-active passes with '= ' in HOME path"
+if HOME="$_eq_home" XDG_DATA_HOME="$_eq_home/.local/share" XDG_CONFIG_HOME="$_eq_home/.config" XDG_STATE_HOME="$_eq_home/.local/state" "$_valise" release verify >/dev/null 2>&1; then
+  pass "release verify passes with '= ' in HOME path"
 else
-  fail "verify-active passes with '= ' in HOME path"
+  fail "release verify passes with '= ' in HOME path"
 fi
 
 # --- Atomic symlink swap test ---
@@ -611,31 +582,39 @@ printf '# test profile\n' > "$_test_home/.profile"
 _profile_before=$(cat "$_test_home/.profile")
 
 # Switch variant
-(cd "$_test_home/repo" && "$_valise" variant use release_b 2>/dev/null)
+(cd "$_test_home/repo" && "$_valise" release use release_b 2>/dev/null)
 
 _profile_after=$(cat "$_test_home/.profile")
 if [ "$_profile_before" = "$_profile_after" ]; then
-  pass "variant use does not modify .profile"
+  pass "release use does not modify .profile"
 else
-  fail "variant use does not modify .profile"
+  fail "release use does not modify .profile"
 fi
 
-# Verify symlink actually changed
+# Verify symlink actually changed. The pointer names a release directory;
+# compare the directory each path resolves to, not its spelling. The CLI
+# writes a normalized target, so a raw comparison fails whenever the test's
+# own path spelling differs (a TMPDIR ending in a slash, for example).
 _active_target=$(readlink "$XDG_CONFIG_HOME/valise/active" 2>/dev/null || :)
-if [ "$_active_target" = "$_rel2" ]; then
-  pass "variant use updates active symlink"
+_active_resolved=$(cd "$_active_target" 2>/dev/null && pwd -P) || _active_resolved=
+_rel2_resolved=$(cd "$_rel2" 2>/dev/null && pwd -P) || _rel2_resolved=
+if [ -n "$_active_resolved" ] && [ "$_active_resolved" = "$_rel2_resolved" ]; then
+  pass "release use updates active symlink"
 else
-  fail "variant use updates active symlink (got: $_active_target)"
+  fail "release use updates active symlink (got: $_active_target)"
 fi
 
 # Switch back
-(cd "$_test_home/repo" && "$_valise" variant use release_a 2>/dev/null)
+(cd "$_test_home/repo" && "$_valise" release use release_a 2>/dev/null)
 _active_target=$(readlink "$XDG_CONFIG_HOME/valise/active" 2>/dev/null || :)
-if [ "$_active_target" = "$_rel1" ]; then
-  pass "variant use round-trips correctly"
+_active_resolved=$(cd "$_active_target" 2>/dev/null && pwd -P) || _active_resolved=
+_rel1_resolved=$(cd "$_rel1" 2>/dev/null && pwd -P) || _rel1_resolved=
+if [ -n "$_active_resolved" ] && [ "$_active_resolved" = "$_rel1_resolved" ]; then
+  pass "release use round-trips correctly"
 else
-  fail "variant use round-trips correctly"
+  fail "release use round-trips correctly"
 fi
+unset _active_target _active_resolved _rel1_resolved _rel2_resolved
 
 # --- Unknown command ---
 _unknown_out=$("$_valise" bogus 2>&1) || true

@@ -728,8 +728,8 @@ function sp_fish_loader_validate_provider_conflicts --description 'Reject confli
             end
             set -l candidate_load_line (string match 'load=*' -- $candidate_parsed)
             set -l candidate_load (string replace 'load=' '' -- $candidate_load_line)
-            # Generic .sh/load_hook providers are graph metadata only for Fish;
-            # they have no native body whose ownership can be compared.
+            # Generic .sh providers are graph metadata only for Fish; they
+            # have no native body whose ownership can be compared.
             if not string match -q '*.fish' -- "$primary_load"; or not string match -q '*.fish' -- "$candidate_load"
                 continue
             end
@@ -931,6 +931,8 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
     set -l meta_provider_modules
     set -l meta_provider_paths
     set -l optional_modules
+    set -l platform_skipped_modules
+    set -l requires_edges
     set -l shell_skipped_modules
     set -l failed_modules
     set -l runtime_failed_modules
@@ -1029,15 +1031,7 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
             end
         end
         if test $platform_match -ne 1
-            if builtin contains -- $current $optional_modules
-                sp_fish_loader_error "warning: optional module unsupported on platform: $current"
-                set -a failed_modules $current
-                continue
-            end
-            if test "$mode" = strict
-                sp_fish_loader_error "unsupported platform for $current: $current_platform"
-                return 1
-            end
+            set -a platform_skipped_modules $current
             set -a failed_modules $current
             continue
         end
@@ -1063,12 +1057,20 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
             continue
         end
 
-        # A Fish-advertised module must provide a native Fish body. Generic
-        # load_hook records and POSIX .sh bodies are not executable Fish
-        # providers and must not satisfy required Fish dependents.
+        # A Fish-advertised module must provide a native Fish body, or be a
+        # dependency-only meta record. Generic POSIX bodies are not executable
+        # Fish providers and must not satisfy required Fish dependents.
         set -l load_line (string match 'load=*' -- $parsed)
         set -l load_val (string replace 'load=' '' -- $load_line)
-        if test -z "$load_val"; or not string match -q '*.fish' -- $load_val
+        set -l meta_requires_line (string match 'requires=*' -- $parsed)
+        set -l meta_requires_val (string replace 'requires=' '' -- $meta_requires_line)
+        set -l is_meta 0
+        if test -z "$load_val"; and test -n "$meta_requires_val"
+            set is_meta 1
+        end
+        if test $is_meta -eq 0; and begin
+                test -z "$load_val"; or not string match -q '*.fish' -- $load_val
+            end
             if builtin contains -- $current $optional_modules; and not builtin contains -- $current $explicit_seeds
                 sp_fish_loader_error "warning: optional Fish module has no native .fish load path: $current"
                 set -a failed_modules $current
@@ -1106,6 +1108,7 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         # Enqueue requires dependencies
         set -l req_line (string match 'requires=*' -- $parsed)
         set -l req_val (string replace 'requires=' '' -- $req_line)
+        set -a requires_edges "$current|$req_val"
         for dep in (string split ' ' -- $req_val)
             if test -z "$dep"
                 continue
@@ -1131,6 +1134,42 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
             if not builtin contains -- $dep $discovered
                 set -a queue $dep
             end
+        end
+    end
+
+    # A platform skip is expected for an optional-only module and stays
+    # silent. Re-walk the required edges to a fixpoint first, because discovery
+    # can mark a module optional before a later required edge promotes it; a
+    # required-closure platform skip is a strict failure and must be named.
+    set -l required_modules $seeds
+    set -l closure_progress 1
+    while test $closure_progress -eq 1
+        set closure_progress 0
+        for edge in $requires_edges
+            set -l edge_parts (string split '|' -- $edge)
+            set -l edge_from $edge_parts[1]
+            set -l edge_deps (string split ' ' -- $edge_parts[2])
+            if not builtin contains -- $edge_from $required_modules
+                continue
+            end
+            for edge_dep in $edge_deps
+                if test -z "$edge_dep"; or builtin contains -- $edge_dep $required_modules
+                    continue
+                end
+                set -a required_modules $edge_dep
+                set closure_progress 1
+            end
+        end
+    end
+    set -l report_platform (sp_fish_loader_platform_name)
+    test -n "$report_platform"; or set report_platform unknown
+    for skipped_module in $platform_skipped_modules
+        if not builtin contains -- $skipped_module $required_modules
+            continue
+        end
+        sp_fish_loader_error "unsupported platform for $skipped_module: $report_platform"
+        if test "$mode" = strict
+            return 1
         end
     end
 
@@ -1343,6 +1382,33 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         end
 
         if test -z "$load_path"
+            # A meta module has no body: its dependencies have already loaded,
+            # and it must not claim exports it cannot define.
+            if test (builtin count $mod_reqs) -gt 0
+                set -l meta_export_count 0
+                for meta_export in $mod_exports
+                    if test -n "$meta_export"
+                        set meta_export_count (builtin math $meta_export_count + 1)
+                    end
+                end
+                if test $meta_export_count -gt 0
+                    if builtin contains -- $mod $optional_modules
+                        sp_fish_loader_error "warning: optional meta module declares exports without a body: $mod"
+                        set -a failed_modules $mod
+                        set -a runtime_failed_modules $mod
+                        continue
+                    end
+                    if test "$mode" = strict
+                        sp_fish_loader_error "meta module declares exports without a body: $mod"
+                        return 1
+                    end
+                    set -a runtime_failed_modules $mod
+                    sp_fish_loader_error "warning: meta module declares exports without a body: $mod"
+                    continue
+                end
+                set -g _sp_fish_loaded_modules $_sp_fish_loaded_modules $mod
+                continue
+            end
             if builtin contains -- $mod $optional_modules
                 sp_fish_loader_error "warning: optional module has no load path: $mod"
                 set -a failed_modules $mod
@@ -1469,15 +1535,24 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
             set -l caller_function_copy_failed 0
             builtin functions --copy "$caller_function_name" "$caller_function_snapshot"; or set caller_function_copy_failed 1
             set -l caller_function_snapshot_source (builtin functions --details "$caller_function_snapshot")
-            set -l caller_function_source_authenticated 0
-            if builtin test "$caller_function_snapshot_source" = "$loader_source_file"
-                set caller_function_source_authenticated 1
-            else if _sp_fish_loader_is_trusted_system_function_source "$caller_function_source" "$caller_function_name"
-                set caller_function_source_authenticated 1
-            end
             set -l caller_function_copy_matches 0
             if _sp_fish_loader_function_copy_matches "$caller_function_name" "$caller_function_snapshot"; or _sp_fish_loader_is_trusted_system_function_source "$caller_function_source" "$caller_function_name"
                 set caller_function_copy_matches 1
+            end
+            set -l caller_function_source_authenticated 0
+            if builtin test "$caller_function_snapshot_source" = "$loader_source_file"
+                set caller_function_source_authenticated 1
+            else if builtin test "$caller_function_snapshot_source" = "$caller_function_source"
+                # Fish keeps the copy's original source; a copy that agrees
+                # with the live function's source is a faithful custody copy.
+                set caller_function_source_authenticated 1
+            else if _sp_fish_loader_is_trusted_system_function_source "$caller_function_source" "$caller_function_name"
+                set caller_function_source_authenticated 1
+            else if builtin test $caller_function_copy_matches -eq 1
+                # Fish 3 reports a copied function's source as ``stdin``. The
+                # copy was made by Fish's own primitive and matches the live
+                # definition; later restores re-verify that definition.
+                set caller_function_source_authenticated 1
             end
             if builtin functions -q "$caller_function_snapshot"; and builtin test $caller_function_copy_failed -eq 0; and builtin test $caller_function_source_authenticated -eq 1; and builtin test $caller_function_copy_matches -eq 1
                 # The source and complete definition were authenticated.

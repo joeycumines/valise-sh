@@ -42,14 +42,14 @@ export XDG_DATA_HOME="$_demo/data"
 export XDG_CONFIG_HOME="$_demo/config"
 export XDG_STATE_HOME="$_demo/state"
 
-(cd examples/e2e && valise install)
-valise verify-active
+(cd examples/e2e/build/release && valise install)
+valise release verify
 ```
 
-The build script copies the engine runtime and shared example into the e2e
-tree, then writes `shell/install/profile-release.manifest` with each file's
-size and SHA-256 digest. Generated release files are ignored by Git and can
-be rebuilt at any time.
+The build script copies the engine runtime and shared example into
+`examples/e2e/build/release`, then writes `shell/install/profile-release.manifest`
+with each file's size and SHA-256 digest using `valise make-manifest`. Generated
+release files are isolated in `build/` and can be rebuilt at any time.
 
 Load sample modules in a POSIX shell:
 
@@ -71,7 +71,7 @@ environment before starting Fish:
 
 ```sh
 VALISE_MODULES=e2e_fish_features VALISE_MODE=strict fish -c \
-  'functions -q e2e_fish_loaded; and valise verify-active'
+  'functions -q e2e_fish_loaded; and valise release verify'
 ```
 
 When finished, stop using the functions and remove the temporary installation:

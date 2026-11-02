@@ -1,0 +1,9 @@
+name=wrapper_export
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=mvn
+updates=
+load=modules/wrapper_export.sh

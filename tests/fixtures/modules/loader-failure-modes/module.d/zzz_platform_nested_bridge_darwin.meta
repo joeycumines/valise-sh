@@ -1,0 +1,9 @@
+name=zzz_platform_nested_bridge_darwin
+requires=platform_nested_mid_darwin
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=zzz_platform_nested_bridge_darwin_loaded
+updates=
+load=modules/zzz_platform_nested_bridge_darwin.sh

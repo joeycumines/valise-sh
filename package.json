@@ -1,6 +1,6 @@
 {
   "name": "valise-sh",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pure POSIX shell profile engine and CLI",
   "bin": {
     "valise": "./bin/valise"
@@ -14,6 +14,7 @@
     "manifests/",
     "docs/",
     "examples/",
+    "!examples/**/build/",
     "LICENSE",
     "CHANGELOG.md"
   ],

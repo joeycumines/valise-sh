@@ -48,6 +48,13 @@ function sp_fish_metadata_validate_identifier_list --description 'Validate space
             sp_fish_metadata_error "invalid $label: $word"
             return 1
         end
+        if test "$label" = export
+            switch $word
+                case case do done elif else esac fi for if in then until while time
+                    sp_fish_metadata_error "invalid export (reserved word): $word"
+                    return 1
+            end
+        end
     end
     if test $seen -eq 0
         sp_fish_metadata_error "missing required metadata field: $label"
@@ -128,7 +135,7 @@ end
 
 function sp_fish_metadata_validate_side_effect --description 'Validate side_effect value'
     switch "$argv[1]"
-        case read-only path-env generated-file update-network install-time local-secret work-only
+        case read-only path-env generated-file update-network install-time local-secret local-state work-only
             return 0
         case '*'
             sp_fish_metadata_error "invalid side_effect: $argv[1]"
@@ -186,7 +193,6 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
     set -l m_updates ''
     set -l m_version ''
     set -l m_load ''
-    set -l m_load_hook ''
 
     while read -l line
         # Skip empty lines and comments
@@ -211,7 +217,9 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
             case updates; set m_updates $val
             case version; set m_version $val
             case load; set m_load $val
-            case load_hook; set m_load_hook $val
+            case load_hook
+                sp_fish_metadata_error 'metadata field load_hook is not supported; use load'
+                return 1
             case '*'
                 sp_fish_metadata_error "unknown metadata field: $key"
                 return 1
@@ -239,16 +247,8 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
     # Match the generic metadata ABI before the Fish loader applies its
     # shell/body selection. Generic POSIX records must parse successfully so
     # the loader can skip them when their shells do not include Fish.
-    if test -z "$m_load"; and test -z "$m_load_hook"
-        sp_fish_metadata_error 'missing required metadata field: load or load_hook'
-        return 1
-    end
-    if test -n "$m_load"; and test -n "$m_load_hook"
-        sp_fish_metadata_error 'metadata fields load and load_hook are mutually exclusive'
-        return 1
-    end
-    if test -n "$m_load_hook"; and not sp_fish_metadata_validate_identifier "$m_load_hook"
-        sp_fish_metadata_error "invalid load_hook: $m_load_hook"
+    if test -z "$m_load"; and test -z "$m_requires"
+        sp_fish_metadata_error 'missing required metadata field: load or requires'
         return 1
     end
 
@@ -295,6 +295,5 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
     echo "updates=$m_updates"
     echo "version=$m_version"
     echo "load=$m_load"
-    echo "load_hook=$m_load_hook"
     return 0
 end

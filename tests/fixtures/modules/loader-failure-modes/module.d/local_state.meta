@@ -1,0 +1,9 @@
+name=local_state
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=local-state
+exports=local_state_loaded
+updates=
+load=modules/local_state.sh

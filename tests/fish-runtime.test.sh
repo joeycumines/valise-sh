@@ -83,6 +83,16 @@ _meta "$_fixture/module.d/gated_app.meta" gated_app fish any read-only gated_app
 # permissive must report and continue, and the body must never run.
 _meta "$_fixture/module.d/posix_only_seed.meta" posix_only_seed "sh bash zsh ksh" any read-only posix_only_seed_loaded modules/fish/posix_only_seed.fish
 _body "$_fixture/modules/fish/posix_only_seed.fish" 'set -g posix_only_sourced 1; function posix_only_seed_loaded; end'
+# The shared ABI parses POSIX local-state and dependency-only meta records
+# before the shell gate skips them. A native Fish module can depend on both.
+_meta "$_fixture/module.d/local_state_skip.meta" local_state_skip "sh bash zsh ksh" any local-state '' modules/fish/local_state_skip.sh
+_meta "$_fixture/module.d/meta_only.meta" meta_only "sh bash zsh ksh" any read-only '' '' local_state_skip
+_meta "$_fixture/module.d/meta_dependent.meta" meta_dependent fish any read-only meta_dependent_loaded modules/fish/meta_dependent.fish meta_only
+_body "$_fixture/modules/fish/meta_dependent.fish" 'function meta_dependent_loaded; end'
+# A Fish-native dependency-only meta record has no body; its requires edge
+# still loads normally.
+_meta "$_fixture/module.d/fish_meta.meta" fish_meta fish any read-only '' '' clean
+_meta "$_fixture/module.d/fish_meta_exports.meta" fish_meta_exports fish any read-only fish_meta_exports_loaded '' clean
 # An optional-only cycle pins the native Fish ordering contract: the
 # single-pass Kahn sort has no optional-relaxed fallback (unlike the POSIX
 # loader's two-pass sort), so a stall quarantines its members — strict mode
@@ -135,7 +145,7 @@ _meta "$_fixture/module.d/return_app.meta" return_app fish any read-only return_
 _body "$_fixture/modules/fish/return_app.fish" 'function return_app_loaded; end'
 _meta "$_fixture/module.d/hijack.meta" hijack fish any read-only hijack_loaded modules/fish/hijack.fish
 _body "$_fixture/modules/fish/hijack.fish" 'function contains; return 0; end; function cd; return 1; end; function hijack_loaded; end'
-# Namespace mutation is assembled dynamically so lexical preflight cannot
+# Namespace mutation is built dynamically so lexical preflight cannot
 # recognize the Fish namespace command or erase option. Runtime integrity must
 # therefore fail closed after the embedded cd has been replaced.
 _meta "$_fixture/module.d/indirect_cd.meta" indirect_cd fish any read-only indirect_cd_loaded modules/fish/indirect_cd.fish
@@ -176,6 +186,24 @@ _platform=$(/usr/bin/uname -s 2>/dev/null || printf unknown)
 case "$_platform" in Darwin) _opposite_platform=linux ;; *) _opposite_platform=darwin ;; esac
 _meta "$_fixture/module.d/wrong_platform.meta" wrong_platform fish "$_opposite_platform" read-only wrong_platform_loaded modules/fish/wrong_platform.fish
 _body "$_fixture/modules/fish/wrong_platform.fish" 'set -g wrong_platform_sourced 1; function wrong_platform_loaded; end'
+# A platform-skipped optional dependency is expected to be absent on this
+# host. It must stay silent and must not stop its declaring module, matching
+# the POSIX loader's treatment of optional platform skips.
+_meta "$_fixture/module.d/opt_platform_user.meta" opt_platform_user fish any read-only opt_platform_user_loaded modules/fish/opt_platform_user.fish '' wrong_platform
+_body "$_fixture/modules/fish/opt_platform_user.fish" 'set -g opt_platform_user_sourced 1; function opt_platform_user_loaded; end'
+# The platform-skipped module can sit one required edge below a module that
+# was discovered as optional first. The required-closure fixpoint must still
+# report it, exactly as the POSIX loader does.
+_meta "$_fixture/module.d/nested_opt.meta" nested_opt fish any read-only nested_opt_loaded modules/fish/nested_opt.fish '' nested_mid
+_body "$_fixture/modules/fish/nested_opt.fish" 'set -g nested_opt_sourced 1; function nested_opt_loaded; end'
+_meta "$_fixture/module.d/nested_mid.meta" nested_mid fish any read-only nested_mid_loaded modules/fish/nested_mid.fish nested_platform
+_body "$_fixture/modules/fish/nested_mid.fish" 'set -g nested_mid_sourced 1; function nested_mid_loaded; end'
+_meta "$_fixture/module.d/zzz_nested_bridge.meta" zzz_nested_bridge fish any read-only zzz_nested_bridge_loaded modules/fish/zzz_nested_bridge.fish nested_mid
+_body "$_fixture/modules/fish/zzz_nested_bridge.fish" 'set -g zzz_nested_bridge_sourced 1; function zzz_nested_bridge_loaded; end'
+_meta "$_fixture/module.d/nested_root.meta" nested_root fish any read-only nested_root_loaded modules/fish/nested_root.fish zzz_nested_bridge nested_opt
+_body "$_fixture/modules/fish/nested_root.fish" 'set -g nested_root_sourced 1; function nested_root_loaded; end'
+_meta "$_fixture/module.d/nested_platform.meta" nested_platform fish "$_opposite_platform" read-only nested_platform_loaded modules/fish/nested_platform.fish
+_body "$_fixture/modules/fish/nested_platform.fish" 'set -g nested_platform_sourced 1; function nested_platform_loaded; end'
 
 _engine=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
 # An absent universal store is a valid empty before-image. Rollback must still
@@ -287,12 +315,117 @@ if grep -Eq '^[[:space:]]+eval[[:space:]]' "$_engine/lib/fish/loader.fish"; then
   printf '%s\n' 'FAIL: native Fish loader contains unqualified eval' >&2
   exit 1
 fi
+# A platform-skipped optional dependency loads its declaring module and writes
+# nothing to stderr. Silence is the contract: a per-startup warning for a
+# module the user never asked for is noise, and the POSIX loader is quiet too.
+_opt_platform_program="$_test_root/optional-platform.fish"
+cat >"$_opt_platform_program" <<OPTEOF
+builtin source '$_engine/lib/fish/metadata.fish'
+builtin set -gx SHELL_PROJECT_ROOT '$_fixture'
+builtin set -g _sp_fish_loader_bootstrap_mode strict
+builtin set -g _sp_fish_loader_bootstrap_seeds opt_platform_user
+builtin source '$_engine/lib/fish/loader.fish'
+builtin set -l _status \$_sp_fish_loader_bootstrap_status
+builtin set -e _sp_fish_loader_bootstrap_status
+builtin test "\$_status" -eq 0; or exit 1
+builtin set -q opt_platform_user_sourced; or exit 1
+builtin set -q wrong_platform_sourced; and exit 1
+exit 0
+OPTEOF
+_opt_platform_status=0
+/usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_opt_platform_program" >"$_test_root/optional-platform.stdout" 2>"$_test_root/optional-platform.stderr" || _opt_platform_status=$?
+if [ "$_opt_platform_status" -ne 0 ]; then
+  cat "$_test_root/optional-platform.stdout" "$_test_root/optional-platform.stderr" >&2
+  printf '%s\n' 'FAIL: optional platform skip broke its declaring module' >&2
+  exit 1
+fi
+if [ -s "$_test_root/optional-platform.stderr" ]; then
+  cat "$_test_root/optional-platform.stderr" >&2
+  printf '%s\n' 'FAIL: optional platform skip must be silent' >&2
+  exit 1
+fi
+
+# One required edge below an optional module: the platform skip is required,
+# so strict mode fails and names the platform, not just the blocked parent.
+_nested_platform_program="$_test_root/nested-platform.fish"
+cat >"$_nested_platform_program" <<NESTEOF
+builtin source '$_engine/lib/fish/metadata.fish'
+builtin set -gx SHELL_PROJECT_ROOT '$_fixture'
+builtin set -g _sp_fish_loader_bootstrap_mode strict
+builtin set -g _sp_fish_loader_bootstrap_seeds nested_root
+builtin source '$_engine/lib/fish/loader.fish'
+builtin set -l _status \$_sp_fish_loader_bootstrap_status
+builtin set -e _sp_fish_loader_bootstrap_status
+builtin test "\$_status" -ne 0; or exit 1
+builtin set -q nested_platform_sourced; and exit 1
+exit 0
+NESTEOF
+_nested_platform_status=0
+/usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_nested_platform_program" >"$_test_root/nested-platform.stdout" 2>"$_test_root/nested-platform.stderr" || _nested_platform_status=$?
+if [ "$_nested_platform_status" -ne 0 ]; then
+  cat "$_test_root/nested-platform.stdout" "$_test_root/nested-platform.stderr" >&2
+  printf '%s\n' 'FAIL: strict nested platform skip did not fail as expected' >&2
+  exit 1
+fi
+if ! grep -F 'unsupported platform for nested_platform' "$_test_root/nested-platform.stderr" >/dev/null; then
+  cat "$_test_root/nested-platform.stderr" >&2
+  printf '%s\n' 'FAIL: strict nested platform skip must name the platform cause' >&2
+  exit 1
+fi
+
+# A built release has no Fish entrypoint, no generated Fish plan and no native
+# Fish loader, so its hook can load nothing. Installing it must still write the
+# hook and a Fish session must start without output or an error.
+_built_root="$_test_root/built-release"
+mkdir -p "$_built_root/home"
+cp -R "$_engine/examples/profile-project" "$_built_root/project"
+if ! (cd "$_built_root/project" && "$_engine/bin/valise" build) >"$_built_root/build.stdout" 2>"$_built_root/build.stderr"; then
+  cat "$_built_root/build.stdout" "$_built_root/build.stderr" >&2
+  printf '%s\n' 'FAIL: example project did not build for the Fish hook test' >&2
+  exit 1
+fi
+_built_path="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$_fish")"
+if ! (cd "$_built_root/project/build/release" && /usr/bin/env -i TERM=xterm HOME="$_built_root/home" TMPDIR="${TMPDIR:-/tmp}" PATH="$_built_path" XDG_DATA_HOME="$_built_root/home/.local/share" XDG_STATE_HOME="$_built_root/home/.local/state" "$_engine/bin/valise" install) >"$_built_root/install.stdout" 2>"$_built_root/install.stderr"; then
+  cat "$_built_root/install.stdout" "$_built_root/install.stderr" >&2
+  printf '%s\n' 'FAIL: built release did not install for the Fish hook test' >&2
+  exit 1
+fi
+if [ ! -f "$_built_root/home/.config/fish/conf.d/valise.fish" ]; then
+  printf '%s\n' 'FAIL: built release install wrote no Fish hook' >&2
+  exit 1
+fi
+_built_status=0
+/usr/bin/env -i TERM=xterm HOME="$_built_root/home" TMPDIR="${TMPDIR:-/tmp}" PATH="$_built_path" XDG_DATA_HOME="$_built_root/home/.local/share" XDG_STATE_HOME="$_built_root/home/.local/state" "$_fish" -c 'true' >"$_built_root/fish.stdout" 2>"$_built_root/fish.stderr" || _built_status=$?
+if [ "$_built_status" -ne 0 ]; then
+  cat "$_built_root/fish.stdout" "$_built_root/fish.stderr" >&2
+  printf '%s\n' 'FAIL: Fish session failed with a built release active' >&2
+  exit 1
+fi
+if [ -s "$_built_root/fish.stdout" ] || [ -s "$_built_root/fish.stderr" ]; then
+  cat "$_built_root/fish.stdout" "$_built_root/fish.stderr" >&2
+  printf '%s\n' 'FAIL: Fish session with a built release active must be silent' >&2
+  exit 1
+fi
+
+# The hook itself must report success. A silent-but-failing hook is still a
+# broken startup path, and the no-op must not leave private helpers behind.
+_built_hook_status=0
+/usr/bin/env -i TERM=xterm HOME="$_built_root/home" TMPDIR="${TMPDIR:-/tmp}" PATH="$_built_path" \
+  "$_fish" --no-config -c 'source "$HOME/.config/fish/conf.d/valise.fish"; echo status=$status; for helper in (functions --all --names); string match -q "__valise_fish_*" -- $helper; and echo leak=$helper; end; exit 0' \
+  >"$_built_root/hook.stdout" 2>"$_built_root/hook.stderr" || _built_hook_status=$?
+if [ "$_built_hook_status" -ne 0 ] || [ "$(cat "$_built_root/hook.stdout")" != 'status=0' ] || [ -s "$_built_root/hook.stderr" ]; then
+  cat "$_built_root/hook.stdout" "$_built_root/hook.stderr" >&2
+  printf '%s\n' 'FAIL: built-release Fish hook must succeed, stay silent and leave no helper' >&2
+  exit 1
+fi
+
 _project_adapter=$(CDPATH= cd "$_engine/../.." && pwd -P)/shell/entrypoints/fish/profile.fish
+_have_public_adapter=1
 if [ ! -f "$_project_adapter" ]; then
   printf 'NOTE: consuming-project Fish adapter not found at %s; skipping public-adapter coverage\n' "$_project_adapter"
-  printf '%s\n' 'OK: all Fish runtime checks passed'
-  exit 0
+  _have_public_adapter=0
 fi
+if [ "$_have_public_adapter" -eq 1 ]; then
 _public_root="$_test_root/public"
 _public_engine_lib="$_public_root/vendor/shell-profile/lib/fish"
 _missing_root="$_test_root/missing-public"
@@ -353,7 +486,7 @@ for _legacy_helper in (builtin functions --all --names | builtin string match -r
 end
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_init_program" >"$_test_root/init.stdout" 2>"$_test_root/init.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_init_program" >"$_test_root/init.stdout" 2>"$_test_root/init.stderr"; then
   cat "$_test_root/init.stdout" >&2
   cat "$_test_root/init.stderr" >&2
   exit 1
@@ -378,7 +511,7 @@ set -l _unauthenticated_status \$status
 builtin test \$_unauthenticated_status -ne 0; or exit 1
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_unauthenticated_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" UNAUTHENTICATED_MARKER="$_unauthenticated_marker" "$_fish" "$_unauthenticated_program" >"$_test_root/init-unauthenticated.stdout" 2>"$_test_root/init-unauthenticated.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_unauthenticated_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" UNAUTHENTICATED_MARKER="$_unauthenticated_marker" "$_fish" "$_unauthenticated_program" >"$_test_root/init-unauthenticated.stdout" 2>"$_test_root/init-unauthenticated.stderr"; then
   cat "$_test_root/init-unauthenticated.stdout" >&2
   cat "$_test_root/init-unauthenticated.stderr" >&2
   exit 1
@@ -439,7 +572,7 @@ for _installed_suffix_ledger in _sp_fish_entrypoint_owned_exports _sp_fish_entry
 end
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_installed_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_installed_suffix_program" >"$_test_root/installed-suffix.stdout" 2>"$_test_root/installed-suffix.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_installed_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_installed_suffix_program" >"$_test_root/installed-suffix.stdout" 2>"$_test_root/installed-suffix.stderr"; then
   cat "$_test_root/installed-suffix.stdout" >&2
   cat "$_test_root/installed-suffix.stderr" >&2
   exit 1
@@ -492,13 +625,13 @@ for _metadata_alias in (builtin functions --all --names | string match -r '^__va
 end
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_metadata_poison_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" METADATA_POISON_CLEAN="$_test_root/metadata-poison-clean.fish" "$_fish" "$_metadata_poison_program" >"$_test_root/init-metadata-poison.stdout" 2>"$_test_root/init-metadata-poison.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_metadata_poison_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" METADATA_POISON_CLEAN="$_test_root/metadata-poison-clean.fish" "$_fish" "$_metadata_poison_program" >"$_test_root/init-metadata-poison.stdout" 2>"$_test_root/init-metadata-poison.stderr"; then
   cat "$_test_root/init-metadata-poison.stdout" >&2
   cat "$_test_root/init-metadata-poison.stderr" >&2
   exit 1
 fi
 
-# Generated metadata is executable Fish source. Assemble the namespace command
+# Generated metadata is executable Fish source. Build the namespace command
 # and erase option dynamically so lexical preflight cannot identify them; the
 # post-source indexed provenance check must terminate the child with 125.
 _metadata_dynamic_root="$_test_root/metadata-dynamic"
@@ -528,7 +661,7 @@ builtin set -gx SHELL_PROJECT_ROOT metadata-dynamic-caller-root
 builtin source '$_test_root/valise-init-fish-metadata-dynamic.fish'
 EOF
 _metadata_dynamic_marker="$_test_root/metadata-dynamic-marker"
-if /usr/bin/env -i HOME="$_metadata_dynamic_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" METADATA_DYNAMIC_MARKER="$_metadata_dynamic_marker" "$_fish" "$_metadata_dynamic_program" >"$_test_root/init-metadata-dynamic.stdout" 2>"$_test_root/init-metadata-dynamic.stderr"; then
+if /usr/bin/env -i TERM=xterm HOME="$_metadata_dynamic_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" METADATA_DYNAMIC_MARKER="$_metadata_dynamic_marker" "$_fish" "$_metadata_dynamic_program" >"$_test_root/init-metadata-dynamic.stdout" 2>"$_test_root/init-metadata-dynamic.stderr"; then
   printf '%s\n' 'FAIL: generated dynamic metadata replacement did not terminate Fish with status 125' >&2
   exit 1
 else
@@ -556,7 +689,7 @@ builtin test \$_derived_missing_status -ne 0; or exit 1
 builtin set -q SHELL_PROJECT_ROOT; and exit 1
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_derived_missing_program" >"$_test_root/derived-missing.stdout" 2>"$_test_root/derived-missing.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_derived_missing_program" >"$_test_root/derived-missing.stdout" 2>"$_test_root/derived-missing.stderr"; then
   cat "$_test_root/derived-missing.stdout" >&2
   cat "$_test_root/derived-missing.stderr" >&2
   exit 1
@@ -589,7 +722,7 @@ for _legacy_helper in (builtin functions --all --names | builtin string match -r
 end
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_missing_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_missing_init_program" >"$_test_root/init-missing.stdout" 2>"$_test_root/init-missing.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_missing_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_missing_init_program" >"$_test_root/init-missing.stdout" 2>"$_test_root/init-missing.stderr"; then
   cat "$_test_root/init-missing.stdout" >&2
   cat "$_test_root/init-missing.stderr" >&2
   exit 1
@@ -611,7 +744,7 @@ builtin set -gx VALISE_FISH_READY 1
 builtin set -g _sp_fish_loader_bootstrap_status 0
 builtin source '$_test_root/valise-init-fish-bad-metadata.fish'
 EOF
-if /usr/bin/env -i HOME="$_bad_generated_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_bad_generated_program" >"$_test_root/init-bad-metadata.stdout" 2>"$_test_root/init-bad-metadata.stderr"; then
+if /usr/bin/env -i TERM=xterm HOME="$_bad_generated_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_bad_generated_program" >"$_test_root/init-bad-metadata.stdout" 2>"$_test_root/init-bad-metadata.stderr"; then
   printf '%s\n' 'FAIL: generated metadata caller replacement did not terminate' >&2
   exit 1
 else
@@ -680,7 +813,7 @@ _generated_root_local_probe
 EOF
       ;;
   esac
-  if ! /usr/bin/env -i HOME="$_root_scope_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_root_scope_program" >"$_test_root/generated-root-rollback-$_root_scope.stdout" 2>"$_test_root/generated-root-rollback-$_root_scope.stderr"; then
+  if ! /usr/bin/env -i TERM=xterm HOME="$_root_scope_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_root_scope_program" >"$_test_root/generated-root-rollback-$_root_scope.stdout" 2>"$_test_root/generated-root-rollback-$_root_scope.stderr"; then
     cat "$_test_root/generated-root-rollback-$_root_scope.stdout" >&2
     cat "$_test_root/generated-root-rollback-$_root_scope.stderr" >&2
     exit 1
@@ -812,7 +945,7 @@ for _persistence_helper in (builtin functions --all --names | string match -r '^
 end
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_good_entry_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_good_entry_program" >"$_test_root/init-good-entrypoint.stdout" 2>"$_test_root/init-good-entrypoint.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_good_entry_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_good_entry_program" >"$_test_root/init-good-entrypoint.stdout" 2>"$_test_root/init-good-entrypoint.stderr"; then
   cat "$_test_root/init-good-entrypoint.stdout" >&2
   cat "$_test_root/init-good-entrypoint.stderr" >&2
   exit 1
@@ -859,7 +992,7 @@ builtin contains -- entrypoint_release_b_only \$_sp_fish_entrypoint_owned_export
 test (caller_owned_entrypoint_switch) = caller-entrypoint-switch; or exit 1
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_entrypoint_switch_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_entrypoint_switch_program" >"$_test_root/entrypoint-switch.stdout" 2>"$_test_root/entrypoint-switch.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_entrypoint_switch_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_entrypoint_switch_program" >"$_test_root/entrypoint-switch.stdout" 2>"$_test_root/entrypoint-switch.stderr"; then
   cat "$_test_root/entrypoint-switch.stdout" >&2
   cat "$_test_root/entrypoint-switch.stderr" >&2
   exit 1
@@ -886,7 +1019,7 @@ functions -q caller_owned_entrypoint_ledger; or exit 1
 builtin set -q _sp_fish_entrypoint_owned_exports; and exit 1
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_entrypoint_forged_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_entrypoint_forged_program" >"$_test_root/entrypoint-forged.stdout" 2>"$_test_root/entrypoint-forged.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_entrypoint_forged_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_entrypoint_forged_program" >"$_test_root/entrypoint-forged.stdout" 2>"$_test_root/entrypoint-forged.stderr"; then
   cat "$_test_root/entrypoint-forged.stdout" >&2
   cat "$_test_root/entrypoint-forged.stderr" >&2
   exit 1
@@ -928,7 +1061,7 @@ set -l _hostile_good_status \$status
 builtin test \$_hostile_good_status -eq 125; or exit 1
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_hostile_good_entry_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_hostile_good_entry_program" >"$_test_root/init-hostile-good-entrypoint.stdout" 2>"$_test_root/init-hostile-good-entrypoint.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_hostile_good_entry_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_hostile_good_entry_program" >"$_test_root/init-hostile-good-entrypoint.stdout" 2>"$_test_root/init-hostile-good-entrypoint.stderr"; then
   cat "$_test_root/init-hostile-good-entrypoint.stdout" >&2
   cat "$_test_root/init-hostile-good-entrypoint.stderr" >&2
   exit 1
@@ -955,7 +1088,7 @@ functions -q forged_root_entrypoint_helper; and exit 1
 builtin set -q VALISE_FISH_READY; and exit 1
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_forged_root_entry_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_forged_root_entry_program" >"$_test_root/init-forged-root-entrypoint.stdout" 2>"$_test_root/init-forged-root-entrypoint.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_forged_root_entry_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_forged_root_entry_program" >"$_test_root/init-forged-root-entrypoint.stdout" 2>"$_test_root/init-forged-root-entrypoint.stderr"; then
   cat "$_test_root/init-forged-root-entrypoint.stdout" >&2
   cat "$_test_root/init-forged-root-entrypoint.stderr" >&2
   exit 1
@@ -984,7 +1117,7 @@ for _forged_state_name in _sp_fish_loader_bootstrap_mode _sp_fish_loader_bootstr
 end
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_forged_state_entry_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_forged_state_entry_program" >"$_test_root/init-forged-state-entrypoint.stdout" 2>"$_test_root/init-forged-state-entrypoint.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_forged_state_entry_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_forged_state_entry_program" >"$_test_root/init-forged-state-entrypoint.stdout" 2>"$_test_root/init-forged-state-entrypoint.stderr"; then
   cat "$_test_root/init-forged-state-entrypoint.stdout" >&2
   cat "$_test_root/init-forged-state-entrypoint.stderr" >&2
   exit 1
@@ -1011,7 +1144,7 @@ set -l _entrypoint_replace_status \$status
 builtin test \$_entrypoint_replace_status -eq 125; or exit 1
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_entrypoint_replace_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_entrypoint_replace_program" >"$_test_root/init-entrypoint-replace.stdout" 2>"$_test_root/init-entrypoint-replace.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_entrypoint_replace_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_entrypoint_replace_program" >"$_test_root/init-entrypoint-replace.stdout" 2>"$_test_root/init-entrypoint-replace.stderr"; then
   cat "$_test_root/init-entrypoint-replace.stdout" >&2
   cat "$_test_root/init-entrypoint-replace.stderr" >&2
   exit 1
@@ -1033,7 +1166,7 @@ builtin set -gx SHELL_PROJECT_ROOT caller-entrypoint-critical-root
 builtin source '$_test_root/valise-init-fish-entrypoint-critical.fish'
 EOF
 _entrypoint_critical_status=0
-/usr/bin/env -i HOME="$_entrypoint_critical_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_entrypoint_critical_program" >"$_test_root/init-entrypoint-critical.stdout" 2>"$_test_root/init-entrypoint-critical.stderr" || _entrypoint_critical_status=$?
+/usr/bin/env -i TERM=xterm HOME="$_entrypoint_critical_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_entrypoint_critical_program" >"$_test_root/init-entrypoint-critical.stdout" 2>"$_test_root/init-entrypoint-critical.stderr" || _entrypoint_critical_status=$?
 if [ "$_entrypoint_critical_status" -ne 125 ]; then
   cat "$_test_root/init-entrypoint-critical.stdout" >&2
   cat "$_test_root/init-entrypoint-critical.stderr" >&2
@@ -1070,7 +1203,7 @@ builtin set -gx SHELL_PROJECT_ROOT caller-entrypoint-indirect-root
 builtin source '$_test_root/valise-init-fish-entrypoint-indirect.fish'
 EOF
 _entrypoint_indirect_marker="$_test_root/entrypoint-indirect-marker"
-if /usr/bin/env -i HOME="$_entrypoint_indirect_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" ENTRYPOINT_DYNAMIC_MARKER="$_entrypoint_indirect_marker" "$_fish" "$_entrypoint_indirect_program" >"$_test_root/init-entrypoint-indirect.stdout" 2>"$_test_root/init-entrypoint-indirect.stderr"; then
+if /usr/bin/env -i TERM=xterm HOME="$_entrypoint_indirect_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" ENTRYPOINT_DYNAMIC_MARKER="$_entrypoint_indirect_marker" "$_fish" "$_entrypoint_indirect_program" >"$_test_root/init-entrypoint-indirect.stdout" 2>"$_test_root/init-entrypoint-indirect.stderr"; then
   printf '%s\n' 'FAIL: generated dynamic embedded replacement did not terminate Fish with status 125' >&2
   exit 1
 else
@@ -1109,7 +1242,7 @@ for _legacy_helper in (builtin functions --all --names | builtin string match -r
 end
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_entrypoint_fail_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_entrypoint_fail_program" >"$_test_root/init-entrypoint-fail.stdout" 2>"$_test_root/init-entrypoint-fail.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_entrypoint_fail_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_entrypoint_fail_program" >"$_test_root/init-entrypoint-fail.stdout" 2>"$_test_root/init-entrypoint-fail.stderr"; then
   cat "$_test_root/init-entrypoint-fail.stdout" >&2
   cat "$_test_root/init-entrypoint-fail.stderr" >&2
   exit 1
@@ -1133,7 +1266,7 @@ builtin set -q VALISE_FISH_READY; and exit 1
 functions -q invalid_readiness_helper; and exit 1
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_bad_entry_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_bad_entry_program" >"$_test_root/init-bad-entrypoint.stdout" 2>"$_test_root/init-bad-entrypoint.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_bad_entry_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_bad_entry_program" >"$_test_root/init-bad-entrypoint.stdout" 2>"$_test_root/init-bad-entrypoint.stderr"; then
   cat "$_test_root/init-bad-entrypoint.stdout" >&2
   cat "$_test_root/init-bad-entrypoint.stderr" >&2
   exit 1
@@ -1181,7 +1314,7 @@ end
 builtin string match -q "*$_switch_b/vendor/shell-profile/lib/fish/metadata.fish" -- (builtin functions --details sp_fish_metadata_error)
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_switch_program" >"$_test_root/metadata-switch.stdout" 2>"$_test_root/metadata-switch.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_switch_program" >"$_test_root/metadata-switch.stdout" 2>"$_test_root/metadata-switch.stderr"; then
   cat "$_test_root/metadata-switch.stdout" >&2
   cat "$_test_root/metadata-switch.stderr" >&2
   exit 1
@@ -1216,7 +1349,7 @@ test (caller_owned_metadata_downstream) = caller-metadata-downstream; or exit 1
 builtin set -q _sp_fish_metadata_owned_exports; and test (builtin count \$_sp_fish_metadata_owned_exports) -ne 0; and exit 1
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_metadata_downstream_program" >"$_test_root/metadata-downstream.stdout" 2>"$_test_root/metadata-downstream.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_metadata_downstream_program" >"$_test_root/metadata-downstream.stdout" 2>"$_test_root/metadata-downstream.stderr"; then
   cat "$_test_root/metadata-downstream.stdout" >&2
   cat "$_test_root/metadata-downstream.stderr" >&2
   exit 1
@@ -1248,7 +1381,7 @@ cat >"$_metadata_cd_program" <<EOF
 builtin source '$_test_root/valise-init-fish-metadata-cd-bad.fish'
 EOF
 _metadata_cd_bad_status=0
-/usr/bin/env -i HOME="$_metadata_cd_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_metadata_cd_program" >"$_test_root/metadata-cd-bad.stdout" 2>"$_test_root/metadata-cd-bad.stderr" || _metadata_cd_bad_status=$?
+/usr/bin/env -i TERM=xterm HOME="$_metadata_cd_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_metadata_cd_program" >"$_test_root/metadata-cd-bad.stdout" 2>"$_test_root/metadata-cd-bad.stderr" || _metadata_cd_bad_status=$?
 if [ "$_metadata_cd_bad_status" -ne 125 ]; then
   cat "$_test_root/metadata-cd-bad.stdout" >&2
   cat "$_test_root/metadata-cd-bad.stderr" >&2
@@ -1263,7 +1396,7 @@ functions -q cd; or exit 1
 builtin test (builtin functions --details cd) = embedded:functions/cd.fish; or exit 1
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_metadata_cd_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_metadata_cd_clean_program" >"$_test_root/metadata-cd-clean.stdout" 2>"$_test_root/metadata-cd-clean.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_metadata_cd_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_metadata_cd_clean_program" >"$_test_root/metadata-cd-clean.stdout" 2>"$_test_root/metadata-cd-clean.stderr"; then
   cat "$_test_root/metadata-cd-clean.stdout" >&2
   cat "$_test_root/metadata-cd-clean.stderr" >&2
   exit 1
@@ -1288,7 +1421,7 @@ cat >"$_metadata_indirect_program" <<EOF
 builtin source '$_test_root/valise-init-fish-metadata-indirect.fish'
 EOF
 _metadata_indirect_status=0
-/usr/bin/env -i HOME="$_metadata_indirect_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_metadata_indirect_program" >"$_test_root/metadata-indirect.stdout" 2>"$_test_root/metadata-indirect.stderr" || _metadata_indirect_status=$?
+/usr/bin/env -i TERM=xterm HOME="$_metadata_indirect_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_metadata_indirect_program" >"$_test_root/metadata-indirect.stdout" 2>"$_test_root/metadata-indirect.stderr" || _metadata_indirect_status=$?
 if [ "$_metadata_indirect_status" -ne 125 ]; then
   cat "$_test_root/metadata-indirect.stdout" >&2
   cat "$_test_root/metadata-indirect.stderr" >&2
@@ -1311,7 +1444,7 @@ builtin string match -q "*vendor/shell-profile/lib/fish/metadata.fish" -- (built
 builtin source '$_test_root/valise-init-fish.fish'
 EOF
 _metadata_suffix_attack_status=0
-/usr/bin/env -i HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_metadata_suffix_attack_program" >"$_test_root/metadata-suffix-attack.stdout" 2>"$_test_root/metadata-suffix-attack.stderr" || _metadata_suffix_attack_status=$?
+/usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_metadata_suffix_attack_program" >"$_test_root/metadata-suffix-attack.stdout" 2>"$_test_root/metadata-suffix-attack.stderr" || _metadata_suffix_attack_status=$?
 if [ "$_metadata_suffix_attack_status" -ne 125 ]; then
   cat "$_test_root/metadata-suffix-attack.stdout" >&2
   cat "$_test_root/metadata-suffix-attack.stderr" >&2
@@ -1345,7 +1478,7 @@ end
 builtin source '$_engine/lib/fish/loader.fish'
 EOF
   _caller_status=0
-  /usr/bin/env -i HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_caller_program" >"$_test_root/native-$_caller_fixture.stdout" 2>"$_test_root/native-$_caller_fixture.stderr" || _caller_status=$?
+  /usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_caller_program" >"$_test_root/native-$_caller_fixture.stdout" 2>"$_test_root/native-$_caller_fixture.stderr" || _caller_status=$?
   if [ "$_caller_status" -ne 125 ]; then
     cat "$_test_root/native-$_caller_fixture.stdout" >&2
     cat "$_test_root/native-$_caller_fixture.stderr" >&2
@@ -1384,7 +1517,7 @@ builtin set -gx SHELL_PROJECT_ROOT '$_public_root'
 builtin source '$_project_adapter'
 EOF
 _public_caller_status=0
-/usr/bin/env -i HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_public_caller_program" >"$_test_root/public-caller-replacement.stdout" 2>"$_test_root/public-caller-replacement.stderr" || _public_caller_status=$?
+/usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_public_caller_program" >"$_test_root/public-caller-replacement.stdout" 2>"$_test_root/public-caller-replacement.stderr" || _public_caller_status=$?
 if [ "$_public_caller_status" -ne 125 ]; then
   cat "$_test_root/public-caller-replacement.stdout" >&2
   cat "$_test_root/public-caller-replacement.stderr" >&2
@@ -1435,7 +1568,7 @@ builtin set -e -g VALISE_MODULE_ROOT
 builtin set -e -U VALISE_MODULE_ROOT
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_legacy_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_legacy_program" >"$_test_root/init-legacy.stdout" 2>"$_test_root/init-legacy.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_legacy_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_legacy_program" >"$_test_root/init-legacy.stdout" 2>"$_test_root/init-legacy.stderr"; then
   cat "$_test_root/init-legacy.stdout" >&2
   cat "$_test_root/init-legacy.stderr" >&2
   exit 1
@@ -1480,7 +1613,7 @@ builtin set -e -g VALISE_MODULE_ROOT
 builtin set -e -U VALISE_MODULE_ROOT
 exit 0
 EOF
-if ! /usr/bin/env -i HOME="$_legacy_minimal_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_legacy_minimal_program" >"$_test_root/init-legacy-minimal.stdout" 2>"$_test_root/init-legacy-minimal.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_legacy_minimal_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_legacy_minimal_program" >"$_test_root/init-legacy-minimal.stdout" 2>"$_test_root/init-legacy-minimal.stderr"; then
   cat "$_test_root/init-legacy-minimal.stdout" >&2
   cat "$_test_root/init-legacy-minimal.stderr" >&2
   exit 1
@@ -1537,7 +1670,7 @@ builtin set -e -U VALISE_MODULE_ROOT
 exit 0
 EOF
 _legacy_failed_status=0
-/usr/bin/env -i HOME="$_legacy_failed_home" TMPDIR="$_legacy_failed_tmp" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_legacy_failed_program" >"$_test_root/init-legacy-failed.stdout" 2>"$_test_root/init-legacy-failed.stderr" || _legacy_failed_status=$?
+/usr/bin/env -i TERM=xterm HOME="$_legacy_failed_home" TMPDIR="$_legacy_failed_tmp" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_legacy_failed_program" >"$_test_root/init-legacy-failed.stdout" 2>"$_test_root/init-legacy-failed.stderr" || _legacy_failed_status=$?
 if [ "$_legacy_failed_status" -eq 0 ]; then
   cat "$_test_root/init-legacy-failed.stdout" >&2
   cat "$_test_root/init-legacy-failed.stderr" >&2
@@ -1557,7 +1690,7 @@ set -g _sp_fish_loader_bootstrap_mode strict
 set -g _sp_fish_loader_bootstrap_seeds indirect_cd
 builtin source '$_engine/lib/fish/loader.fish'
 EOF
-if /usr/bin/env -i HOME="$_test_root/native-dynamic-home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin}" NATIVE_DYNAMIC_MARKER="$_native_dynamic_marker" "$_fish" "$_native_dynamic_program" >"$_test_root/native-dynamic.stdout" 2>"$_test_root/native-dynamic.stderr"; then
+if /usr/bin/env -i TERM=xterm HOME="$_test_root/native-dynamic-home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin}" NATIVE_DYNAMIC_MARKER="$_native_dynamic_marker" "$_fish" "$_native_dynamic_program" >"$_test_root/native-dynamic.stdout" 2>"$_test_root/native-dynamic.stderr"; then
   printf '%s\n' 'FAIL: native dynamic embedded replacement did not terminate Fish with status 125' >&2
   exit 1
 else
@@ -1610,7 +1743,7 @@ set -g _sp_fish_loader_bootstrap_seeds hijack
 builtin source '$_engine/lib/fish/loader.fish'
 EOF
 _hijack_status=0
-/usr/bin/env -i HOME="$_test_root/hijack-home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_hijack_program" >"$_test_root/hijack.stdout" 2>"$_test_root/hijack.stderr" || _hijack_status=$?
+/usr/bin/env -i TERM=xterm HOME="$_test_root/hijack-home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_hijack_program" >"$_test_root/hijack.stdout" 2>"$_test_root/hijack.stderr" || _hijack_status=$?
 if [ "$_hijack_status" -ne 125 ]; then
   cat "$_test_root/hijack.stdout" >&2
   cat "$_test_root/hijack.stderr" >&2
@@ -1639,7 +1772,7 @@ printf '%s:%s\n' \$_loader_suffix_status \$_loader_suffix_source_count >"\$LOADE
 exit 0
 EOF
 _loader_suffix_marker="$_test_root/loader-suffix-attack.marker"
-if ! /usr/bin/env -i HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" LOADER_SUFFIX_MARKER="$_loader_suffix_marker" "$_fish" "$_loader_suffix_attack_program" >"$_test_root/loader-suffix-attack.stdout" 2>"$_test_root/loader-suffix-attack.stderr"; then
+if ! /usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" LOADER_SUFFIX_MARKER="$_loader_suffix_marker" "$_fish" "$_loader_suffix_attack_program" >"$_test_root/loader-suffix-attack.stdout" 2>"$_test_root/loader-suffix-attack.stderr"; then
   cat "$_test_root/loader-suffix-attack.stdout" >&2
   cat "$_test_root/loader-suffix-attack.stderr" >&2
   exit 1
@@ -1649,6 +1782,15 @@ if [ "$(cat "$_loader_suffix_marker")" != 1:1 ]; then
   cat "$_test_root/loader-suffix-attack.stderr" >&2
   printf '%s\n' 'FAIL: loader suffix attack was not rejected without a second source' >&2
   exit 1
+fi
+
+fi
+if [ "$_have_public_adapter" -eq 0 ]; then
+  # The adapter-dependent part of the program below is guarded off; bind its
+  # path variables so the unquoted heredoc can still expand.
+  _missing_root="$_test_root/absent-public/missing"
+  _public_root="$_test_root/absent-public/public"
+  _public_second_root="$_test_root/absent-public/second"
 fi
 
 cat >"$_program" <<EOF
@@ -1693,6 +1835,17 @@ bootstrap strict gated_app
 or exit 1
 functions -q gated_app_loaded; or exit 1
 set -q shell_skip_sourced; and exit 1
+# POSIX local-state and dependency-only meta nodes are valid graph records.
+bootstrap strict meta_dependent
+or exit 1
+functions -q meta_dependent_loaded; or exit 1
+bootstrap strict fish_meta
+or exit 1
+functions -q clean_loaded; or exit 1
+# A meta record cannot claim exports it has no body to define.
+bootstrap strict fish_meta_exports
+and exit 1
+functions -q fish_meta_exports_loaded; and exit 1
 
 # Directly-requested non-Fish seeds follow the ABI mode contract, aligned
 # with the POSIX loader's strict-required failure for shell-mismatched
@@ -1843,6 +1996,7 @@ functions -q private_failed_loaded; and exit 1
 
 # A caller-defined rollback helper from an arbitrary source must never run.
 function _sp_fish_loader_rollback_activation; set -g fake_rollback_called 1; end
+if test $_have_public_adapter -eq 1
 # Public adapter must fail closed when the engine is missing, even with a
 # stale success handshake, and must not leave readiness behind.
 set -gx SHELL_PROJECT_ROOT '$_missing_root'
@@ -1954,6 +2108,8 @@ set -q public_plan_sourced; and exit 1
 set -q public_fish_path_loaded; or exit 1
 set -q VALISE_FISH_READY; or exit 1
 
+end
+
 # Return to the direct fixture for the remaining root-discovery probes.
 # Rebind both halves of the loader ABI to the same trusted source directory
 # before direct bootstrap calls; the loader rejects mixed-root metadata/provider
@@ -2000,7 +2156,7 @@ test (helper_success_private) = caller-helper-replacement; or exit 1
 printf '%s\n' 'Fish runtime: all hostile and integration checks passed'
 EOF
 
-/usr/bin/env -i HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" SHELL_PROJECT_ROOT="$_fixture" "$_fish" "$_program"
+/usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" SHELL_PROJECT_ROOT="$_fixture" "$_fish" "$_program"
 
 # Same-name providers with different versions fail closed with a
 # version-skew diagnostic before either body executes.
@@ -2017,7 +2173,7 @@ functions -q version_skew_loaded; and exit 1
 exit 0
 EOF
 _skew_status=0
-/usr/bin/env -i HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_skew_program" >"$_test_root/version-skew.stdout" 2>"$_test_root/version-skew.stderr" || _skew_status=$?
+/usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_skew_program" >"$_test_root/version-skew.stdout" 2>"$_test_root/version-skew.stderr" || _skew_status=$?
 if [ "$_skew_status" -ne 0 ]; then
   cat "$_test_root/version-skew.stdout" >&2
   cat "$_test_root/version-skew.stderr" >&2

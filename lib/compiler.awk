@@ -4,7 +4,7 @@
 # valise compile: pure POSIX awk static plan compiler.
 # Input: single preprocessed stream from sh wrapper.
 #   Lines starting with SEED: space-separated seed module names
-#   Lines starting with MOD: identity<TAB>requires<TAB>load_path
+#   Lines starting with MOD: identity<TAB>requires<TAB>load_path<TAB>platforms<TAB>side_effect<TAB>exports<TAB>optional
 #   identity is module@meta_source when registry sources are qualified.
 #   Lines starting with PRELUDE: sp_cap function names (space-separated)
 # Output: complete installed plan on stdout.
@@ -33,10 +33,14 @@ BEGIN {
 /^MOD:/ {
     line = substr($0, 5)
     n = split(line, fields, "\t")
-    if (n >= 3) {
+    if (n >= 7) {
         name = fields[1]
         mod_req[name] = fields[2]
         mod_load[name] = fields[3]
+        mod_platforms[name] = fields[4]
+        mod_side_effect[name] = fields[5]
+        mod_exports[name] = fields[6]
+        mod_opt[name] = fields[7]
         display_name = name
         at = index(name, "@")
         if (at > 0) display_name = substr(name, 1, at - 1)
@@ -44,6 +48,19 @@ BEGIN {
         mod_exists[name] = 1
         mod_count++
         mod_names[mod_count] = name
+    }
+    next
+}
+
+/^EXCLUDED:/ {
+    # A module removed by the active build variant. It is not part of the
+    # closure, but it is named so a required dependency that points at it can
+    # be diagnosed precisely instead of as an unknown module. The record is
+    # "<identity>\t<name>"; the bare name is how a dependency refers to it.
+    line = substr($0, 10)
+    n = split(line, fields, "\t")
+    if (n >= 2) {
+        excluded_id[fields[1]] = fields[2]
     }
     next
 }
@@ -88,6 +105,14 @@ END {
 
         if (name in discovered) continue
         if (!(name in mod_exists)) {
+            if (name in excluded_id) {
+                # The module was removed by the active build variant, but a
+                # surviving module still requires it. Name both modules: the
+                # generic "unknown module" diagnostic would point at the
+                # dependency and hide the variant that caused it.
+                print "ERROR: variant exclusion breaks a required dependency: " mod_display[requiring_of[name]] " requires " excluded_id[name] > "/dev/stderr"
+                exit 1
+            }
             print "ERROR: unknown module: " name > "/dev/stderr"
             exit 1
         }
@@ -108,6 +133,25 @@ END {
                     q_tail++
                     queue[q_tail] = dep
                 }
+            }
+            # Remember which module asked for a dependency, so an exclusion
+            # that breaks it can name the requiring module.
+            if (!(dep in requiring_of)) requiring_of[dep] = name
+        }
+
+        # The preprocessor keeps only optional dependencies that exist for this
+        # shell and variant, so each of these is a module the plan must attempt.
+        n_opt = split(mod_opt[name], opts, " ")
+        for (ri = 1; ri <= n_opt; ri++) {
+            dep = opts[ri]
+            if (dep in discovered) continue
+            in_q = 0
+            for (qi = q_head; qi <= q_tail; qi++) {
+                if (queue[qi] == dep) { in_q = 1; break }
+            }
+            if (!in_q) {
+                q_tail++
+                queue[q_tail] = dep
             }
         }
 
@@ -141,6 +185,27 @@ END {
     rem_count = discovered_count
     ordered_count = 0
 
+    # The required closure is the roots and everything they require. A module
+    # reached only through an optional edge may be unavailable without failing
+    # the plan. Compute it before ordering so a stall can distinguish a cycle
+    # inside the required closure from an optional-only cycle.
+    for (i = 1; i <= seed_count; i++) {
+        required_stack[++required_top] = seeds[i]
+    }
+    while (required_top > 0) {
+        name = required_stack[required_top--]
+        if (name in required) continue
+        required[name] = 1
+        n_req = split(mod_req[name], reqs, " ")
+        for (rqi = 1; rqi <= n_req; rqi++) {
+            required_stack[++required_top] = reqs[rqi]
+        }
+    }
+
+    # Order by required and optional edges. When that stalls, retry on required
+    # edges alone, as the loader does, so an optional edge can never deadlock the
+    # graph. Only a stall on required edges is a cycle.
+    relaxed = 0
     while (rem_count > 0) {
         progress = 0
         next_rem_count = 0
@@ -149,11 +214,18 @@ END {
             all_loaded = 1
             n_req = split(mod_req[name], reqs, " ")
             for (rqi = 1; rqi <= n_req; rqi++) {
-                dep = reqs[rqi]
-                if (dep == "") continue
-                if (!(dep in loaded)) {
+                if (!(reqs[rqi] in loaded)) {
                     all_loaded = 0
                     break
+                }
+            }
+            if (all_loaded && !relaxed) {
+                n_opt = split(mod_opt[name], opts, " ")
+                for (rqi = 1; rqi <= n_opt; rqi++) {
+                    if (!(opts[rqi] in loaded)) {
+                        all_loaded = 0
+                        break
+                    }
                 }
             }
             if (all_loaded) {
@@ -167,18 +239,76 @@ END {
             }
         }
         if (!progress) {
-            print "ERROR: cycle detected" > "/dev/stderr"
-            exit 1
+            if (!relaxed) {
+                relaxed = 1
+                continue
+            }
+            # Every remaining module is in a cycle. The loader quarantines a
+            # cycle that lies wholly outside the required closure and still
+            # loads the rest, so only a cycle containing a required module is
+            # a compile error.
+            stalled_required = 0
+            for (ri = 1; ri <= rem_count; ri++) {
+                if (remaining[ri] in required) {
+                    stalled_required = 1
+                    break
+                }
+            }
+            if (stalled_required) {
+                print "ERROR: cycle detected" > "/dev/stderr"
+                exit 1
+            }
+            for (ri = 1; ri <= rem_count; ri++) {
+                print "warning: optional dependency cycle ignored: " remaining[ri] > "/dev/stderr"
+            }
+            rem_count = 0
+            break
         }
+        relaxed = 0
         rem_count = next_rem_count
         for (ri = 1; ri <= rem_count; ri++) {
             remaining[ri] = next_remaining[ri]
         }
     }
 
+    # Validate the ordered closure before rendering. Unsafe side effects are a
+    # compile-time error, and a bodyless module must still be a dependency-only
+    # meta module.
+    for (oi = 1; oi <= ordered_count; oi++) {
+        name = ordered[oi]
+        side_effect = mod_side_effect[name]
+        if (side_effect == "" || side_effect == "generated-file" || side_effect == "update-network" || side_effect == "install-time") {
+            print "ERROR: module " mod_display[name] " has unsafe side_effect for compile: " side_effect > "/dev/stderr"
+            exit 1
+        }
+        if (mod_load[name] == "" && mod_req[name] == "") {
+            print "ERROR: module " mod_display[name] " has no load path and no dependencies" > "/dev/stderr"
+            exit 1
+        }
+        if (mod_load[name] == "" && mod_exports[name] != "") {
+            print "ERROR: meta module " mod_display[name] " declares exports without a body" > "/dev/stderr"
+            exit 1
+        }
+    }
+
+    # Collect the plan's declared exports once for VALISE_RELOAD support.
+    reload_export_count = 0
+    for (oi = 1; oi <= ordered_count; oi++) {
+        name = ordered[oi]
+        n_exports = split(mod_exports[name], export_values, " ")
+        for (ei = 1; ei <= n_exports; ei++) {
+            export_name = export_values[ei]
+            if (export_name != "" && !(export_name in reload_export_seen)) {
+                reload_export_seen[export_name] = 1
+                reload_export_count++
+                reload_exports[reload_export_count] = export_name
+            }
+        }
+    }
+
     # --- Render plan ---
     printf "# shell-profile-installed-modules-v1\n"
-    printf "# Generated by hack/compile-shell-profile-release.py; DO NOT EDIT.\n"
+    printf "# Generated by valise compile; DO NOT EDIT.\n"
     printf "# plan=%s\n", plan_name
     printf "# roots="
     for (i = 1; i <= seed_count; i++) {
@@ -192,25 +322,216 @@ END {
         printf "%s", mod_display[ordered[i]]
     }
     printf "\n\n"
+
     printf "%sstatus=0\n", prefix
-    if (prelude_fn_count > 0) {
-        printf ". \"${VALISE_MODULE_ROOT%%/}/%s\" || %sstatus=$?\n", prelude_dest, prefix
-    }
-    for (i = 1; i <= ordered_count; i++) {
-        name = ordered[i]
-        printf "if [ \"${%sstatus}\" -eq 0 ]; then\n", prefix
-        printf "  . \"${VALISE_MODULE_ROOT%%/}/%s\"\n", mod_load[name]
-        printf "  %sstatus=$?\n", prefix
+    printf "%sfailed=0\n", prefix
+    printf "%sfirst_status=0\n", prefix
+    printf "%sunavailable=\n", prefix
+    printf "%smode=${VALISE_MODE:-strict}\n", prefix
+    printf "case \"$%smode\" in\n", prefix
+    printf "strict | permissive) ;;\n"
+    printf "*)\n"
+    printf "  printf '%%s\\n' \"valise: invalid mode: $%smode\" >&2\n", prefix
+    printf "  unset %sstatus %sfailed %sfirst_status %sunavailable %smode\n", prefix, prefix, prefix, prefix, prefix
+    printf "  return 1\n"
+    printf "  ;;\n"
+    printf "esac\n"
+
+    printf "%splatform=$(command uname -s 2>/dev/null || printf unknown)\n", prefix
+    printf "case \"$%splatform\" in\n", prefix
+    printf "Darwin) %splatform=darwin ;;\n", prefix
+    printf "Linux) %splatform=linux ;;\n", prefix
+    printf "FreeBSD) %splatform=freebsd ;;\n", prefix
+    printf "OpenBSD) %splatform=openbsd ;;\n", prefix
+    printf "NetBSD) %splatform=netbsd ;;\n", prefix
+    printf "*BSD) %splatform=bsd ;;\n", prefix
+    printf "*) %splatform=unknown ;;\n", prefix
+    printf "esac\n"
+
+    if (reload_export_count > 0) {
+        printf "if [ \"${VALISE_RELOAD:-}\" = 1 ]; then\n"
+        printf "  for %sexport in", prefix
+        for (i = 1; i <= reload_export_count; i++) {
+            printf " %s", reload_exports[i]
+        }
+        printf "; do\n"
+        printf "    unset -f \"$%sexport\" 2>/dev/null || :\n", prefix
+        printf "  done\n"
+        printf "  unset %sexport\n", prefix
         printf "fi\n"
     }
+
     if (prelude_fn_count > 0) {
-        printf "unset -f"
-        for (i = 1; i <= prelude_fn_count; i++) {
-            printf " %s", prelude_fns[i]
-        }
-        printf " 2>/dev/null || :\n"
+        printf ". \"${VALISE_MODULE_ROOT%%/}/%s\" || %sstatus=$?\n", prelude_dest, prefix
+        printf "if [ \"$%sstatus\" -ne 0 ]; then\n", prefix
+        printf "  printf 'valise: capability prelude failed with status %%s\\n' \"$%sstatus\" >&2\n", prefix
+        printf "  %sfailed=1\n", prefix
+        printf "  %sfirst_status=$%sstatus\n", prefix, prefix
+        printf "fi\n"
     }
-    printf "%sreturn=$%sstatus\n", prefix, prefix
-    printf "unset %sstatus\n", prefix
+
+    printf "if [ \"$%sstatus\" -eq 0 ]; then\n", prefix
+    printf "  for %smodule in", prefix
+    for (i = 1; i <= ordered_count; i++) {
+        printf " %s", ordered[i]
+    }
+    printf "; do\n"
+    printf "    %srequired=1\n", prefix
+    printf "    case \"$%smodule\" in\n", prefix
+
+    for (oi = 1; oi <= ordered_count; oi++) {
+        name = ordered[oi]
+        display = mod_display[name]
+        printf "    %s)\n", name
+        platform_any = 0
+        n_platforms = split(mod_platforms[name], platform_values, " ")
+        for (pi = 1; pi <= n_platforms; pi++) {
+            if (platform_values[pi] == "any") platform_any = 1
+        }
+        export_count = split(mod_exports[name], module_exports, " ")
+        body_indent = platform_any == 0 ? "        " : "      "
+
+        # An optional-only module is expected to be unavailable on some hosts,
+        # so it fails quietly; the loop below does not treat it as a plan failure.
+        if (!(name in required)) printf "      %srequired=0\n", prefix
+
+        # A module whose required dependency is unavailable must not run: its
+        # body would call functions that were never defined.
+        n_req = split(mod_req[name], reqs, " ")
+        if (n_req > 0) {
+            printf "      %sblocked_by=\n", prefix
+            printf "      case \" $%sunavailable \" in", prefix
+            for (rqi = 1; rqi <= n_req; rqi++) {
+                printf " *\" %s \"*) %sblocked_by=%s ;;", reqs[rqi], prefix, mod_display[reqs[rqi]]
+            }
+            printf " esac\n"
+            printf "      if [ -n \"$%sblocked_by\" ]; then\n", prefix
+            if (name in required) {
+                printf "        printf 'valise: module %%s skipped: required dependency unavailable: %%s\\n' '%s' \"$%sblocked_by\" >&2\n", display, prefix
+            }
+            printf "        %sstatus=1\n", prefix
+            printf "      else\n"
+            # A meta module on any platform has no statement for this branch.
+            if (mod_load[name] == "" && platform_any == 1) printf "        :\n"
+        }
+
+        if (platform_any == 0) {
+            printf "      %splatform_match=0\n", prefix
+            for (pi = 1; pi <= n_platforms; pi++) {
+                platform = platform_values[pi]
+                if (platform == "bsd") {
+                    printf "      case \"$%splatform\" in bsd | freebsd | openbsd | netbsd) %splatform_match=1 ;; esac\n", prefix, prefix
+                } else if (platform != "any") {
+                    printf "      [ \"$%splatform\" = %s ] && %splatform_match=1\n", prefix, platform, prefix
+                }
+            }
+            printf "      if [ \"$%splatform_match\" -ne 1 ]; then\n", prefix
+            if (name in required) {
+                printf "        printf 'valise: module %%s skipped: unsupported platform: %%s\\n' '%s' \"$%splatform\" >&2\n", display, prefix
+            }
+            printf "        %sstatus=1\n", prefix
+            if (mod_load[name] != "") printf "      else\n"
+        }
+        if (mod_load[name] != "") {
+            if (export_count == 0) {
+                printf "%s. \"${VALISE_MODULE_ROOT%%/}/%s\"\n", body_indent, mod_load[name]
+                printf "%s%sstatus=$?\n", body_indent, prefix
+                printf "%sif [ \"$%sstatus\" -ne 0 ]; then\n", body_indent, prefix
+                printf "%s  printf 'valise: module %%s failed with status %%s\\n' '%s' \"$%sstatus\" >&2\n", body_indent, display, prefix
+                printf "%sfi\n", body_indent
+            } else {
+                printf "%s%swrapper_exports=\n", body_indent, prefix
+                printf "%s%scleanup_exports=\n", body_indent, prefix
+                printf "%sfor %sexport in", body_indent, prefix
+                for (ei = 1; ei <= export_count; ei++) {
+                    printf " %s", module_exports[ei]
+                }
+                printf "; do\n"
+                printf "%s  %sconflict=0\n", body_indent, prefix
+                printf "%s  if command alias \"$%sexport\" >/dev/null 2>&1; then\n", body_indent, prefix
+                printf "%s    %sconflict=1\n", body_indent, prefix
+                printf "%s  fi\n", body_indent
+                printf "%s  if %slookup=$(command -v \"$%sexport\" 2>/dev/null); then\n", body_indent, prefix, prefix
+                printf "%s    case \"$%slookup\" in\n", body_indent, prefix
+                printf "%s    alias\\ *) %sconflict=1 ;;\n", body_indent, prefix
+                printf "%s    */*) %swrapper_exports=\"${%swrapper_exports:+$%swrapper_exports }$%sexport\" ;;\n", body_indent, prefix, prefix, prefix, prefix, prefix
+                printf "%s    *) %sconflict=1 ;;\n", body_indent, prefix
+                printf "%s    esac\n", body_indent
+                printf "%s  else\n", body_indent
+                printf "%s    %slookup=\n", body_indent, prefix
+                printf "%s  fi\n", body_indent
+                printf "%s  if [ \"$%sconflict\" -ne 0 ]; then\n", body_indent, prefix
+                printf "%s    printf 'valise: %%s: declared export already exists before load: %%s\\n' '%s' \"$%sexport\" >&2\n", body_indent, display, prefix
+                printf "%s    %sstatus=1\n", body_indent, prefix
+                printf "%s  else\n", body_indent
+                printf "%s    %scleanup_exports=\"${%scleanup_exports:+$%scleanup_exports }$%sexport\"\n", body_indent, prefix, prefix, prefix, prefix, prefix
+                printf "%s  fi\n", body_indent
+                printf "%sdone\n", body_indent
+                printf "%sif [ \"$%sstatus\" -eq 0 ]; then\n", body_indent, prefix
+                printf "%s  . \"${VALISE_MODULE_ROOT%%/}/%s\"\n", body_indent, mod_load[name]
+                printf "%s  %sstatus=$?\n", body_indent, prefix
+                printf "%sfi\n", body_indent
+                printf "%sif [ \"$%sstatus\" -eq 0 ]; then\n", body_indent, prefix
+                printf "%s  for %sexport in", body_indent, prefix
+                for (ei = 1; ei <= export_count; ei++) {
+                    printf " %s", module_exports[ei]
+                }
+                printf "; do\n"
+                printf "%s    if ! %slookup=$(command -v \"$%sexport\" 2>/dev/null); then\n", body_indent, prefix, prefix
+                printf "%s      printf 'valise: %%s: declared export missing: %%s\\n' '%s' \"$%sexport\" >&2\n", body_indent, display, prefix
+                printf "%s      %sstatus=1\n", body_indent, prefix
+                printf "%s    else\n", body_indent
+                printf "%s      case \" $%swrapper_exports \" in\n", body_indent, prefix
+                printf "%s      *\" $%sexport \"*)\n", body_indent, prefix
+                printf "%s        case \"$%slookup\" in\n", body_indent, prefix
+                printf "%s        */*)\n", body_indent
+                printf "%s          printf 'valise: %%s: declared export was not provided by module: %%s\\n' '%s' \"$%sexport\" >&2\n", body_indent, display, prefix
+                printf "%s          %sstatus=1\n", body_indent, prefix
+                printf "%s          ;;\n", body_indent
+                printf "%s        esac\n", body_indent
+                printf "%s        ;;\n", body_indent
+                printf "%s      esac\n", body_indent
+                printf "%s    fi\n", body_indent
+                printf "%s  done\n", body_indent
+                printf "%sfi\n", body_indent
+                printf "%sif [ \"$%sstatus\" -ne 0 ]; then\n", body_indent, prefix
+                printf "%s  printf 'valise: module %%s failed with status %%s\\n' '%s' \"$%sstatus\" >&2\n", body_indent, display, prefix
+                printf "%s  for %sexport in $%scleanup_exports; do\n", body_indent, prefix, prefix
+                printf "%s    unset -f \"$%sexport\" 2>/dev/null || :\n", body_indent, prefix
+                printf "%s  done\n", body_indent
+                printf "%sfi\n", body_indent
+            }
+        }
+        if (platform_any == 0) {
+            printf "      fi\n"
+        }
+        if (n_req > 0) {
+            printf "      fi\n"
+        }
+        printf "      ;;\n"
+    }
+
+    printf "    esac\n"
+    # Strict mode stops at the first failure in the required closure. Anything
+    # else is recorded so its dependents are blocked, and the plan continues.
+    printf "    if [ \"$%sstatus\" -ne 0 ]; then\n", prefix
+    printf "      %sunavailable=\"$%sunavailable $%smodule\"\n", prefix, prefix, prefix
+    printf "      if [ \"$%smode\" = strict ] && [ \"$%srequired\" -eq 1 ]; then\n", prefix, prefix
+    printf "        %sfailed=1\n", prefix
+    printf "        %sfirst_status=$%sstatus\n", prefix, prefix
+    printf "        break\n"
+    printf "      fi\n"
+    printf "      %sstatus=0\n", prefix
+    printf "    fi\n"
+    printf "  done\n"
+    printf "fi\n"
+
+    printf "if [ \"$%sfailed\" -ne 0 ]; then\n", prefix
+    printf "  %sreturn=$%sfirst_status\n", prefix, prefix
+    printf "else\n"
+    printf "  %sreturn=0\n", prefix
+    printf "fi\n"
+    printf "unset %sstatus %sfailed %sfirst_status %sunavailable %smode %splatform\n", prefix, prefix, prefix, prefix, prefix, prefix
+    printf "unset %smodule %srequired %sblocked_by %splatform_match %sexport %slookup %sconflict %swrapper_exports %scleanup_exports\n", prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix
     printf "eval \"unset %sreturn; return $%sreturn\"\n", prefix, prefix
 }

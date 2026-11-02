@@ -32,10 +32,10 @@ _awk="$_script_dir/lib/compiler.awk"
 printf '=== valise compiler structural scaling ===\n\n'
 
 # The emitted plan is a fixed-size shell block per module, wrapped in a
-# constant-size preamble and epilogue. BLOCK_LINES is that per-module size.
-BLOCK_LINES=4
-PREAMBLE_LINES=8
-EPILOGUE_LINES=4
+# constant-size preamble and epilogue. BLOCK_LINES is that per-module size; the
+# dependency check of a module is one line however many dependencies it has.
+BLOCK_LINES=14
+FIXED_LINES=52
 
 # Generate a synthetic module graph of N modules: a linear dependency chain
 # plus a fan-out edge every 7th module, seeded from the last 5 modules so the
@@ -64,7 +64,7 @@ generate_graph() {
       _fan=$((_i-7))
       _req="$_req mod_$_fan"
     fi
-    printf 'MOD:mod_%d\t%s\tmodules/test/mod_%d.sh\n' "$_i" "$_req" "$_i" >> "$_out"
+    printf 'MOD:mod_%d\t%s\tmodules/test/mod_%d.sh\tany\tread-only\t\t\n' "$_i" "$_req" "$_i" >> "$_out"
     _i=$((_i+1))
   done
 }
@@ -76,19 +76,23 @@ for _size in $SIZES; do
   _input="$_test_home/graph_$_size.txt"
   _output="$_test_home/plan_$_size.out"
   _repeat="$_test_home/plan_${_size}_repeat.out"
+  _err="$_test_home/plan_${_size}.err"
   generate_graph "$_size" "$_input"
 
-  awk -v target_shell="bash" -v plan_name="bench" -f "$_awk" "$_input" > "$_output" 2>&1
+  awk -v target_shell="bash" -v plan_name="bench" -f "$_awk" "$_input" > "$_output" 2>"$_err"
 
-  # No diagnostics escaped into the plan.
-  if grep -q 'ERROR' "$_output" 2>/dev/null; then
-    fail "$_size modules: unexpected error in output"
+  # A successful compile writes the plan and nothing else. Diagnostics, and
+  # any awk warning about the compiler itself, belong on stderr and must be
+  # absent here: some awks warn where BSD awk is silent, so merging stderr into
+  # the plan would hide a real compiler warning behind a line-count diff.
+  if [ -s "$_err" ]; then
+    fail "$_size modules: unexpected diagnostics: $(sed -n '1p' "$_err")"
   else
     pass "$_size modules: no errors"
   fi
 
   # Exactly one emitted source block per module.
-  _source_lines=$(grep -c '^if \[' "$_output" 2>/dev/null || echo 0)
+  _source_lines=$(grep -c '^[[:space:]]*\. "\${VALISE_MODULE_ROOT%/}/modules/test/mod_' "$_output" 2>/dev/null || echo 0)
   if [ "$_source_lines" -eq "$_size" ]; then
     pass "$_size modules: emitted $_source_lines source blocks"
   else
@@ -96,7 +100,7 @@ for _size in $SIZES; do
   fi
 
   # Exactly one module source per module: no duplicate or skipped emission.
-  _sourced=$(grep -c '^  \. "\${VALISE_MODULE_ROOT%/}/modules/test/mod_' "$_output" 2>/dev/null || echo 0)
+  _sourced=$(grep -c '^[[:space:]]*\. "\${VALISE_MODULE_ROOT%/}/modules/test/mod_' "$_output" 2>/dev/null || echo 0)
   if [ "$_sourced" -eq "$_size" ]; then
     pass "$_size modules: sourced each module exactly once"
   else
@@ -108,7 +112,7 @@ for _size in $SIZES; do
   # emitted work grows linearly in N; any re-emission or per-dependency
   # expansion breaks it, and it holds identically on every host.
   _lines=$(wc -l < "$_output" | tr -d ' ')
-  _expected_lines=$((PREAMBLE_LINES + EPILOGUE_LINES + BLOCK_LINES * _size))
+  _expected_lines=$((FIXED_LINES + BLOCK_LINES * _size))
   if [ "$_lines" -eq "$_expected_lines" ]; then
     pass "$_size modules: plan is exactly $_expected_lines lines (linear emission identity)"
   else
@@ -118,9 +122,9 @@ for _size in $SIZES; do
   # The per-module block size must be identical at every size, which is the
   # part of the identity a quadratic or re-entrant implementation would move.
   if [ -z "$_baseline_block_lines" ]; then
-    _baseline_block_lines=$(( (_lines - PREAMBLE_LINES - EPILOGUE_LINES) / _size ))
+    _baseline_block_lines=$(( (_lines - FIXED_LINES) / _size ))
   fi
-  _observed_block_lines=$(( (_lines - PREAMBLE_LINES - EPILOGUE_LINES) / _size ))
+  _observed_block_lines=$(( (_lines - FIXED_LINES) / _size ))
   if [ "$_observed_block_lines" -eq "$_baseline_block_lines" ] &&
      [ "$_observed_block_lines" -eq "$BLOCK_LINES" ]; then
     pass "$_size modules: per-module emission is $_observed_block_lines lines, unchanged with N"
@@ -148,7 +152,7 @@ for _size in $SIZES; do
   fi
 
   # Identical input must yield byte-identical output.
-  awk -v target_shell="bash" -v plan_name="bench" -f "$_awk" "$_input" > "$_repeat" 2>&1
+  awk -v target_shell="bash" -v plan_name="bench" -f "$_awk" "$_input" > "$_repeat" 2>"$_err"
   if cmp -s "$_output" "$_repeat"; then
     pass "$_size modules: repeated compilation is byte-identical"
   else

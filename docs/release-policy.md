@@ -19,23 +19,24 @@ The compatibility contract has three separate parts:
 
 A change affecting one of these is a compatibility change even if the other
 surfaces remain unchanged. Before 1.0, incompatible changes may occur between
-minor releases; release notes must identify affected consumers and migration
-steps. After 1.0, use semantic versioning: patch for compatible fixes,
+minor releases, and release notes must state what consumers have to change.
+After 1.0, use semantic versioning: patch for compatible fixes,
 minor for backward-compatible features, and major for incompatible changes.
 
 ## What changed in 0.2.0
 
-A consumer upgrading from 0.1.0 must account for the following. Each item is
+`0.1.0` had no external users, so `0.2.0` provides no migration path for its
+CLI or shell integration. The items below describe the 0.2.0 contract; each is
 also recorded in [CHANGELOG.md](../CHANGELOG.md).
 
 ### The registry is a generated artifact
 
 `shell/release/module-registry.tsv` is generated from the project's metadata
-by `valise registry`, and `valise build` and `valise assemble` regenerate and
-validate it. A hand-written registry is no longer the source of truth, and a
-project needs no registry file at all to build: only `.meta` files and their
-bodies. A committed registry is still accepted for compatibility, but it is
-overwritten on the next build.
+by `valise registry`, and `valise build` regenerates it while `valise registry
+--check` validates it. A hand-written registry is no longer the source of truth, and a
+project needs no registry file at all to build: it keeps its `.meta` files,
+their bodies, the bundle roots, and the variants. A committed registry is
+accepted as input, but it is overwritten on the next build.
 
 The row order is fixed and does not depend on the caller's locale: the
 primary modules of `shell/module.d/` first, then the layer modules of each
@@ -43,16 +44,28 @@ primary modules of `shell/module.d/` first, then the layer modules of each
 
 ### The metadata ABI gained fields and classes
 
-- **Meta modules.** Metadata with `requires=` and neither `load` nor
-  `load_hook` is a dependency-only aggregator. It loads successfully without
-  a body. Only `load` and `load_hook` are mutually exclusive; `load` and
-  `requires` may be combined.
+- **Meta modules.** Metadata with `requires=` and no `load` is a
+  dependency-only aggregator. It loads successfully without a body. `load`
+  and `requires` may be combined.
 - **`side_effect=local-state`.** A source-safe class for modules that write
   under the XDG state directory. It loads in the ordinary phase where
   `generated-file` still fails.
 - **`shells=sh` covers every POSIX shell.** A module that declares `shells=sh`
   loads under `sh`, `dash`, `bash`, `zsh`, and `ksh`, and is skipped under
   Fish unless it is requested directly in strict mode.
+
+### Compiled plans follow the loader
+
+A compiled plan uses the loader's dependency rules. The required closure is
+the bundle's roots plus their transitive `requires`. A module whose required
+dependency is unavailable, failed, or skipped for the platform does not run.
+Strict mode stops at the first failure in that closure and returns nonzero;
+permissive mode reports each failure, continues with unrelated modules, and
+returns zero. An optional dependency loads first when it is available for the
+shell and variant; its absence never blocks the module that declared it. A
+cross-platform profile declares platform-specific modules with `optional=`.
+A meta module that declares exports is a compile error, and a module that
+fails has its declared exports removed from the function namespace.
 
 ### Capabilities are available at runtime
 
@@ -61,37 +74,40 @@ loader load finishes. A module may call `sp_cap_os` and the other helpers
 from its own functions. A plan that removed them at the end of the load left
 module functions unusable.
 
-### Startup integration is explicit
+### Startup integration is managed
 
-`valise install` takes `--integration=<mode>`: `auto` (the previous
-behavior), `profile` (one shared `~/.profile` snippet), or `none` (no startup
-file). `--no-shell-integration` remains as the equivalent legacy spelling.
+`valise install` writes a managed block into `~/.profile` and into each
+further startup file it manages: the existing `~/.bash_profile` or
+`~/.bash_login`, `~/.bashrc` and `~/.zshrc` when that shell is current or the
+file exists, and `~/.zprofile` when zsh is on `PATH` or the file exists. It
+does not create `~/.bash_profile` or `~/.bash_login`, because either would
+stop bash from reading `~/.profile`. A Fish `conf.d` hook is written when
+valise finds a Fish executable in a trusted location. `--no-integration`
+writes no startup file and no Fish hook. `valise apply` uses the same writer
+after building and installing.
 
-`valise apply` writes the `~/.profile` integration plus the one-line
-`~/.zprofile` pointer that zsh needs, because zsh does not read `~/.profile`
-on its own. It does not create `.bash_profile`, whose presence would stop
-bash from reading `~/.profile`.
+Each POSIX file receives the block between `# BEGIN valise managed block` and
+`# END valise managed block`. A repeat install replaces the block in place
+and preserves the rest of the file. An unpaired marker is refused and stops
+the install; a file already processed keeps its updated block. A symlinked
+startup file is reported and left untouched.
 
-The integration is written as a managed block between
-`# BEGIN valise managed block` and `# END valise managed block`, so repeat
-installs are idempotent and existing profile content is preserved.
+### Commands
 
-### New commands
+The command surface has one command per job. `valise init` takes `posix` or
+`fish`; with no argument it prints the Fish hook when `$SHELL` names fish and
+the POSIX block otherwise. `valise new`, `valise module`, `valise build`,
+`valise apply`, `valise status`, and `valise registry` are new. `valise build`
+builds a release tree, and `valise apply` builds, installs, writes the shell
+integration, and verifies the result.
 
-`valise new`, `valise module`, `valise build`, `valise apply`,
-`valise status`, `valise registry`, `valise doctor`, `valise variant prune`,
-`valise explain-bundles`, and `valise layer-lint` are new in 0.2.0. A
-consumer that scripted the 0.1.0 CLI is unaffected by the additions, but
-`valise doctor` reports a missing active release as a failure where an
-earlier release check reported it as information.
-
-### Migration
-
-A project on 0.1.0 does not have to change anything to upgrade. To adopt the
-generated registry, delete the hand-maintained
-`shell/release/module-registry.tsv` and run `valise build`; to adopt the
-shared-profile integration, run `valise apply` instead of wiring a startup
-file by hand.
+Installed releases are managed by `valise release list|use|prune|verify`.
+`variant list`, `variant use`, and `verify-active` are gone; `variant` now
+refers only to a build variant. `valise doctor` gained `--pre-install` and
+`--no-integration`; it reads the startup files the running shell actually
+reads and exits nonzero when the active release is missing or fails
+verification, or when no startup file carries the block. `valise
+explain-bundles` and `valise layer-lint` no longer use Python.
 
 ## Release checklist
 
@@ -106,11 +122,18 @@ Before tagging or publishing a release:
    release evidence for every lane, including Fish, zsh, BusyBox, dash, and
    ksh.
 3. Run the README isolated quickstart from a clean checkout and verify that
-   install, `verify-active`, and example module loading work in the temporary
+   install, `release verify`, and example module loading work in the temporary
    home. Confirm cleanup removes the entire demo state.
 4. Inspect the result of `npm pack --dry-run` and install/test the packed
    tarball. The CLI's tests currently cover pack contents, installation, and
-   module loading.
+   module loading. The probe in `tests/cli-posix.test.sh` builds a tree from
+   the real `files` whitelist, plants build directories at more than one
+   depth under `examples/`, and requires the tarball to exclude every one of
+   them while keeping the surrounding example sources. `package.json` keeps
+   them out with `!examples/**/build/`, because npm applies `files` without
+   consulting `.gitignore` and `valise apply` writes build output into
+   `examples/profile-project/`. The `**` is load-bearing: a single `*` still
+   packs a build directory nested one level deeper.
 5. Review the changed CLI, module ABI, release manifest, docs, and examples;
    check `git diff --check` and doc links.
 6. Publish only through the chosen distribution channel. The repository

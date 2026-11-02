@@ -1,19 +1,15 @@
 # AGENTS.md
 
-This repository contains the reusable valise-sh shell-profile engine. Read
-[architecture.md](docs/architecture.md) for scope and
-[module-abi.md](docs/module-abi.md) before changing metadata or loader behavior.
+This repository contains the reusable valise-sh shell-profile engine.
+Read [architecture.md](docs/architecture.md) for scope and [module-abi.md](docs/module-abi.md) before changing metadata or loader behavior.
 
-- Keep project-specific modules, providers, wrappers, and release policy in the
-  consuming project.
+- Keep project-specific modules, providers, wrappers, and release policy in the consuming project.
 - Metadata is data: do not source it to discover modules or dependencies.
-- Preserve deterministic dependency loading, export checks, failure cleanup,
-  and the declared POSIX/Fish parser boundaries.
+- Preserve deterministic dependency loading, export checks, failure cleanup, and the declared POSIX/Fish parser boundaries.
 - Use `sp_cap_*` helpers for portable platform operations.
-- Run tests with their controlled environment. Never source or modify a live
-  user profile as part of testing.
-- Run the narrowest relevant target, then `make check`. Missing extended
-  runtimes skip locally; CI requires them. See the README for overrides.
+- Run tests with their controlled environment. Never source or modify a live user profile as part of testing.
+- Run the narrowest relevant target, then `make check`. Missing extended runtimes skip locally; CI requires them. See the README for overrides.
+- Ensure the `package.json` `files` field is appropriately scoped so release artifacts ship all required contents and remain safely restricted to intended files, even when packaging from a local tree.
 
 ## Reference
 

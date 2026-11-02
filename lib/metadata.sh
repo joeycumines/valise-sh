@@ -66,6 +66,22 @@ sp_metadata_validate_identifier_list() {
       unset _spm_list _spm_label _spm_word _spm_list_ifs _spm_list_ifs_was_set _spm_list_seen
       return 1
     fi
+    if [ "$_spm_label" = export ]; then
+      # Exports become function definitions. A shell reserved word is a valid
+      # identifier but not a valid function name.
+      case "$_spm_word" in
+      case|do|done|elif|else|esac|fi|for|if|in|then|until|while|time)
+        sp_metadata_error "invalid export (reserved word): $_spm_word"
+        if [ "$_spm_list_ifs_was_set" -eq 1 ]; then
+          IFS=$_spm_list_ifs
+        else
+          unset IFS
+        fi
+        unset _spm_list _spm_label _spm_word _spm_list_ifs _spm_list_ifs_was_set _spm_list_seen
+        return 1
+        ;;
+      esac
+    fi
   done
   if [ "$_spm_list_ifs_was_set" -eq 1 ]; then
     IFS=$_spm_list_ifs
@@ -229,7 +245,7 @@ sp_metadata_validate_version() {
 
 sp_metadata_validate_side_effect() {
   case "$1" in
-  read-only | path-env | generated-file | update-network | install-time | local-secret | work-only) return 0 ;;
+  read-only | path-env | generated-file | update-network | install-time | local-secret | local-state | work-only) return 0 ;;
   *)
     sp_metadata_error "invalid side_effect: $1"
     return 1
@@ -271,23 +287,13 @@ sp_metadata_validate_relative_path() {
 
 sp_metadata_validate_load_target() {
   _spm_target_load=$1
-  _spm_target_load_hook=$2
-  if [ -n "$_spm_target_load" ] && [ -n "$_spm_target_load_hook" ]; then
-    sp_metadata_error 'metadata fields load and load_hook are mutually exclusive'
-    unset _spm_target_load _spm_target_load_hook
+  _spm_target_requires=${2-}
+  if [ -z "$_spm_target_load" ] && [ -z "$_spm_target_requires" ]; then
+    sp_metadata_error 'missing required metadata field: load or requires'
+    unset _spm_target_load _spm_target_requires
     return 1
   fi
-  if [ -z "$_spm_target_load" ] && [ -z "$_spm_target_load_hook" ]; then
-    sp_metadata_error 'missing required metadata field: load or load_hook'
-    unset _spm_target_load _spm_target_load_hook
-    return 1
-  fi
-  if [ -n "$_spm_target_load_hook" ] && ! sp_metadata_validate_identifier "$_spm_target_load_hook"; then
-    sp_metadata_error "invalid load_hook: $_spm_target_load_hook"
-    unset _spm_target_load _spm_target_load_hook
-    return 1
-  fi
-  unset _spm_target_load _spm_target_load_hook
+  unset _spm_target_load _spm_target_requires
   return 0
 }
 
@@ -324,7 +330,6 @@ sp_metadata_read() (
   _spm_updates=
   _spm_version=
   _spm_load=
-  _spm_load_hook=
 
   while IFS= read -r _spm_line || [ -n "$_spm_line" ]; do
     case "$_spm_line" in
@@ -349,7 +354,10 @@ sp_metadata_read() (
     updates) _spm_updates=$_spm_value ;;
     version) _spm_version=$_spm_value ;;
     load) _spm_load=$_spm_value ;;
-    load_hook) _spm_load_hook=$_spm_value ;;
+    load_hook)
+      sp_metadata_error 'metadata field load_hook is not supported; use load'
+      return 1
+      ;;
     *)
       sp_metadata_error "unknown metadata field: $_spm_key"
       return 1
@@ -361,7 +369,6 @@ sp_metadata_read() (
   sp_metadata_require_field shells "$_spm_shells" || return 1
   sp_metadata_require_field platforms "$_spm_platforms" || return 1
   sp_metadata_require_field side_effect "$_spm_side_effect" || return 1
-  sp_metadata_validate_load_target "$_spm_load" "$_spm_load_hook" || return 1
 
   if ! sp_metadata_validate_identifier "$_spm_name"; then
     sp_metadata_error "invalid module name: $_spm_name"
@@ -369,6 +376,7 @@ sp_metadata_read() (
   fi
   sp_metadata_validate_identifier_list "$_spm_requires" dependency || return 1
   sp_metadata_validate_identifier_list "$_spm_optional" optional_dependency || return 1
+  sp_metadata_validate_load_target "$_spm_load" "$_spm_requires" || return 1
   sp_metadata_validate_shell_list "$_spm_shells" || return 1
   sp_metadata_validate_platform_list "$_spm_platforms" || return 1
   sp_metadata_validate_side_effect "$_spm_side_effect" || return 1
@@ -387,36 +395,4 @@ sp_metadata_read() (
   printf 'updates=%s\n' "$_spm_updates"
   printf 'version=%s\n' "$_spm_version"
   printf 'load=%s\n' "$_spm_load"
-  printf 'load_hook=%s\n' "$_spm_load_hook"
-)
-
-sp_metadata_legacy_bridge() (
-  [ "$#" -eq 4 ] || {
-    sp_metadata_error 'usage: sp_metadata_legacy_bridge <name> <requires> <side-effect> <exports>'
-    return 1
-  }
-  _spm_name=$1
-  _spm_requires=$2
-  _spm_side_effect=$3
-  _spm_exports=$4
-
-  if ! sp_metadata_validate_identifier "$_spm_name"; then
-    sp_metadata_error "invalid module name: $_spm_name"
-    return 1
-  fi
-  sp_metadata_validate_identifier_list "$_spm_requires" dependency || return 1
-  sp_metadata_validate_side_effect "$_spm_side_effect" || return 1
-  sp_metadata_validate_identifier_list "$_spm_exports" export || return 1
-
-  printf 'name=%s\n' "$_spm_name"
-  printf 'requires=%s\n' "$_spm_requires"
-  printf 'optional=\n'
-  printf 'shells=bash zsh ksh\n'
-  printf 'platforms=any\n'
-  printf 'side_effect=%s\n' "$_spm_side_effect"
-  printf 'exports=%s\n' "$_spm_exports"
-  printf 'updates=\n'
-  printf 'version=\n'
-  printf 'load=\n'
-  printf 'load_hook=_shell_module_%s\n' "$_spm_name"
 )

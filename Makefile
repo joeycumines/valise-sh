@@ -10,7 +10,7 @@ VALISE_REQUIRE_TOOLING ?= $(if $(filter true TRUE 1 yes YES,$(CI) $(GITHUB_ACTIO
 comma := ,
 VALISE_REQUIRED_PARSERS ?= $(if $(filter 1,$(VALISE_REQUIRE_TOOLING)),sh$(comma)dash$(comma)ksh$(comma)busybox-ash$(comma)bash$(comma)fish,)
 
-.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e
+.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-consumer-profile clean distclean
 .NOTPARALLEL: check test
 
 TEST_ENV_PATH = /usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
@@ -57,6 +57,7 @@ test: test-runner-quarantine
 	@test -d tests/fixtures
 	@$(MAKE) test-metadata-abi
 	@$(MAKE) test-loader-failure-modes
+	@$(MAKE) test-loader-process-count
 	@$(MAKE) test-detection-contract
 	@$(MAKE) test-loader-multi-root
 	@$(MAKE) test-entrypoint-runtime
@@ -64,8 +65,14 @@ test: test-runner-quarantine
 	@$(MAKE) test-contrib-modules
 	@$(MAKE) test-non-macos-runtime
 	@$(MAKE) test-cli-posix
+	@$(MAKE) test-cli-gaps
+	@$(MAKE) test-compile-assemble
+	@$(MAKE) test-compiler-plan
+	@$(MAKE) test-registry
+	@$(MAKE) test-project-ux
 	@$(MAKE) test-compiler-benchmark
 	@$(MAKE) test-fish-runtime
+	@$(MAKE) test-consumer-profile
 	@$(MAKE) test-doc-links
 
 test-runner-quarantine: tests/test-runner-quarantine.test.sh
@@ -105,6 +112,9 @@ test-metadata-abi: tests/loader/metadata-abi.test.sh lib/metadata.sh
 	@$(TEST_RUNNER)
 
 test-loader-failure-modes: tests/loader/loader-failure-modes.test.sh lib/metadata.sh lib/loader.sh
+	@$(TEST_RUNNER)
+
+test-loader-process-count: tests/loader/process-count.test.sh lib/metadata.sh lib/loader.sh
 	@$(TEST_RUNNER)
 
 test-detection-contract: tests/loader/detection-contract.test.sh lib/metadata.sh lib/loader.sh
@@ -191,6 +201,21 @@ test-non-macos-runtime: tests/non-macos-runtime.test.sh manifests/parser-support
 test-cli-posix: tests/cli-posix.test.sh bin/valise
 	@$(TEST_RUNNER)
 
+test-cli-gaps: tests/cli-gaps.test.sh bin/valise
+	@$(TEST_RUNNER)
+
+test-compile-assemble: tests/compile-assemble.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
+	@$(TEST_RUNNER)
+
+test-compiler-plan: tests/compiler-plan.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
+	@$(TEST_RUNNER)
+
+test-registry: tests/registry.test.sh bin/valise lib/metadata.sh lib/compiler.awk lib/capabilities.sh
+	@$(TEST_RUNNER)
+
+test-project-ux: tests/project-ux.test.sh bin/valise lib/metadata.sh lib/compiler.awk lib/capabilities.sh
+	@$(TEST_RUNNER)
+
 test-compiler-benchmark: tests/compiler-benchmark.test.sh lib/compiler.awk
 	@$(TEST_RUNNER)
 
@@ -224,4 +249,19 @@ test-e2e: tests/e2e.test.sh bin/valise examples/e2e/build-manifest.sh
 	@echo "=== valise end-to-end test ==="
 	@VALISE_REQUIRE_TOOLING="$(VALISE_REQUIRE_TOOLING)" /bin/bash tests/e2e.test.sh
 
-check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-detection-contract test-loader-multi-root test-entrypoint-runtime test-contrib-modules test-docs test-doc-links
+# The reference consumer profile lives in scratch/shell-profile and is not
+# tracked by the repository. The suite copies it to a temporary directory
+# and works only on the copy, so the original tree and the live profile
+# are never touched. It skips with a visible message when the tree is
+# absent, which is the case in CI and in a package install.
+test-consumer-profile: tests/consumer-profile.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
+	@echo "=== valise consumer-profile end-to-end test ==="
+	@$(TEST_RUNNER)
+
+clean: ## Delete build products, temporary release trees, and pack tarballs.
+	@rm -rf examples/e2e/build examples/profile-project/build *.tgz .valise-* scratch/.valise-* scratch/valise-*
+
+distclean: clean ## Delete all generated files and local build directories.
+	@rm -rf build
+
+check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-registry test-project-ux test-cli-gaps test-contrib-modules test-consumer-profile test-docs test-doc-links

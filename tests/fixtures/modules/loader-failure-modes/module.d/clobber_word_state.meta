@@ -1,0 +1,9 @@
+name=clobber_word_state
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=clobber_word_state_loaded
+updates=
+load=modules/clobber_word_state.sh

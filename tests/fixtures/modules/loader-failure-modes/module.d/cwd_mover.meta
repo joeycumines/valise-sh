@@ -1,0 +1,9 @@
+name=cwd_mover
+requires=
+optional=
+shells=sh
+platforms=any
+side_effect=read-only
+exports=cwd_mover_loaded
+updates=
+load=modules/cwd_mover.sh

@@ -240,6 +240,18 @@ assert_eq 'symlink layer metadata fails closed' 1 "$CASE_STATUS"
 assert_contains 'symlink metadata diagnostic identifies the path' "$CASE_STDERR" \
   'metadata path contains a symlink'
 
+# The primary root gets the same treatment: a symlinked metadata file must
+# not redirect module resolution outside the root the loader was given.
+mkdir -p "$_tmp_dir/primary-symlink/module.d" "$_tmp_dir/primary-symlink/modules"
+cp -R "$PRIMARY_ROOT"/. "$_tmp_dir/primary-symlink/"
+rm -f "$_tmp_dir/primary-symlink/module.d/core.meta"
+ln -s "$PRIMARY_ROOT/module.d/core.meta" "$_tmp_dir/primary-symlink/module.d/core.meta"
+run_case symlink_primary_metadata "PRIMARY_ROOT=$_tmp_dir/primary-symlink" core strict
+assert_eq 'symlink primary metadata fails closed' 1 "$CASE_STATUS"
+assert_contains 'symlink primary metadata diagnostic identifies the path' "$CASE_STDERR" \
+  'metadata path contains a symlink'
+assert_eq 'symlink primary metadata prevents module body execution' '' "$CASE_TRACE"
+
 write_layer_module contrib_symlink_body
 rm -f "$_tmp_dir/layer/modules/contrib_symlink_body.sh"
 ln -s "$PRIMARY_ROOT/modules/core.sh" "$_tmp_dir/layer/modules/contrib_symlink_body.sh"
@@ -316,7 +328,7 @@ _leak_check=$(
     . "$METADATA_SH"
     . "$LOADER_SH"
     sp_loader_load_modules "$PRIMARY_ROOT" contrib_dep strict ordinary >/dev/null 2>&1
-    _leaked_spl_vars=$(compgen -A variable _spl_ 2>/dev/null | tr "\n" " ")
+    _leaked_spl_vars=$(compgen -A variable _spl 2>/dev/null | tr "\n" " ")
     _leaked_internal_funcs=$(compgen -A function _sp_loader_ 2>/dev/null | tr "\n" " ")
     printf "LEAKED=[%s][%s]\n" "$_leaked_spl_vars" "$_leaked_internal_funcs"
   '
@@ -422,28 +434,7 @@ assert_eq 'unsearchable layer directory fails closed' 1 "$CASE_STATUS"
 assert_contains 'unsearchable-dir diagnostic explains the requirement' "$CASE_STDERR" \
   'must be a non-empty readable, executable directory'
 
-# Contract 16: a layer module using load_hook loads through the hook.
-write_layer_module contrib_hooked ''
-{
-  printf 'name=contrib_hooked\nrequires=\noptional=\nshells=sh\nplatforms=any\n'
-  printf 'side_effect=read-only\nexports=contrib_hooked_loaded\nupdates=\n'
-  printf 'load_hook=_shell_module_contrib_hooked\n'
-} >"$_tmp_dir/layer/module.d/contrib_hooked.meta"
-rm -f "$_tmp_dir/layer/modules/contrib_hooked.sh"
-HOOK_SRC=$_tmp_dir/hook.sh
-cat >"$HOOK_SRC" <<'HOOK'
-_shell_module_contrib_hooked() {
-  printf '%s\n' contrib_hooked >>"${SP_LOADER_TEST_TRACE:?}"
-  contrib_hooked_loaded() { :; }
-}
-HOOK
-run_case layer_hook "VALISE_MODULE_PATH=\$LAYER_ROOT
-HOOK_SRC=\$HOOK_SRC
-. \"\$HOOK_SRC\"" contrib_hooked strict
-assert_eq 'layer load_hook module loads through the hook' 0 "$CASE_STATUS"
-assert_eq 'layer load_hook executed the hook body' 'contrib_hooked' "$CASE_TRACE"
-
-# Contract 17: a primary module whose requires= names a layer contrib module
+# Contract 16: a primary module whose requires= names a layer contrib module
 # discovers it across roots (primary -> layer direction).
 cat >"$_tmp_dir/layer/module.d/contrib_up.meta" <<'META'
 name=contrib_up
