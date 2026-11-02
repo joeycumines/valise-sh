@@ -126,7 +126,14 @@ Before tagging or publishing a release:
    home. Confirm cleanup removes the entire demo state.
 4. Inspect the result of `npm pack --dry-run` and install/test the packed
    tarball. The CLI's tests currently cover pack contents, installation, and
-   module loading.
+   module loading. The probe in `tests/cli-posix.test.sh` builds a tree from
+   the real `files` whitelist, plants build directories at more than one
+   depth under `examples/`, and requires the tarball to exclude every one of
+   them while keeping the surrounding example sources. `package.json` keeps
+   them out with `!examples/**/build/`, because npm applies `files` without
+   consulting `.gitignore` and `valise apply` writes build output into
+   `examples/profile-project/`. The `**` is load-bearing: a single `*` still
+   packs a build directory nested one level deeper.
 5. Review the changed CLI, module ABI, release manifest, docs, and examples;
    check `git diff --check` and doc links.
 6. Publish only through the chosen distribution channel. The repository

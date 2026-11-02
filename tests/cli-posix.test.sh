@@ -277,6 +277,49 @@ for _pkg_member in bin lib modules entrypoints module.d manifests docs examples;
     fail "package files entry exists: $_pkg_member"
   fi
 done
+
+# A local build writes examples/*/build/ inside the source tree, and npm
+# applies package.json "files" without consulting .gitignore. Packaging from
+# a built checkout must still ship only the intended example sources.
+if command -v npm >/dev/null 2>&1; then
+  _pack_probe="$_test_home/pack-probe"
+  mkdir -p "$_pack_probe/examples/profile-project/build/release" \
+           "$_pack_probe/examples/e2e/build/release" \
+           "$_pack_probe/examples/profile-project/shell"
+  printf 'generated\n' >"$_pack_probe/examples/profile-project/build/release/plan.sh"
+  printf 'generated\n' >"$_pack_probe/examples/e2e/build/release/plan.sh"
+  printf 'source\n' >"$_pack_probe/examples/profile-project/shell/keep.sh"
+  # A build directory nested below a subdirectory is the case that a
+  # single-level '!examples/*/build/' would miss, so pin it too.
+  mkdir -p "$_pack_probe/examples/profile-project/vendor/dep/build/release"
+  printf 'generated\n' >"$_pack_probe/examples/profile-project/vendor/dep/build/release/plan.sh"
+  cp "$_pkg_root/package.json" "$_pack_probe/package.json"
+  _pack_status=0
+  _pack_out=$(cd "$_pack_probe" && npm pack --dry-run --json 2>&1) || _pack_status=$?
+  if [ "$_pack_status" -ne 0 ]; then
+    fail "npm pack runs on the exclusion probe"
+    printf '%s\n' "$_pack_out" >&2
+    fail "npm pack excludes generated examples build output (probe did not run)"
+    fail "npm pack still ships example project sources (probe did not run)"
+  else
+    if printf '%s\n' "$_pack_out" | grep -Eq '"path": *"examples/[^"]*/build/'; then
+      fail "npm pack excludes generated examples build output"
+      printf '%s\n' "$_pack_out" | grep -E '"path": *"examples/[^"]*/build/' >&2 || :
+    elif printf '%s\n' "$_pack_out" | grep -Eq '"path": *"examples/[^"]*"'; then
+      pass "npm pack excludes generated examples build output"
+    else
+      fail "npm pack excludes generated examples build output (no example files listed)"
+    fi
+    if printf '%s\n' "$_pack_out" | grep -Eq '"path": *"examples/profile-project/shell/keep\.sh"'; then
+      pass "npm pack still ships example project sources"
+    else
+      fail "npm pack still ships example project sources"
+    fi
+  fi
+  unset _pack_probe _pack_out _pack_status
+else
+  printf '  SKIP: npm pack example exclusion check (npm unavailable)\n'
+fi
 unset _pkg_root
 if command -v npm >/dev/null 2>&1; then
   _npm_root="$_test_home/npm-pack"

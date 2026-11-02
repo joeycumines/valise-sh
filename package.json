@@ -14,6 +14,7 @@
     "manifests/",
     "docs/",
     "examples/",
+    "!examples/**/build/",
     "LICENSE",
     "CHANGELOG.md"
   ],
