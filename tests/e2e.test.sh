@@ -43,6 +43,7 @@ tooling_required() {
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 E2E_ROOT="$REPO_ROOT/examples/e2e"
+E2E_RELEASE="$E2E_ROOT/build/release"
 VALISE="$REPO_ROOT/bin/valise"
 
 # The engine's Fish surface rejects double-slash paths (fail-closed
@@ -87,8 +88,8 @@ run_lane() {
         "$@"
   }
 
-  # Step 1: install (must run from e2e root where the manifest lives)
-  (cd "$E2E_ROOT" && _run_in_e2e_env SHELL="$_shell_path" "$VALISE" install) >"$_tmp_home/install1.out" 2>&1
+  # Step 1: install (must run from e2e release root where the manifest lives)
+  (cd "$E2E_RELEASE" && _run_in_e2e_env SHELL="$_shell_path" "$VALISE" install) >"$_tmp_home/install1.out" 2>&1
   _install_status=$?
   if [ "$_install_status" -ne 0 ]; then
     fail "$_lane/$_shell_name: valise install failed (exit $_install_status)"
@@ -199,7 +200,7 @@ run_lane() {
   fi
 
   # Step 4: second install is idempotent
-  (cd "$E2E_ROOT" && _run_in_e2e_env SHELL="$_shell_path" "$VALISE" install) >"$_tmp_home/install2.out" 2>&1 || true
+  (cd "$E2E_RELEASE" && _run_in_e2e_env SHELL="$_shell_path" "$VALISE" install) >"$_tmp_home/install2.out" 2>&1 || true
   if grep -q 'already installed' "$_tmp_home/install2.out"; then
     pass "$_lane/$_shell_name: second install is idempotent"
   elif grep -q 'installing release' "$_tmp_home/install2.out"; then
@@ -301,7 +302,7 @@ run_lima_lane() {
 set -u
 _tmp_home=\$(mktemp -d /tmp/valise-e2e.XXXXXX) || exit 2
 _valise="$REPO_ROOT/bin/valise"
-_e2e="$REPO_ROOT/examples/e2e"
+_e2e="$REPO_ROOT/examples/e2e/build/release"
 _snippet_path="\$_tmp_home/$_lima_snippet"
 
 # Install (manifest is pre-generated on host for read-only VM mounts like BSD)
@@ -371,7 +372,7 @@ run_composition_lane() {
         "$@"
   }
 
-  (cd "$E2E_ROOT" && _compose_env SHELL=/bin/sh "$VALISE" install) >"$_tmp_home/compose-install.out" 2>&1
+  (cd "$E2E_RELEASE" && _compose_env SHELL=/bin/sh "$VALISE" install) >"$_tmp_home/compose-install.out" 2>&1
   if [ $? -ne 0 ]; then
     fail "compose: valise install failed"
     cat "$_tmp_home/compose-install.out" >&2
@@ -488,7 +489,7 @@ run_tamper_lane() {
         "$@"
   }
 
-  (cd "$E2E_ROOT" && _tamper_env SHELL=/bin/sh "$VALISE" install) >"$_tmp_home/tamper-install.out" 2>&1
+  (cd "$E2E_RELEASE" && _tamper_env SHELL=/bin/sh "$VALISE" install) >"$_tmp_home/tamper-install.out" 2>&1
   if [ $? -ne 0 ]; then
     fail "tamper: valise install failed"
     cat "$_tmp_home/tamper-install.out" >&2
@@ -550,11 +551,11 @@ run_tamper_lane() {
 # --- Main ---
 printf '=== valise end-to-end test ===\n'
 printf '  repo: %s\n' "$REPO_ROOT"
-printf '  e2e:  %s\n\n' "$E2E_ROOT"
+printf '  e2e:  %s\n\n' "$E2E_RELEASE"
 
 # Ensure manifest is current (always rebuild to pick up engine changes)
 printf '%s\n' '  Building manifest...'
-sh "$E2E_ROOT/build-manifest.sh" >/dev/null 2>&1 || {
+sh "$E2E_ROOT/build-manifest.sh" "$E2E_RELEASE" >/dev/null 2>&1 || {
   printf '%s\n' 'FAIL: build-manifest.sh failed' >&2
   exit 1
 }

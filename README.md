@@ -42,32 +42,22 @@ export PATH="$PWD/bin:$PATH"
   export XDG_CONFIG_HOME="$_demo_state/config"
   export XDG_STATE_HOME="$_demo_state/state"
 
-  # Build, install, and verify the sample release.
-  sh examples/e2e/build-manifest.sh
-  (cd examples/e2e && valise install)
-  valise release verify
+  # Build, install, and apply the sample profile project.
+  (cd examples/profile-project && valise apply)
 
-  # Load two shipped utilities from the installed release.
-  _active=$(cd "$XDG_CONFIG_HOME/valise/active" && pwd -P)
-  VALISE_MODULE_ROOT="$_active" \
-    VALISE_MODULES='contrib_path contrib_editor' \
-    VALISE_MODE=strict \
-    . "$_active/entrypoints/profile.sh"
-  contrib_path_prepend "$HOME/.local/bin"
-  contrib_editor_defaults
-  printf 'EDITOR=%s\nPATH=%s\n' "${EDITOR-(unset: no supported editor found on PATH)}" "$PATH"
+  # Run the greeting function exposed by the active profile.
+  bash -l -c 'greet'
 )
 ```
 
-The end-to-end example documents Fish startup, shared-provider composition,
-and other modules in
+For the multi-shell test fixture and verification scenarios, see
 [examples/e2e/README.md](examples/e2e/README.md). For the smallest possible
 loader example without installation, use `examples/local/` as described in
 [examples/README.md](examples/README.md).
 
 ## Build your own profile
 
-The sample above loads modules that ship with the engine. To build your own,
+The sample above loads modules from an example profile. To build your own,
 start from the project scaffold:
 
 ```sh

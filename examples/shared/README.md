@@ -26,7 +26,7 @@ level README).
 
 ```sh
 sh examples/e2e/build-manifest.sh
-cd examples/e2e
+cd examples/e2e/build/release
 valise install
 valise release verify
 ```

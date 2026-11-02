@@ -10,7 +10,7 @@ VALISE_REQUIRE_TOOLING ?= $(if $(filter true TRUE 1 yes YES,$(CI) $(GITHUB_ACTIO
 comma := ,
 VALISE_REQUIRED_PARSERS ?= $(if $(filter 1,$(VALISE_REQUIRE_TOOLING)),sh$(comma)dash$(comma)ksh$(comma)busybox-ash$(comma)bash$(comma)fish,)
 
-.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-consumer-profile
+.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-consumer-profile clean distclean
 .NOTPARALLEL: check test
 
 TEST_ENV_PATH = /usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
@@ -257,5 +257,11 @@ test-e2e: tests/e2e.test.sh bin/valise examples/e2e/build-manifest.sh
 test-consumer-profile: tests/consumer-profile.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
 	@echo "=== valise consumer-profile end-to-end test ==="
 	@$(TEST_RUNNER)
+
+clean: ## Delete build products, temporary release trees, and pack tarballs.
+	@rm -rf examples/e2e/build examples/profile-project/build *.tgz .valise-* scratch/.valise-* scratch/valise-*
+
+distclean: clean ## Delete all generated files and local build directories.
+	@rm -rf build
 
 check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-registry test-project-ux test-cli-gaps test-contrib-modules test-consumer-profile test-docs test-doc-links
