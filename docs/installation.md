@@ -1,10 +1,8 @@
 # Installation and releases
 
-`bin/valise` is a `/bin/sh` CLI. Its normal install and verification commands
-need the platform utilities used by the release manifest and integrity checks
-(for example, a SHA-256 utility). Every documented command runs without
-Python 3. `explain-bundles` reads the generated registry and the bundle
-roots; `layer-lint` reads layer metadata directly.
+`bin/valise` is a `/bin/sh` CLI. It needs the standard POSIX utilities and a
+SHA-256 utility (`sha256sum`, `shasum`, or `sha256`); no command needs
+Python, Perl, or another runtime.
 
 ## Install the CLI
 
@@ -127,8 +125,8 @@ valise init posix      # POSIX managed block
 valise init fish       # Fish conf.d hook; save it as fish/conf.d/valise.fish
 ```
 
-Evaluating `valise init` output directly at every prompt —
-`eval "$(valise init)"` — re-runs CLI startup code in every shell and is
+Evaluating `valise init` output at every prompt, as in
+`eval "$(valise init)"`, re-runs CLI startup code in every shell and is
 not the routine path; prefer `valise install` or `valise apply`, which
 write the files once.
 
@@ -158,42 +156,30 @@ as an installed shell hook.
 
 ## Build a release
 
-A release tree contains the engine runtime, module metadata and bodies, and
-any profile-specific files. `valise make-manifest` writes a manifest into the
-tree:
+`valise build` turns a project into a release tree (see
+[projects.md](projects.md#valise-build)), and `valise apply` builds and
+installs it in one step. `valise install` installs the tree in the current
+directory, so a tree built elsewhere installs the same way:
 
 ```sh
-valise make-manifest ./mytree
-```
-
-By default this creates
-`./mytree/shell/install/profile-release.manifest`. Use `--output <file>` to
-choose another manifest path. The manifest records each regular file's size
-and SHA-256 digest; source and destination paths are the same. The tree must
-contain files with mode `0644` or `0755`. Symlinks, unsupported path
-characters, and other file modes are rejected. Rebuilding an unchanged tree
-produces the same manifest.
-
-Install and verify from the tree root:
-
-```sh
-cd mytree
+cd build/release
 valise install
 valise release verify
 ```
 
-Install stages a sealed, read-only copy under the XDG data directory and
-updates the active symlink. `release verify` checks the installed bytes against
-their manifest. Fish repeats that check at startup; the POSIX startup snippets
-do not, so run `release verify` separately if you need a check before sourcing
-in a POSIX shell.
+Install requires `manifest.tsv`, which lists every regular file with its
+size and SHA-256 digest, and a `valise-release.conf` declaring `format=2`;
+a tree from an older valise must be rebuilt. It copies the tree into
+the release store under the manifest's SHA-256, makes the copy read-only,
+verifies it, and switches the active link. `release verify` checks the
+installed bytes against their manifest again. Fish repeats that check at
+every startup; the POSIX block does not, so run `release verify` when you
+want a check before a POSIX shell sources the release.
 
-`valise build` builds a consuming project's release tree: the module
-registry, the per-shell plans, every module body, and the manifest inputs.
-The engine itself ships as an engine release rather than a built project
-release; it carries `entrypoints/profile.sh` and `lib/`, not `generated/`.
-The included [e2e example](../examples/e2e/README.md) demonstrates a small
-complete profile.
+`valise make-manifest <tree> [--output <file>]` writes the manifest for a
+tree; `valise build` uses it. Files must have mode `0644` or `0755`;
+symlinks, unsupported path characters, and other modes are rejected. An
+unchanged tree always produces the same manifest.
 
 ## Published commands
 
@@ -263,7 +249,7 @@ created, updated, published, skipped, or removed. It writes nothing outside
 
 `valise release prune --keep=<n>` removes old releases. It always keeps the
 active release and the `n` newest others, and it never removes a release that
-fails verification against its own manifest — a release that cannot be
+fails verification against its own manifest. A release that cannot be
 verified is reported and kept, so a damaged tree is not silently discarded.
 The default is `--keep=3`.
 
@@ -281,8 +267,8 @@ valise install --help
 
 ## Updating and removing
 
-Update a source checkout with Git. To update an npm installation, repack and
-reinstall the tarball. `valise install` updates the active profile release;
+Update a source checkout with Git. To update a package installation, repack
+and reinstall the tarball. `valise install` updates the active profile release;
 it does not update the CLI itself.
 
 `valise uninstall` removes what install wrote:

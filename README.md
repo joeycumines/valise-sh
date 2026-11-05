@@ -1,170 +1,123 @@
 # valise-sh
 
-valise-sh is a POSIX shell-profile engine. It loads shell configuration from
-modules described by declarative metadata files. The metadata is parsed as
-data and never executed; the loader resolves the dependency graph and sources
-module bodies in deterministic order. The POSIX core runs under `sh`, `dash`,
-`ksh`, and `bash`; Fish is supported through a native loader in `lib/fish/`.
-The repository also includes the `valise` CLI, which installs sealed
-shell-profile releases and verifies them before use.
+valise builds your shell profile from modules. Each module is a metadata file
+and a shell body; valise reads the metadata as data, compiles a static
+startup plan for each shell, and installs the result as a sealed, verified
+release. sh, dash, BusyBox ash, bash, zsh, and ksh load the compiled POSIX
+plans; Fish has a native loader.
 
-A consuming project can split its shell configuration into modules with
-declared dependencies, then test and select those modules explicitly. The
-engine is designed to be vendored by that project, for example as a Git
-submodule; the consumer owns its profile and release contents.
+You keep your modules in a valise project. The engine supplies the `valise`
+CLI and a few generic modules (`valise_path`, `valise_editor`, and others).
 
-## Try a sample release
-
-This walkthrough builds and installs the included sample profile in an
-isolated temporary home. `valise install` deploys its normal shell
-integration there, so your real home directory and startup files are left
-untouched.
+## Quick start
 
 ```sh
 git clone https://github.com/joeycumines/valise-sh.git
-cd valise-sh
-export PATH="$PWD/bin:$PATH"
+export PATH="$PWD/valise-sh/bin:$PATH"
 
-# Isolate HOME and XDG state; the trap also removes read-only release files.
+valise new my-profile
+cd my-profile
+valise module new hello --exports=hello
+$EDITOR modules/hello.sh
+valise lint
+valise apply
+```
+
+`valise apply` builds the project, installs the release, writes a managed
+block into your startup files, and verifies the active release. Open a new
+login shell to load it. `valise apply --dry-run` shows what would change
+first, and `valise uninstall` removes everything install wrote.
+
+To try it without touching your real home directory, point `HOME` and the
+XDG directories at a scratch directory:
+
+```sh
 (
   set -eu
-  _demo_state=$(mktemp -d)
-  cleanup_demo() {
-    chmod -R u+w "$_demo_state" 2>/dev/null || :
-    rm -rf "$_demo_state"
-  }
-  trap cleanup_demo EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  mkdir -p "$_demo_state/home"
-  export HOME="$_demo_state/home"
-  export XDG_DATA_HOME="$_demo_state/data"
-  export XDG_CONFIG_HOME="$_demo_state/config"
-  export XDG_STATE_HOME="$_demo_state/state"
-
-  # Build, install, and apply the sample profile project.
-  (cd examples/profile-project && valise apply)
-
-  # Run the greeting function exposed by the active profile.
-  bash -l -c 'greet'
+  demo=$(mktemp -d)
+  trap 'chmod -R u+w "$demo"; rm -rf "$demo"' EXIT
+  export HOME="$demo/home" XDG_DATA_HOME="$demo/data" \
+    XDG_CONFIG_HOME="$demo/config" XDG_STATE_HOME="$demo/state" \
+    XDG_BIN_HOME="$demo/bin"
+  mkdir -p "$HOME"
+  cd valise-sh/examples/profile-project
+  valise apply
+  bash -l -c greet
 )
 ```
 
-For the multi-shell test fixture and verification scenarios, see
-[examples/e2e/README.md](examples/e2e/README.md). For the smallest possible
-loader example without installation, use `examples/local/` as described in
-[examples/README.md](examples/README.md).
+## A project
 
-## Build your own profile
-
-The sample above loads modules from an example profile. To build your own,
-start from the project scaffold:
-
-```sh
-export PATH="$PWD/bin:$PATH"
-valise new my-profile
-cd my-profile
+```
+valise.conf      project settings
+module.d/        <name>.meta: one metadata file per module
+modules/         module bodies
+layers/<p>/      modules vendored from another provider (optional)
+bundles.tsv      the root modules for each shell
+variants.tsv     named sets of modules to leave out (optional)
 ```
 
-That writes a project with a metadata directory, a module body, bundle
-roots, variants, and `project.conf`. Add modules with `valise module new`,
-then build and install:
+A module's metadata names its dependencies, the shells and platforms it
+supports, the functions it exports, and optionally the exports to publish
+as commands on `PATH`:
 
-```sh
-valise build   # build a release under build/release/
-valise apply   # install it and write the managed shell integration
+```text
+name=hello
+version=1.0.0
+side_effect=read-only
+requires=valise_path
+optional=
+shells=posix
+platforms=any
+exports=hello
+commands=hello
+tests=tests/hello.sh
+load=modules/hello.sh
 ```
 
-`examples/profile-project/` is a worked version of this: it has two modules,
-a provider layer, two variants, and a bundle. Its
-[README](examples/profile-project/README.md) walks through each step and
-explains what the generated release contains.
+## Commands
 
-## Repository layout
+| Command | Does |
+|---|---|
+| `new`, `module new\|list\|remove` | Scaffold a project and its modules. |
+| `lint`, `test`, `run`, `env` | Check metadata and syntax, run module tests in a clean shell, run a script with modules loaded, print paths. |
+| `build`, `apply`, `status` | Build a release, build and install it, compare the active release with the build. |
+| `install`, `release list\|use\|rollback\|prune\|verify`, `uninstall` | Manage installed releases. |
+| `init`, `doctor` | Print the startup snippet; diagnose the installation. |
+| `compile`, `registry`, `explain-bundles`, `explain-variant`, `layer-lint`, `make-manifest` | Inspect and debug a build. |
 
-- `entrypoints/profile.sh` — the portable entrypoint. It is sourced, not
-  executed: it resolves the engine root, sources the three libraries, and
-  calls the loader with the requested modules.
-- `lib/metadata.sh` — parses `module.d/*.meta` files as data and validates
-  identifiers, lists, paths, shells, platforms, and side-effect classes.
-- `lib/loader.sh` — resolves the dependency closure, selects modules by
-  shell/platform/phase, sources bodies, checks declared exports, and cleans
-  up on failure.
-- `lib/capabilities.sh` — portable helpers (`sp_cap_*`) that modules call
-  instead of platform-specific commands.
-- `lib/fish/` — native Fish loader and metadata reader. The Fish path never
-  sources POSIX shell bodies.
-- `bin/valise` — the CLI: init, install, release, doctor, make-manifest,
-  registry, new, module, build, apply, status, compile, explain-variant,
-  explain-bundles, layer-lint, version.
-  `init`, `install`, `release`, `doctor`, `make-manifest`, `new`, and
-  `version` run from a bare checkout. `registry`, `module`, `build`, `apply`,
-  `status`, `compile`, `explain-variant`,
-  `explain-bundles`, and `layer-lint` require the consuming project's source
-  tree (see [docs/variants.md](docs/variants.md) and
-  [docs/contrib-modules.md](docs/contrib-modules.md)). No command requires
-  Python 3.
-- `module.d/` and `modules/platform/` — generic platform modules
-  (`valise_platform_posix`, `valise_platform_macos`, `valise_platform_linux`, `valise_platform_bsd`).
-- `manifests/parser-support.tsv` — declares the shell parsers used to check
-  each source-file class.
-- `tests/` — the test suite. Every test runs in a quarantined environment:
-  fresh temporary HOME, controlled TMPDIR and PATH, cleared startup hooks.
-- `examples/local/` — a minimal runnable module demonstrating the metadata
-  contract.
-- `examples/profile-project/` — a complete consuming project: metadata,
-  bodies, a provider layer, bundles, variants, and project defaults. Its
-  [README](examples/profile-project/README.md) walks from clone to a loaded
-  profile.
-
-Product-specific modules, adapters, release packaging, and installer
-transactions belong in the consuming project, not here. See
-[docs/architecture.md](docs/architecture.md) for the scope.
+`valise <command> --help` prints each command's contract.
 
 ## Documentation
 
-- [docs/installation.md](docs/installation.md) — install paths, shell
-  integration, XDG layout, publishing, and the integrity and provenance limits.
-- [docs/module-abi.md](docs/module-abi.md) — the metadata contract: fields,
-  allowed values, multi-root search path, runtime detection, side-effect
-  phases, and the capability layer.
-- [docs/architecture.md](docs/architecture.md) — what this repository
-  provides and what stays in the consuming project.
-- [docs/variants.md](docs/variants.md) — build variant selection and
-  exclusion lists.
-- [docs/contrib-modules.md](docs/contrib-modules.md) — module authoring
-  reference.
-- [docs/shared-modules.md](docs/shared-modules.md) — governance and index
-  for shared modules: namespace ownership, review, deprecation, removal.
-- [docs/release-policy.md](docs/release-policy.md) — compatibility surfaces,
-  current pre-1.0 status, and the release checklist.
-- [CHANGELOG.md](CHANGELOG.md) — user-facing changes.
+- [docs/projects.md](docs/projects.md): the project layout, bundles,
+  variants, compile, and build.
+- [docs/contrib-modules.md](docs/contrib-modules.md): writing, linting, and
+  testing modules.
+- [docs/module-abi.md](docs/module-abi.md): every metadata field and what
+  the plans do with it.
+- [docs/installation.md](docs/installation.md): installing the CLI, startup
+  files, published commands, the release store, and uninstalling.
+- [docs/architecture.md](docs/architecture.md): how the pieces fit and what
+  stays in your project.
+- [docs/shared-modules.md](docs/shared-modules.md): layers other people
+  consume.
+- [docs/release-policy.md](docs/release-policy.md): compatibility and the
+  release checklist.
+- [examples/](examples/README.md): a sample project, a multi-shell test
+  project, and a sample provider layer.
+- [CHANGELOG.md](CHANGELOG.md)
 
-## Running the tests
-
-The Makefile and the test suite live in the source repository. The npm
-package ships the runtime, the docs, and the examples, not the Makefile.
+## Development
 
 ```sh
-make check-fast  # quick contributor lane; no optional shells required
-make check       # available shell/runtime checks, CLI and end-to-end tests
+make check-fast  # quick lane; no optional shells required
+make check       # every available shell and runtime lane
 ```
 
-Strict mode requires the parsers declared in
-`manifests/parser-support.tsv`, the host shells used by the end-to-end lanes
-(`sh`, `bash`, `zsh`, `ksh`, `dash`, and `fish`), and a BusyBox executor.
-Missing tools skip with a visible message in an ordinary local run;
-`CI=true` or `GITHUB_ACTIONS=true` makes them fail. Lima VM lanes are optional
-and run only when the relevant instance is configured.
-To require the standard runtime set locally, run:
-
-```sh
-make VALISE_REQUIRE_TOOLING=1 check
-```
-
-To intentionally use non-strict behavior in CI, or require tools on a local
-machine, the GNU Make command-line override takes precedence. The Makefile
-also includes an optional untracked `config.mk` before its defaults, so
-machine-local preferences can be set there; use `VALISE_REQUIRE_TOOLING ?= 1`
-for a default that a command-line assignment can still override. The release
-checklist is in [docs/release-policy.md](docs/release-policy.md).
+`make check` uses the parsers in `manifests/parser-support.tsv`, the shells
+`sh`, `bash`, `zsh`, `ksh`, `dash`, and `fish`, and BusyBox. A missing tool
+is a visible skip locally and a failure when `CI=true` or
+`GITHUB_ACTIONS=true`; `make VALISE_REQUIRE_TOOLING=1 check` requires them
+locally. Machine-local settings go in an untracked `config.mk` (see
+`config.mk.example`). Lima VM lanes run only when the instances exist.

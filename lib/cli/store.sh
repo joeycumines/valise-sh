@@ -889,7 +889,6 @@ cmd_install() {
       [ "$_hook_actual" = "$_hook_expected" ] || die "published Fish hook contents mismatch"
       _txn_changed="$_txn_changed $_fish_hook"
       info "Fish hook deployed: $_fish_hook"
-      info "remove this file to uninstall the Fish integration"
     fi
   fi
 
@@ -901,7 +900,11 @@ cmd_install() {
   _install_txn=0
   release_lock
   info "installation complete"
-  info "run 'valise init' to print the shell integration snippet for manual setup"
+  if [ "$_install_integration" -eq 1 ]; then
+    info "run 'valise uninstall' to remove the integration, the commands, and the releases"
+  else
+    info "run 'valise init' to print the shell integration snippet for manual setup"
+  fi
 }
 
 cmd_make_manifest() {

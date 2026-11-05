@@ -224,7 +224,9 @@ usage_build() {
     "The tree holds plans/<shell>.sh for each POSIX shell the bundle names," \
     "runtime/capabilities.sh, valise-release.conf, manifest.tsv, and the metadata" \
     "and bodies of exactly the modules some plan loads. Engine modules are copied" \
-    "under valise/, layer modules under layers/<provider>/."
+    "under valise/, layer modules under layers/<provider>/. A module that" \
+    "publishes commands adds plans/commands/<module>.sh and bin/<command>; Fish" \
+    "roots add runtime/fish/."
 }
 
 usage_apply() {

@@ -1601,19 +1601,27 @@ cmd_explain_variant() {
   printf 'Description: %s\n' "${_ev_desc:-none}"
   printf 'Excluded modules: %s\n' "${_ev_excludes:-none}"
   printf '\nPer-shell impact (bundle %s):\n' "$_ev_bundle"
+  # Resolve through the compiler, so a qualified exclusion matches a bare root
+  # and the module counts are the closures a build would load.
+  _stage=$(trusted_mktemp dir "${TMPDIR:-/tmp}/valise-explain.XXXXXX") || die "cannot create scratch directory"
+  registry_generate "$_project_root" "$_stage/registry"
+  _ev_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   for _ev_shell in $VALISE_PROJECT_SHELLS fish; do
     _ev_roots=$(project_bundle_roots "$_project_root" "$_ev_shell" "$_ev_bundle") || exit 1
     [ -n "$_ev_roots" ] || continue
+    _ev_total=0
+    for _ev_root in $_ev_roots; do _ev_total=$((_ev_total + 1)); done
+    _ev_kept=$(project_effective_roots "$_stage/registry" "$_ev_shell" "$_ev_roots" "$_ev_excludes") || exit 1
     _ev_count=0
-    _ev_dropped=0
-    for _ev_root in $_ev_roots; do
-      case " $_ev_excludes " in
-      *" $_ev_root "*) _ev_dropped=$((_ev_dropped + 1)) ;;
-      *) _ev_count=$((_ev_count + 1)) ;;
-      esac
-    done
-    printf '  %s: %d roots (%d excluded)\n' "$_ev_shell" "$_ev_count" "$_ev_dropped"
+    for _ev_root in $_ev_kept; do _ev_count=$((_ev_count + 1)); done
+    project_compile "$_stage/registry" "$_ev_shell" "$_ev_roots" "" "$_stage/full" closure
+    project_compile "$_stage/registry" "$_ev_shell" "$_ev_roots" "$_ev_excludes" "$_stage/kept" closure
+    _ev_full=$("$_ev_awk" 'END { print NR }' "$_stage/full")
+    _ev_mods=$("$_ev_awk" 'END { print NR }' "$_stage/kept")
+    printf '  %s: %d of %d roots, %d of %d modules\n' "$_ev_shell" "$_ev_count" "$_ev_total" "$_ev_mods" "$_ev_full"
   done
+  remove_tree "$_stage" || die "cannot remove scratch directory"
+  _stage=""
 }
 
 cmd_explain_bundles() {

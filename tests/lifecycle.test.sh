@@ -307,6 +307,14 @@ else
   fail "apply --dry-run after an install reports current files and the stubs it would remove"
   cat "$_tmp/dry2.out" >&2
 fi
+_v "$_proj" apply --variant=lean >/dev/null 2>&1
+if _v "$_proj" apply --variant=lean --dry-run >"$_tmp/dry3.out" 2>&1 &&
+  awk '$0 == "commands" { getline; found = ($0 == "  none") } END { exit found ? 0 : 1 }' "$_tmp/dry3.out"; then
+  pass "apply --dry-run says none when no command stub would change"
+else
+  fail "apply --dry-run says none when no command stub would change"
+  cat "$_tmp/dry3.out" >&2
+fi
 
 # --- valise loaded outside a managed block ---
 

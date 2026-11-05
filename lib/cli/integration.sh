@@ -158,7 +158,6 @@ write_posix_integration() {
   done <<EOF
 $_wpi_targets
 EOF
-  info "to remove the integration, delete the valise managed block from these files"
   unset _wpi_home _wpi_snippet _wpi_targets _wpi_target
 }
 

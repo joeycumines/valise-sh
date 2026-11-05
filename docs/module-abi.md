@@ -1,15 +1,17 @@
-# Shell-profile module ABI
+# Module ABI
 
-This document defines the metadata consumed by the loader before it sources
-module bodies. Metadata is data: discovery does not execute module
-implementations to learn their names, dependencies, or supported runtimes.
+This document defines module metadata and the rules the compiled plans and
+the loaders apply to it. Metadata is data: valise never executes a module to
+learn its name, dependencies, or supported shells.
 
 ## Metadata file format
 
 Module metadata lives in `module.d/*.meta` as UTF-8 text with one `key=value`
 field per line. Blank lines and `#` comments are ignored. Values are plain text;
 there is no shell quoting, interpolation, command substitution, glob expansion,
-or `eval` phase.
+or `eval` phase. Each field may appear once: a repeated key is rejected rather
+than letting the last value win. An unknown field is rejected, and so is
+`updates`, which was removed in 0.3.0.
 
 Required fields:
 
@@ -19,8 +21,8 @@ Required fields:
 | `shells` | Space-separated supported shell identifiers. |
 | `platforms` | Space-separated supported platform identifiers. |
 | `side_effect` | Startup/install/update side-effect class. |
-| `load` | Repository-relative path to the module body. |
-| `requires` | Required when the module is a **meta module** (see below). |
+| `load` | Path to the module body, relative to the module's source directory. Absent for a **meta module** (see below). |
+| `requires` | Required for a meta module. |
 
 Optional fields:
 
@@ -53,7 +55,7 @@ version=1.0.0
 side_effect=read-only
 requires=valise_path valise_editor
 optional=
-shells=bash zsh ksh
+shells=posix
 platforms=any
 exports=
 ```
@@ -76,67 +78,74 @@ whitespace inside one identifier, path separators, quotes, shell metacharacters,
 glob characters, and control characters are invalid. Invalid identifiers are
 rejected before the loader can build function names or source a body.
 
-Accepted `shells` values are `sh`, `bash`, `zsh`, `ksh`, and `fish`.
-`shells=sh` means the module body is POSIX-shell syntax, and it is loaded by
-**every POSIX shell** — `sh`, `bash`, `zsh`, `ksh`, and dash — because those
-shells all run POSIX syntax. The engine classifies a running shell as `bash`,
-`zsh`, or `ksh` when it can prove it, and as `sh` otherwise (dash, BusyBox
-ash, and any other POSIX shell); `shells=sh` matches both the `sh` class and
-the specific classes, so a `shells=sh` module loads in all of them. Write
-portable bodies for `shells=sh` and you cover every POSIX shell at once.
+Accepted `shells` values are `posix`, `sh`, `bash`, `zsh`, `ksh`, and
+`fish`. Each running POSIX shell belongs to one class: `bash`, `zsh`, or
+`ksh` when the shell can be proven to be that shell, and `sh` for every
+other POSIX shell (dash, BusyBox ash, and so on). The values match classes
+as follows:
 
-`fish` is the exception: it selects the native Fish surface under
-`lib/fish/`, and the Fish loader never sources POSIX shell bodies. A module
-whose `shells=` list does not contain `fish` is skipped under Fish rather
-than failed — a directly requested module fails closed in strict mode.
+- `posix` matches every POSIX class: `sh`, `bash`, `zsh`, and `ksh`. Use it
+  for a body written in portable shell.
+- `sh` matches only the `sh` class. Combine it with the shells the body also
+  supports: `shells=sh bash ksh` loads in dash, bash, and ksh, and is skipped
+  in zsh, for a body that needs word splitting zsh does not do.
+- `bash`, `zsh`, and `ksh` match only that class.
+- `fish` selects the native Fish runtime. Fish never sources a POSIX body,
+  and no POSIX value matches Fish.
 
-The engine ships a generic Fish adapter at `entrypoints/fish/profile.fish` as
-the reference implementation of this handshake: it sets
-`_sp_fish_loader_bootstrap_mode` and `_sp_fish_loader_bootstrap_seeds`, then sources `loader.fish`. The loader
-consumes and clears that request and publishes a fresh
-`_sp_fish_loader_bootstrap_status`; callers must fail closed when the marker is
-absent. Fish provider precedence is project-native, engine-native, engine
-generic, and project generic. Duplicate providers are valid only when their
-metadata and native bodies are byte-identical; conflicting metadata or bodies
-is rejected before any body is sourced. Public adapters must not execute the
-generated Fish plan directly.
+A module whose shells do not include the running class is skipped; a bundle
+root, or a module a root requires, that does not support its shell is an
+error.
+
+In a built release, the native Fish loader resolves the release's Fish roots
+(`roots_fish=` in `valise-release.conf`) against the release's `module.d/`,
+each `layers/<provider>/module.d/`, and `valise/module.d/`, in that order.
+`runtime/fish/profile.fish` is the adapter the Fish hook sources: it sets
+`_sp_fish_loader_bootstrap_mode` and `_sp_fish_loader_bootstrap_seeds`,
+sources `runtime/fish/loader.fish`, and requires the
+`_sp_fish_loader_bootstrap_status` marker the loader publishes, failing
+closed when it is absent. Duplicate providers of one name are valid only when
+their metadata and Fish bodies are byte-identical.
 
 Supported `platforms` values are `any`, `darwin`, `linux`, `bsd`, `freebsd`,
 `openbsd`, and `netbsd`. `platforms=any` matches every supported platform.
 Specific platform values are ORed: `platforms=darwin linux` matches macOS or
 Linux, not BSD.
 
-## Multi-root layer search path
+## Layers
 
-The loader resolves modules across a priority-ordered root list. The primary
-root is the `sp_loader_load_modules <root> ...` argument and always wins for
-metadata it provides. `VALISE_MODULE_PATH` lists additional layer roots as a
-colon-separated path, searched in priority order after the primary root.
-With it unset the behavior is exactly the historical single-root
-behavior.
+A project composes provider modules by vendoring the provider's tree as
+`layers/<provider>/` (its `module.d/` and bodies). Every module in a layer
+uses the `contrib_` prefix, and the `valise_` prefix belongs to the engine.
+Dependencies resolve by name: the same source first, then the only module
+with that name; a name defined in several sources must be written as
+`name@source` where it is used as a root or an exclusion. A built release
+copies the layer modules it loads to `layers/<provider>/`, and one manifest
+covers the project, layer, and engine files together.
 
-Semantics, enforced by `tests/loader/multi-root.test.sh`:
+To update a provider, copy a reviewed revision into `layers/<provider>/`,
+review the diff, and rebuild; record the provider revision beside it if you
+need to know later which one you have. The manifest proves that the
+installed files match the release, not who wrote them.
 
-- Every search-path element must be a non-empty readable, executable directory; empty
-  elements, missing, unreadable, or unsearchable directories are fail-closed
-  data errors (element validation runs with globbing disabled, so
-  glob-metacharacter elements are not expanded and must name a real readable,
-  executable directory). Identical duplicate elements are deduplicated
-  at validation; priority belongs to the first occurrence.
-- A module name present in multiple roots must have identical metadata and
-  body bytes. Identical copies resolve to the highest-priority root; any
-  difference is an error naming both paths. A layer cannot silently replace
-  a module from the primary root or an earlier layer.
-- A module provided only by a layer root must carry the `contrib_` name
-  prefix. Non-prefixed layer-only modules fail closed with a diagnostic
-  naming the layer.
-- Module bodies load from the root that provided the metadata; cross-root
-  dependency discovery works in both directions (layer modules may require
-  primary modules), and deterministic `sort -u` + topological ordering is
-  preserved across roots.
-- The duplicate-export fail-closed check is global across roots: a layer
-  module may not re-export an identifier already declared by a loaded module.
-- No loader-private state leaks after multi-root loads.
+### The development loader's search path
+
+The POSIX loader in `lib/loader.sh`, used by `entrypoints/profile.sh` from an
+engine checkout, resolves modules across a priority-ordered root list
+instead: the primary root first, then the colon-separated
+`VALISE_MODULE_PATH`. Its rules, enforced by
+`tests/loader/multi-root.test.sh`:
+
+- Every element must be a non-empty, readable, searchable directory. An
+  empty element, a missing directory, a newline, or any of the glob
+  characters `[`, `?`, and `*` is rejected. Duplicate elements are
+  deduplicated; the first occurrence keeps its priority.
+- A module present in several roots must have identical metadata and body
+  bytes. Identical copies resolve to the highest-priority root; any
+  difference is an error naming both paths.
+- A module provided only by a layer root must carry the `contrib_` prefix.
+- Bodies load from the root that provided the metadata. Dependencies resolve
+  across roots in both directions, and the duplicate-export check is global.
 
 ## Versioning
 
@@ -144,10 +153,11 @@ Shared modules carry an optional `version` field so independent releases
 of the same name can be told apart. The value must start with a digit
 and contain only digits, letters, `.`, `_`, `-`; an empty value means
 unversioned. Providers should bump the version for a breaking change.
-Consumers vendor a specific provider snapshot; the loader does not resolve
-version ranges. See [Cross-repo composition](#cross-repo-composition).
+Consumers vendor a specific provider snapshot; nothing resolves version
+ranges. See [Layers](#layers).
 
-Enforcement, in both the POSIX loader and the native Fish loader:
+Enforcement, where one name has several providers (the development loader's
+roots, or the Fish loader's providers):
 
 - The same name with different valid versions across roots fails closed
   with a version-skew diagnostic naming both versions and both paths,
@@ -160,32 +170,6 @@ Enforcement, in both the POSIX loader and the native Fish loader:
 A versioned record that disagrees with itself is not a version at all:
 malformed versions are rejected by `sp_metadata_read` before any body
 is sourced.
-
-## Cross-repo composition
-
-The supported composition is a primary consumer root plus one
-version-pinned layer root per provider.
-The provider tree is vendored under `layer/<name>/` of the release
-(preserving its internal `module.d/` + `modules/` layout), and a single
-manifest covers the whole closure, so `release verify` checks consumer
-and provider bytes together before anything is sourced.
-
-- Pinning: record the provider source and revision beside the vendored
-  bytes (the e2e example writes `layer/shared/layer-pin.txt` from
-  `git rev-parse HEAD` at vendor time). Re-pinning means copying the
-  provider at a new revision, reviewing the diff, and rebuilding the
-  manifest. Pin by git SHA and review the diff; the seal proves the
-  release matches its manifest, not who authored it.
-- Loading: the consumer sets `VALISE_MODULE_ROOT` to the release and
-  `VALISE_MODULE_PATH` to the layer directory inside it. Deployed login
-  snippets carry only the primary root; the layer path is a consumer
-  setting applied when sourcing the entrypoint.
-- Naming: layer-only modules must carry the `contrib_` prefix, and
-  same-name modules across roots must be byte-identical or the load
-  fails closed naming both paths. Dependencies resolve across the
-  boundary in both directions: layer modules may require primary
-  modules, and primary modules may follow optional dependencies into
-  the layer.
 
 ## Runtime detection contract
 
@@ -271,9 +255,9 @@ Only the module for the running platform loads. The other is skipped without a
 message, because its absence is expected. The POSIX loader and compiled plans
 follow the same rules.
 
-`exports` lists public commands or shell functions the module declares. The loader
-uses this list for post-load export checks and failure cleanup; project catalogs
-and wrapper manifests use it for documentation and registration. An exported name
+`exports` lists the public functions the module defines. Plans and loaders use
+it for the pre-load conflict check, the post-load check, and failure cleanup.
+An exported name
 must be defined by the module body before the module is considered
 successfully loaded. An export must name a function, so shell reserved words
 (`case`, `do`, `done`, `elif`, `else`, `esac`, `fi`, `for`, `if`, `in`,
@@ -308,15 +292,6 @@ build. `valise-release.conf` lists the published names in `commands=`.
 Installation puts a stub for each name on PATH; see
 [installation.md](installation.md#published-commands).
 
-## Update channel for shared modules
-
-Shared modules are vendored snapshots. `valise` does not fetch provider
-updates. To update a provider, vendor a reviewed revision and rebuild the
-release manifest. Bump `version=` when making an incompatible module change;
-the loader rejects conflicting versions of the same module across roots.
-The manifest detects changes to installed files but does not authenticate
-their author; see [installation.md](installation.md).
-
 ## Side-effect phases
 
 The ordinary source phase rejects `generated-file`, `update-network`, and
@@ -337,12 +312,13 @@ before ordinary source invokes a load path.
 
 ## Capability layer available to modules
 
-The POSIX entrypoint sources `lib/capabilities.sh` before it calls the loader.
-Portable module bodies may therefore depend on `sp_cap_*` helpers without
-sourcing OS-specific files themselves. This is the ABI boundary for behavior that
-varied in the flat monolith: CPU count, file mtime, temp directories/files, command
-lookup, OS detection, canonical path containment, symlink-component rejection,
-Homebrew path discovery, secure local-bin permission checks, and background
+Every plan sources the capability prelude (`runtime/capabilities.sh` in a
+release, `lib/capabilities.sh` in the engine) before any module, and the
+development entrypoint does the same before the loader. Module bodies may
+therefore call the `sp_cap_*` helpers without sourcing platform files
+themselves: CPU count, file mtime, temporary directories and files, command
+lookup, OS detection, canonical path containment, symlink-component
+rejection, Homebrew discovery, secure local-bin checks, and background
 process launch.
 
 **The helpers stay available after the profile loads.** A compiled plan
@@ -372,9 +348,9 @@ library.
 
 ## Load target and loader mode
 
-For file-backed modules, `load` is the repository-relative shell file sourced by
-the loader after metadata validation, dependency sorting, shell/platform matching,
-and phase side-effect checks have passed. The ABI has no unload hook: the loader
+For file-backed modules, `load` is the shell file sourced after metadata
+validation, dependency ordering, shell and platform matching, and the
+side-effect checks have passed. The ABI has no unload hook: the loader
 does not implement module rollback or unload semantics.
 
 A meta module has no `load`; it has `requires` and no body. Nothing is
@@ -410,7 +386,7 @@ Permissive mode reports the affected module and continues with unrelated modules
 
 ## Path fields
 
-`load` and `executables` paths are relative to the module's source
+`load`, `executables`, and `tests` paths are relative to the module's source
 directory (the project root, `layers/<provider>/`, or the engine). Absolute
 paths, `..` path segments, spaces, quotes, shell metacharacters, and glob
 characters are invalid. Reading metadata must not source these paths.

@@ -486,6 +486,7 @@ EOF
     _dry_render_compare "$(fish_hook_path)" print_fish_integration
   fi
   printf 'commands\n'
+  _ip_any=0
   _ip_want=$(release_commands "$_ip_root")
   if _ip_bin=$(commands_bin_dir); then
     _ip_ledger=$(commands_ledger_path)
@@ -495,6 +496,7 @@ EOF
         [ -n "$_ip_name" ] || continue
         case " $_ip_want " in *" $_ip_name "*) [ "$_ip_path" != "$_ip_bin/$_ip_name" ] || continue ;; esac
         printf '  would remove: %s\n' "$_ip_path"
+        _ip_any=1
       done <"$_ip_ledger"
     fi
     for _ip_name in $_ip_want; do
@@ -504,15 +506,19 @@ EOF
         _ip_sha=$("$_ip_awk" -F '\t' -v n="$_ip_name" -v p="$_ip_path" '$1 == n && $2 == p { print $3; exit }' "$_ip_ledger")
       if [ -n "$_ip_sha" ] && commands_file_is "$_ip_path" "$_ip_sha"; then
         printf '  current: %s\n' "$_ip_path"
+        _ip_any=1
       elif [ -e "$_ip_path" ] || [ -L "$_ip_path" ]; then
         printf '  would skip (exists, not owned by valise): %s\n' "$_ip_path"
+        _ip_any=1
       else
         printf '  would publish: %s\n' "$_ip_path"
+        _ip_any=1
       fi
     done
   else
-    [ -z "$_ip_want" ] || printf '  none (HOME is not set)\n'
+    [ -z "$_ip_want" ] || { printf '  none (HOME is not set)\n'; _ip_any=1; }
   fi
+  [ "$_ip_any" -eq 1 ] || printf '  none\n'
   unset _ip_integration _ip_source _ip_root _ip_id _ip_active _ip_home _ip_snippet _ip_targets _ip_target \
-    _ip_lines _ip_want _ip_bin _ip_ledger _ip_awk _ip_name _ip_path _ip_sha
+    _ip_lines _ip_want _ip_bin _ip_ledger _ip_awk _ip_name _ip_path _ip_sha _ip_any
 }

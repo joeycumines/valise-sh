@@ -444,6 +444,31 @@ else
   fail "explain-bundles accepts a bundle name"
   cat "$_test_root/explain-bundles-one.out" >&2
 fi
+# A qualified exclusion removes a bare root, and the counts are closures.
+printf 'lean\tNo dep_mod\tdep_mod@module.d\n' >>"$_project/variants.tsv"
+if (
+  cd "$_project" &&
+    PATH="$_no_python_path" HOME="$_test_root/home" \
+      "$_valise" explain-variant lean
+) >"$_test_root/explain-variant.out" 2>&1 &&
+  grep -Fx '  bash: 0 of 1 roots, 0 of 2 modules' "$_test_root/explain-variant.out" >/dev/null &&
+  grep -Fx '  zsh: 0 of 1 roots, 0 of 2 modules' "$_test_root/explain-variant.out" >/dev/null; then
+  pass "explain-variant counts a qualified exclusion of a bare root"
+else
+  fail "explain-variant counts a qualified exclusion of a bare root"
+  cat "$_test_root/explain-variant.out" >&2
+fi
+if (
+  cd "$_project" &&
+    PATH="$_no_python_path" HOME="$_test_root/home" \
+      "$_valise" explain-variant
+) >"$_test_root/explain-variant-default.out" 2>&1 &&
+  grep -Fx '  bash: 1 of 1 roots, 2 of 2 modules' "$_test_root/explain-variant-default.out" >/dev/null; then
+  pass "explain-variant reports the full closure for a variant without exclusions"
+else
+  fail "explain-variant reports the full closure for a variant without exclusions"
+  cat "$_test_root/explain-variant-default.out" >&2
+fi
 if (
   cd "$_project" &&
     PATH="$_no_python_path" HOME="$_test_root/home" \
