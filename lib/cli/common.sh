@@ -234,51 +234,15 @@ active_release_id() {
   printf '%s\n' "${_ari_dir##*/}"
 }
 
-# Resolve the consuming project root for the commands that read project
-# files (compile, build, explain-*, layer-lint). The working directory
-# wins over the engine's own checkout, so a package install cannot supply a
-# different source root than the project the caller is standing in. A
-# project is recognised by shell/release/module-registry.tsv or by a
-# shell/module.d directory.
-#
-# Prints the canonical project root, or fails.
-resolve_project_root() {
-  _rpr_script_dir=$(valise_script_dir) || return 1
-  for _rpr_candidate in "." "$_rpr_script_dir/.." "$_rpr_script_dir/../.." "$_rpr_script_dir/../../.."; do
-    if [ -f "$_rpr_candidate/shell/release/module-registry.tsv" ] ||
-       [ -d "$_rpr_candidate/shell/module.d" ]; then
-      (cd "$_rpr_candidate" && pwd -P)
-      return 0
-    fi
-  done
-  return 1
+# Print the canonical root of the engine checkout or package that ships this
+# CLI. Its modules live in module.d/, its libraries in lib/.
+engine_root() {
+  (cd "${_valise_engine_bin%/}/.." && pwd -P)
 }
 
-# Resolve the engine checkout that ships this CLI. Its modules live in
-# module.d/ at the top level, not under shell/.
-resolve_engine_root() {
-  _rer_script_dir=$(valise_script_dir) || return 1
-  for _rer_candidate in "$_rer_script_dir/.." "$_rer_script_dir/../.." "$_rer_script_dir/../../.."; do
-    if [ -d "$_rer_candidate/module.d" ] && [ -d "$_rer_candidate/lib" ]; then
-      (cd "$_rer_candidate" && pwd -P)
-      return 0
-    fi
-  done
-  return 1
-}
-
-# Print the module names a layer is allowed to depend on: the engine's own
-# modules, plus the primary-root modules of the consuming project. A layer
-# may require a module in its own layer, or one of these; anything else is a
-# dependency the layer does not own.
-engine_module_names() {
-  _emn_root=$1
-  for _emn_meta in "$_emn_root"/module.d/*.meta "$_emn_root"/shell/module.d/*.meta; do
-    [ -f "$_emn_meta" ] || continue
-    _emn_name=${_emn_meta##*/}
-    printf '%s\n' "${_emn_name%.meta}"
-  done
-}
+VALISE_TAB=$(printf '\t')
+VALISE_NL='
+'
 
 # Return a file's three-digit permission mode in the manifest's octal form.
 # BSD stat and GNU stat use different option spellings, so probe both.

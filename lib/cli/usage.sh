@@ -7,7 +7,10 @@ usage() {
   printf '%s\n' \
     "Usage: valise <command> [options]" \
     "" \
-    "Project commands (run in a valise project):" \
+    "Global option:" \
+    "  -C <dir>                  Run as if valise was started in dir" \
+    "" \
+    "Project commands (run anywhere inside a directory holding valise.conf):" \
     "  new [dir]                 Scaffold a new valise project" \
     "  module <new|list|remove>  Create, list, or remove project modules" \
     "  build [--variant=<name>] [--bundle=<name>] [out]" \
@@ -24,10 +27,10 @@ usage() {
     "" \
     "Plumbing:" \
     "  compile [--bundle=<name>] [--variant=<name>] <output-dir>  Compile plans only" \
-    "  registry [--check] [path]  Generate or verify module-registry.tsv from metadata" \
+    "  registry [path]           Print the module table generated from metadata" \
     "  make-manifest <tree> [--output <file>]  Write a release manifest for a tree" \
-    "  explain-variant [name]    Show variant details and per-shell impact" \
-    "  explain-bundles [--bundle=<name>]  Explain bundle roots and module closure" \
+    "  explain-variant [--bundle=<name>] [name]  Show a variant and its per-shell impact" \
+    "  explain-bundles [--bundle=<name>] [--variant=<name>]  Show each bundle's closure" \
     "  layer-lint <name>         Validate a contribution layer structure" \
     "  version                   Print version" \
     "" \
@@ -51,7 +54,7 @@ usage_init() {
     "and valise apply write it for you; use this to wire a startup file by hand." \
     "" \
     "  posix         A managed block for any POSIX shell. It loads the plan for" \
-    "                the running shell, or the loader when the release has none." \
+    "                the running shell class: ksh, zsh, bash, or sh for any other." \
     "  fish          The Fish conf.d hook." \
     "  --source-tree Skip release verification in the Fish hook (development only)." \
     "" \
@@ -107,16 +110,20 @@ usage_new() {
     "" \
     "Scaffold a new valise project in dir (default: the current directory)." \
     "" \
-    "The directory must be empty or absent. The scaffold contains a seed module," \
-    "bundle roots, install variants, and project defaults."
+    "The directory must be empty or absent. The scaffold contains valise.conf," \
+    "bundles.tsv with sh, bash, zsh and ksh rows, variants.tsv, and a seed module" \
+    "profile_main in module.d/ and modules/."
 }
 
 usage_module() {
   printf '%s\n' \
     "usage: valise module <new|list|remove> [options]" \
     "" \
-    "  new <name> [--exports=<list>]  Create a module and wire it into the seed." \
-    "  list                            List the project's modules." \
+    "  new <name> [--exports=<list>] [--into=<module>[,...] | --no-wire]" \
+    "                                  Create a module in module.d/ and add it to the" \
+    "                                  requires= of the bundle's single root, of the" \
+    "                                  named modules, or of none." \
+    "  list                            List the project's and its layers' modules." \
     "  remove <name>                   Remove a module and its references in metadata," \
     "                                  bundle roots, and variant exclusions. Refuses" \
     "                                  if that would leave a bundle or module empty."
@@ -129,15 +136,17 @@ usage_build() {
     "Build a release tree from the project in the current directory." \
     "" \
     "  --variant=<name>  Build variant whose exclusion list applies (default:" \
-    "                    default, or the project's project.conf)." \
-    "  --bundle=<name>   Bundle whose roots seed each plan (default: default," \
-    "                    or the project's project.conf)." \
+    "                    valise.conf variant=)." \
+    "  --bundle=<name>   Bundle whose roots seed each plan (default: valise.conf" \
+    "                    bundle=)." \
     "  out               Output directory (default: build/release). An existing" \
     "                    default output is replaced after a successful build." \
     "                    An explicit output must be empty or absent." \
     "" \
-    "The tree carries generated/installed-modules.<shell> plans, the capability" \
-    "prelude, every module body, and shell/release."
+    "The tree holds plans/<shell>.sh for each POSIX shell the bundle names," \
+    "runtime/capabilities.sh, valise-release.conf, manifest.tsv, and the metadata" \
+    "and bodies of exactly the modules some plan loads. Engine modules are copied" \
+    "under valise/, layer modules under layers/<provider>/."
 }
 
 usage_apply() {
@@ -154,41 +163,43 @@ usage_status() {
   printf '%s\n' \
     "usage: valise status" \
     "" \
-    "Report the project, the active release, the integration, and build drift."
+    "Report the project defaults, the integration in each startup file, the bundle," \
+    "variant and valise version the active release was built with, and whether the" \
+    "active release matches build/release."
 }
 
 usage_compile() {
   printf '%s\n' \
     "usage: valise compile [--bundle=<name>] [--variant=<name>] <output-dir>" \
     "" \
-    "Compile the project's modules into per-shell installed plans." \
+    "Compile the project's modules into <output-dir>/<shell>.sh plans for the" \
+    "POSIX shells the bundle names. Use build for an installable release." \
     "" \
-    "  --bundle=<name>   Bundle whose roots seed each plan (default: default)." \
-    "  --variant=<name>  Build variant whose exclusion list applies (default:" \
-    "                    default)." \
-    "  output-dir        Destination directory. It must be empty or absent." \
-    "" \
-    "Run from the consuming project root."
+    "  --bundle=<name>   Bundle whose roots seed each plan (default: valise.conf)." \
+    "  --variant=<name>  Variant whose exclusion list applies (default: valise.conf)." \
+    "  output-dir        Destination directory. It must be empty or absent."
 }
 
 usage_registry() {
   printf '%s\n' \
-    "usage: valise registry [--check] [registry-path]" \
+    "usage: valise registry [path]" \
     "" \
-    "Generate the module registry from the project's metadata." \
+    "Print the module table valise builds from metadata: the project's module.d/," \
+    "each layers/<provider>/module.d/, then the engine's own modules under the" \
+    "source valise. The table is internal; nothing needs to commit it." \
     "" \
-    "  --check  Compare the generated registry with the existing one and fail on" \
-    "           drift instead of rewriting it." \
-    "  registry-path  Registry file (default: shell/release/module-registry.tsv)."
+    "  path  Write the table to this file instead of standard output."
 }
 
 usage_explain_bundles() {
   printf '%s\n' \
-    "usage: valise explain-bundles [--bundle=<name>]" \
+    "usage: valise explain-bundles [--bundle=<name>] [--variant=<name>]" \
     "" \
-    "Show the roots and module closure each bundle resolves to, per shell." \
+    "Show the roots and the ordered module closure each bundle resolves to, per" \
+    "shell, with each module's source." \
     "" \
-    "  --bundle=<name>  Report one bundle instead of all of them."
+    "  --bundle=<name>   Report one bundle instead of all of them." \
+    "  --variant=<name>  Apply this variant's exclusions (default: valise.conf)."
 }
 
 usage_layer_lint() {
@@ -198,16 +209,17 @@ usage_layer_lint() {
     "Validate a contribution layer's structure, namespace, metadata, load paths," \
     "file modes, and dependency closure." \
     "" \
-    "  layer-name  Provider directory under shell/layers/, or a path to a layer" \
+    "  layer-name  Provider directory under layers/, or a path to a layer" \
     "              tree containing module.d/."
 }
 
 usage_explain_variant() {
   printf '%s\n' \
-    "usage: valise explain-variant [variant-name]" \
+    "usage: valise explain-variant [--bundle=<name>] [variant-name]" \
     "" \
-    "Show a variant's description, excluded modules, and per-shell impact." \
+    "Show a variant's description, excluded modules, and how many of the bundle's" \
+    "roots it removes per shell." \
     "" \
-    "  variant-name  Variant from shell/release/install-variants" \
-    "                (default: default)."
+    "  --bundle=<name>  Bundle to measure against (default: valise.conf)." \
+    "  variant-name     Variant from variants.tsv (default: valise.conf)."
 }

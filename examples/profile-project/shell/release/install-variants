@@ -1,3 +1,0 @@
-variant_name	description	excluded_modules
-default	Every module in the project	
-workstation-lean	No provider layer	contrib_demo_greeting@shell/layers/demo/module.d

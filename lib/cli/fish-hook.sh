@@ -5,8 +5,8 @@
 
 print_fish_integration() {
   _fish_active_literal=$(fish_quote "$VALISE_ACTIVE_LINK") || return 1
-  _fish_cli_dir=$(cd "$(path_parent "$0")" 2>/dev/null && pwd -P) || return 1
-  _fish_cli_path="$_fish_cli_dir/${0##*/}"
+  _fish_cli_dir=$(cd "$(path_parent "$_valise_cli_path")" 2>/dev/null && pwd -P) || return 1
+  _fish_cli_path="$_fish_cli_dir/${_valise_cli_path##*/}"
   _fish_cli_literal=$(fish_quote "$_fish_cli_path") || return 1
   _fish_source_tree_mode=${_fish_source_tree_mode:-0}
   printf '%s\n' \

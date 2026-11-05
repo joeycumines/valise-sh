@@ -35,26 +35,24 @@ _project="$_test_root/project"
 _pkg="$_test_root/pkg"
 _link="$_test_root/bin/valise"
 
-mkdir -p "$_project/shell/module.d" "$_project/shell/modules" \
-  "$_project/shell/layers/vendor/module.d" "$_project/shell/layers/vendor/modules" \
-  "$_project/shell/release" "$_pkg/bin" "$_pkg/lib/cli" "$_test_root/bin"
+mkdir -p "$_project/module.d" "$_project/modules" \
+  "$_project/layers/vendor/module.d" "$_project/layers/vendor/modules" "$_pkg/bin" "$_pkg/lib/cli" "$_test_root/bin"
+: >"$_project/valise.conf"
 
 cp "$_repo/bin/valise" "$_pkg/bin/valise"
 cp "$_repo"/lib/cli/*.sh "$_pkg/lib/cli/"
 cp "$_repo/lib/compiler.awk" "$_pkg/lib/compiler.awk"
 cp "$_repo/lib/capabilities.sh" "$_pkg/lib/capabilities.sh"
 cp "$_repo/lib/metadata.sh" "$_pkg/lib/metadata.sh"
+cp -R "$_repo/module.d" "$_repo/modules" "$_pkg/"
 chmod 0755 "$_pkg/bin/valise"
 ln -s "$_pkg/bin/valise" "$_link"
 
-# A valid source tree above the package must not win over the project root.
-# Compile resolves from the working tree first so build packages the same
-# prelude the plan was built against.
-mkdir -p "$_test_root/shell/release"
-printf 'name\tversion\tside_effect\trequires\toptional\tshells\tplatforms\texports\tload\tupdates\tsource\n'   >"$_test_root/shell/release/module-registry.tsv"
-printf 'variant_name\tdescription\texcluded_modules\ndefault\tDecoy\t\n'   >"$_test_root/shell/release/install-variants"
+# A project above the working project must not win: the nearest valise.conf
+# names the project, and the engine always comes from the package.
+printf 'bundle=decoy\n' >"$_test_root/valise.conf"
 
-cat >"$_project/shell/module.d/root.meta" <<'EOF'
+cat >"$_project/module.d/root.meta" <<'EOF'
 name=root
 version=
 side_effect=read-only
@@ -65,10 +63,10 @@ platforms=any
 exports=root_ready
 load=modules/root.sh
 EOF
-cat >"$_project/shell/modules/root.sh" <<'EOF'
+cat >"$_project/modules/root.sh" <<'EOF'
 root_ready() { :; }
 EOF
-cat >"$_project/shell/layers/vendor/module.d/contrib_vendor_tool.meta" <<'EOF'
+cat >"$_project/layers/vendor/module.d/contrib_vendor_tool.meta" <<'EOF'
 name=contrib_vendor_tool
 version=1.0.0
 side_effect=read-only
@@ -79,11 +77,11 @@ platforms=any
 exports=vendor_tool_ready
 load=modules/contrib_vendor_tool.sh
 EOF
-cat >"$_project/shell/layers/vendor/modules/contrib_vendor_tool.sh" <<'EOF'
+cat >"$_project/layers/vendor/modules/contrib_vendor_tool.sh" <<'EOF'
 vendor_tool_ready() { :; }
 EOF
 for _shell in bash zsh ksh; do
-  cat >"$_project/shell/module.d/${_shell}_only.meta" <<EOF
+  cat >"$_project/module.d/${_shell}_only.meta" <<EOF
 name=${_shell}_only
 version=
 side_effect=read-only
@@ -94,31 +92,23 @@ platforms=any
 exports=${_shell}_plan_ready
 load=modules/${_shell}_only.sh
 EOF
-  cat >"$_project/shell/modules/${_shell}_only.sh" <<EOF
+  cat >"$_project/modules/${_shell}_only.sh" <<EOF
 ${_shell}_plan_ready() { :; }
 EOF
 done
 
-{
-  printf 'name\tversion\tside_effect\trequires\toptional\tshells\tplatforms\texports\tload\tupdates\tsource\n'
-  printf 'root\t\tread-only\tcontrib_vendor_tool\t\tbash zsh ksh\tany\troot_ready\tmodules/root.sh\t\tshell/module.d\n'
-  printf 'contrib_vendor_tool\t1.0.0\tread-only\t\t\tbash zsh ksh\tany\tvendor_tool_ready\tmodules/contrib_vendor_tool.sh\t\tshell/layers/vendor/module.d\n'
-  printf 'bash_only\t\tread-only\t\t\tbash\tany\tbash_plan_ready\tmodules/bash_only.sh\t\tshell/module.d\n'
-  printf 'zsh_only\t\tread-only\t\t\tzsh\tany\tzsh_plan_ready\tmodules/zsh_only.sh\t\tshell/module.d\n'
-  printf 'ksh_only\t\tread-only\t\t\tksh\tany\tksh_plan_ready\tmodules/ksh_only.sh\t\tshell/module.d\n'
-} >"$_project/shell/release/module-registry.tsv"
 
 {
   printf '# bundle\tshell\troots\n'
   printf 'default\tbash\troot bash_only\n'
   printf 'default\tzsh\troot zsh_only\n'
   printf 'default\tksh\troot ksh_only\n'
-} >"$_project/shell/release/bundle-roots"
+} >"$_project/bundles.tsv"
 
 {
   printf 'variant_name\tdescription\texcluded_modules\n'
   printf 'default\tAll\t\n'
-} >"$_project/shell/release/install-variants"
+} >"$_project/variants.tsv"
 
 printf '=== valise compile/build consumer contract ===\n'
 printf '  project: %s\n\n' "$_project"
@@ -132,14 +122,14 @@ else
   fail "compile resolves ../lib through a package-style symlink"
   cat "$_test_root/compile.err" >&2
 fi
-if [ -f "$_project/rel-out/installed-modules.bash" ] &&
-  [ -f "$_project/rel-out/installed-modules.zsh" ] &&
-  [ -f "$_project/rel-out/installed-modules.ksh" ]; then
+if [ -f "$_project/rel-out/bash.sh" ] &&
+  [ -f "$_project/rel-out/zsh.sh" ] &&
+  [ -f "$_project/rel-out/ksh.sh" ]; then
   pass "relative compile output receives a plan for every requested shell"
 else
   fail "relative compile output receives a plan for every requested shell"
 fi
-_plan="$_project/rel-out/installed-modules.bash"
+_plan="$_project/rel-out/bash.sh"
 if [ -f "$_plan" ] && grep -F '# roots=root' "$_plan" >/dev/null 2>&1 &&
   grep -F '. "${VALISE_MODULE_ROOT%/}/modules/root.sh"' "$_plan" >/dev/null 2>&1; then
   pass "bare bundle seed compiles to the primary module body"
@@ -156,7 +146,7 @@ fi
 # Compile without a bundle exercises the default bundle row and the same
 # root-qualification path.
 if (cd "$_project" && "$_link" compile default-out) >"$_test_root/compile-default.out" 2>&1 &&
-  grep -F '# roots=root' "$_project/default-out/installed-modules.bash" >/dev/null 2>&1; then
+  grep -F '# roots=root' "$_project/default-out/bash.sh" >/dev/null 2>&1; then
   pass "default bundle resolves without --bundle"
 else
   fail "default bundle resolves without --bundle"
@@ -165,7 +155,7 @@ fi
 # Dot segments must normalize before staging; otherwise publish targets a
 # stage path containing an already-removed ".." component.
 if (cd "$_project" && "$_link" compile "dot-out/.") >"$_test_root/compile-dot.out" 2>"$_test_root/compile-dot.err" &&
-  [ -f "$_project/dot-out/installed-modules.bash" ]; then
+  [ -f "$_project/dot-out/bash.sh" ]; then
   pass "compile normalizes dot segments in an output path"
 else
   fail "compile normalizes dot segments in an output path"
@@ -174,14 +164,14 @@ fi
 
 mkdir -p "$_project/empty-compile"
 if (cd "$_project" && "$_link" compile "empty-compile/.") >"$_test_root/compile-empty.out" 2>"$_test_root/compile-empty.err" &&
-  [ -f "$_project/empty-compile/installed-modules.bash" ]; then
+  [ -f "$_project/empty-compile/bash.sh" ]; then
   pass "compile accepts an existing empty dot-path destination"
 else
   fail "compile accepts an existing empty dot-path destination"
   cat "$_test_root/compile-empty.err" >&2
 fi
 if (cd "$_project" && "$_link" compile "$_project/a/b/../../nested-out")   >"$_test_root/compile-nested.out" 2>"$_test_root/compile-nested.err" &&
-  [ -f "$_project/nested-out/installed-modules.bash" ]; then
+  [ -f "$_project/nested-out/bash.sh" ]; then
   pass "compile normalizes nested parent segments"
 else
   fail "compile normalizes nested parent segments"
@@ -189,8 +179,8 @@ else
 fi
 mkdir -p "$_project/globZZout"
 if (cd "$_project" && "$_link" compile 'glob*out')   >"$_test_root/compile-glob.out" 2>"$_test_root/compile-glob.err" &&
-  [ -f "$_project/glob*out/installed-modules.bash" ] &&
-  [ ! -e "$_project/globZZout/installed-modules.bash" ]; then
+  [ -f "$_project/glob*out/bash.sh" ] &&
+  [ ! -e "$_project/globZZout/bash.sh" ]; then
   pass "compile does not expand glob characters in an output path"
 else
   fail "compile does not expand glob characters in an output path"
@@ -218,7 +208,7 @@ for _n in 1 2; do
 done
 if (cd "$_project" && "$_link" build --bundle=default "build/../dot-release") \
   >"$_test_root/build-dot.out" 2>"$_test_root/build-dot.err" &&
-  [ -f "$_project/dot-release/generated/installed-modules.bash" ]; then
+  [ -f "$_project/dot-release/plans/bash.sh" ]; then
   pass "build normalizes dot segments in an output path"
 else
   fail "build normalizes dot segments in an output path"
@@ -227,14 +217,14 @@ fi
 
 mkdir -p "$_project/empty-build"
 if (cd "$_project" && "$_link" build --bundle=default "empty-build/../empty-build")   >"$_test_root/build-empty.out" 2>"$_test_root/build-empty.err" &&
-  [ -f "$_project/empty-build/generated/installed-modules.bash" ]; then
+  [ -f "$_project/empty-build/plans/bash.sh" ]; then
   pass "build accepts an existing empty dot-path destination"
 else
   fail "build accepts an existing empty dot-path destination"
   cat "$_test_root/build-empty.err" >&2
 fi
 if (cd "$_project" && "$_link" build --bundle=default "$_project/absolute-release")   >"$_test_root/build-absolute.out" 2>"$_test_root/build-absolute.err" &&
-  [ -f "$_project/absolute-release/generated/installed-modules.bash" ]; then
+  [ -f "$_project/absolute-release/plans/bash.sh" ]; then
   pass "build accepts an absolute output path"
 else
   fail "build accepts an absolute output path"
@@ -242,35 +232,35 @@ else
 fi
 
 _release="$_project/build/release1"
-_scratch_preprocessed=$(find "$_release/generated" -name '.preprocessed.*' -print 2>/dev/null || :)
+_scratch_preprocessed=$(find "$_release/plans" -name '.preprocessed.*' -print 2>/dev/null || :)
 if [ -z "$_scratch_preprocessed" ]; then
   pass "compiled output contains no preprocessing scratch files"
 else
   fail "compiled output contains no preprocessing scratch files"
   printf '%s\n' "$_scratch_preprocessed" >&2
 fi
-if grep -F '.preprocessed.' "$_release/shell/install/profile-release.manifest" >/dev/null 2>&1; then
+if grep -F '.preprocessed.' "$_release/manifest.tsv" >/dev/null 2>&1; then
   fail "release manifest excludes preprocessing scratch files"
 else
   pass "release manifest excludes preprocessing scratch files"
 fi
 for _file in \
-  generated/installed-modules.bash \
-  vendor/shell-profile/lib/capabilities.sh \
+  plans/bash.sh \
+  runtime/capabilities.sh \
   module.d/root.meta \
   modules/root.sh \
   layers/vendor/module.d/contrib_vendor_tool.meta \
   layers/vendor/modules/contrib_vendor_tool.sh \
-  shell/release/bundle-roots \
-  shell/install/profile-release.manifest; do
+  valise-release.conf \
+  manifest.tsv; do
   if [ -f "$_release/$_file" ]; then
     pass "built tree contains $_file"
   else
     fail "built tree contains $_file"
   fi
 done
-if cmp -s "$_release/shell/install/profile-release.manifest" \
-  "$_project/build/release2/shell/install/profile-release.manifest"; then
+if cmp -s "$_release/manifest.tsv" \
+  "$_project/build/release2/manifest.tsv"; then
   pass "repeated build produces a byte-identical manifest"
 else
   fail "repeated build produces a byte-identical manifest"
@@ -278,7 +268,7 @@ fi
 
 # Metadata is the source of truth. An invalid module name must fail before any
 # copy can write outside the staged release.
-cat >"$_project/shell/module.d/pwned.meta" <<'EOF'
+cat >"$_project/module.d/pwned.meta" <<'EOF'
 name=../pwned
 version=
 side_effect=read-only
@@ -294,7 +284,7 @@ if (cd "$_project" && "$_link" build --bundle=default build/escape) \
   fail "build rejects an invalid metadata module name"
 elif ! grep -F 'metadata: invalid module name: ../pwned' \
   "$_test_root/build-escape.err" >/dev/null 2>&1 ||
-  ! grep -F 'valise: error: shell/module.d/pwned.meta: invalid metadata' \
+  ! grep -F 'valise: error: module.d/pwned.meta: ' \
   "$_test_root/build-escape.err" >/dev/null 2>&1; then
   fail "build rejects an invalid metadata module name (wrong diagnostic)"
   cat "$_test_root/build-escape.err" >&2
@@ -303,10 +293,10 @@ elif [ -e "$_project/build/escape" ]; then
 else
   pass "build rejects an invalid metadata module name"
 fi
-rm -f "$_project/shell/module.d/pwned.meta"
+rm -f "$_project/module.d/pwned.meta"
 
 # A load path with a parent segment must fail before the release can copy it.
-cat >"$_project/shell/module.d/trav.meta" <<'EOF'
+cat >"$_project/module.d/trav.meta" <<'EOF'
 name=trav
 version=
 side_effect=read-only
@@ -317,7 +307,7 @@ platforms=any
 exports=
 load=modules/../evil.sh
 EOF
-cat >"$_project/shell/modules/evil.sh" <<'EOF'
+cat >"$_project/modules/evil.sh" <<'EOF'
 evil_loaded() { :; }
 EOF
 if (cd "$_project" && "$_link" build --bundle=default build/load-escape) \
@@ -325,20 +315,20 @@ if (cd "$_project" && "$_link" build --bundle=default build/load-escape) \
   fail "build rejects a metadata load path containing a parent segment"
 elif ! grep -F 'metadata: invalid relative path: modules/../evil.sh' \
   "$_test_root/build-load-escape.err" >/dev/null 2>&1 ||
-  ! grep -F 'valise: error: shell/module.d/trav.meta: invalid metadata' \
+  ! grep -F 'valise: error: module.d/trav.meta: ' \
   "$_test_root/build-load-escape.err" >/dev/null 2>&1; then
   fail "build rejects a metadata load path containing a parent segment (wrong diagnostic)"
   cat "$_test_root/build-load-escape.err" >&2
 else
   pass "build rejects a metadata load path containing a parent segment"
 fi
-rm -f "$_project/shell/module.d/trav.meta"
-rm -f "$_project/shell/modules/evil.sh"
+rm -f "$_project/module.d/trav.meta"
+rm -f "$_project/modules/evil.sh"
 
 # Source the compiled plan directly. Capability prelude functions remain
 # available to module functions after the plan finishes.
 if VALISE_MODULE_ROOT="$_release" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash" || exit 1
+  . "$VALISE_MODULE_ROOT/plans/bash.sh" || exit 1
   command -v root_ready >/dev/null 2>&1 || exit 2
   command -v vendor_tool_ready >/dev/null 2>&1 || exit 3
   command -v bash_plan_ready >/dev/null 2>&1 || exit 4
@@ -372,7 +362,7 @@ for _shell in bash zsh ksh; do
     continue
   fi
   if VALISE_MODULE_ROOT="$_release" "$_bin" -c '
-    . "$VALISE_MODULE_ROOT/generated/installed-modules.$1" || exit 1
+    . "$VALISE_MODULE_ROOT/plans/$1.sh" || exit 1
     shift
     for _fn do
       if ! command -v "$_fn" >/dev/null 2>&1; then
@@ -644,11 +634,11 @@ fi
 # excludable by its qualified identity, and a bare exclusion must never
 # remove a layer module that happens to share the name.
 _exclude_project="$_test_root/exclude-project"
-mkdir -p "$_exclude_project/shell/module.d" "$_exclude_project/shell/modules" \
-  "$_exclude_project/shell/release" \
-  "$_exclude_project/shell/layers/vendor/module.d" \
-  "$_exclude_project/shell/layers/vendor/modules/shared"
-cat >"$_exclude_project/shell/module.d/root.meta" <<'EOF'
+mkdir -p "$_exclude_project/module.d" "$_exclude_project/modules" \
+  "$_exclude_project/layers/vendor/module.d" \
+  "$_exclude_project/layers/vendor/modules/shared"
+: >"$_exclude_project/valise.conf"
+cat >"$_exclude_project/module.d/root.meta" <<'EOF'
 name=root
 version=
 side_effect=read-only
@@ -659,8 +649,8 @@ platforms=any
 exports=root_ready
 load=modules/root.sh
 EOF
-printf 'root_ready() { :; }\n' >"$_exclude_project/shell/modules/root.sh"
-cat >"$_exclude_project/shell/layers/vendor/module.d/contrib_shared_name.meta" <<'EOF'
+printf 'root_ready() { :; }\n' >"$_exclude_project/modules/root.sh"
+cat >"$_exclude_project/layers/vendor/module.d/contrib_shared_name.meta" <<'EOF'
 name=contrib_shared_name
 version=1.0.0
 side_effect=read-only
@@ -671,15 +661,14 @@ platforms=any
 exports=vendor_ready
 load=modules/shared/contrib_shared_name.sh
 EOF
-printf 'vendor_ready() { :; }\n' >"$_exclude_project/shell/layers/vendor/modules/shared/contrib_shared_name.sh"
-printf '# bundle\tshell\troots\ndefault\tbash\troot contrib_shared_name@shell/layers/vendor/module.d\ndefault\tzsh\troot contrib_shared_name@shell/layers/vendor/module.d\ndefault\tksh\troot contrib_shared_name@shell/layers/vendor/module.d\n' \
-  >"$_exclude_project/shell/release/bundle-roots"
-printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\nworkstation-lean\tNo provider layer\tcontrib_shared_name@shell/layers/vendor/module.d\n' \
-  >"$_exclude_project/shell/release/install-variants"
+printf 'vendor_ready() { :; }\n' >"$_exclude_project/layers/vendor/modules/shared/contrib_shared_name.sh"
+printf '# bundle\tshell\troots\ndefault\tbash\troot contrib_shared_name@layers/vendor/module.d\ndefault\tzsh\troot contrib_shared_name@layers/vendor/module.d\ndefault\tksh\troot contrib_shared_name@layers/vendor/module.d\n' \
+  >"$_exclude_project/bundles.tsv"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\nworkstation-lean\tNo provider layer\tcontrib_shared_name@layers/vendor/module.d\n' \
+  >"$_exclude_project/variants.tsv"
 
-(cd "$_exclude_project" && "$_link" registry) >/dev/null 2>&1
 if (cd "$_exclude_project" && "$_link" compile --variant=default full-out) >"$_test_root/exclude-full.out" 2>&1 &&
-  grep -F '# order=contrib_shared_name root' "$_exclude_project/full-out/installed-modules.bash" >/dev/null 2>&1; then
+  grep -F '# order=contrib_shared_name root' "$_exclude_project/full-out/bash.sh" >/dev/null 2>&1; then
   pass "the full variant keeps the provider layer module"
 else
   fail "the full variant keeps the provider layer module"
@@ -689,8 +678,8 @@ fi
 # The qualified exclusion must actually remove the layer module. The layer
 # module is a bundle root here, so the seed filter removes it.
 if (cd "$_exclude_project" && "$_link" compile --variant=workstation-lean lean-out) >"$_test_root/exclude-lean.out" 2>&1 &&
-  grep -F '# order=root' "$_exclude_project/lean-out/installed-modules.bash" >/dev/null 2>&1 &&
-  ! grep -F 'contrib_shared_name' "$_exclude_project/lean-out/installed-modules.bash" >/dev/null 2>&1; then
+  grep -F '# order=root' "$_exclude_project/lean-out/bash.sh" >/dev/null 2>&1 &&
+  ! grep -F 'contrib_shared_name' "$_exclude_project/lean-out/bash.sh" >/dev/null 2>&1; then
   pass "a qualified variant exclusion removes the provider layer module"
 else
   fail "a qualified variant exclusion removes the provider layer module"
@@ -703,8 +692,8 @@ fi
 # handle. Before the fix the row filter was gated on the primary source, so
 # the excluded layer module stayed in the plan.
 printf '# bundle\tshell\troots\ndefault\tbash\tneeds_layer\ndefault\tzsh\tneeds_layer\ndefault\tksh\tneeds_layer\n' \
-  >"$_exclude_project/shell/release/bundle-roots"
-cat >"$_exclude_project/shell/module.d/needs_layer.meta" <<'EOF'
+  >"$_exclude_project/bundles.tsv"
+cat >"$_exclude_project/module.d/needs_layer.meta" <<'EOF'
 name=needs_layer
 version=
 side_effect=read-only
@@ -715,10 +704,9 @@ platforms=any
 exports=needs_layer_ready
 load=modules/needs_layer.sh
 EOF
-printf 'needs_layer_ready() { :; }\n' >"$_exclude_project/shell/modules/needs_layer.sh"
-(cd "$_exclude_project" && "$_link" registry) >/dev/null 2>&1
+printf 'needs_layer_ready() { :; }\n' >"$_exclude_project/modules/needs_layer.sh"
 if (cd "$_exclude_project" && "$_link" compile --variant=workstation-lean lean-dep-out) >"$_test_root/exclude-lean-dep.out" 2>&1; then
-  if grep -F 'contrib_shared_name' "$_exclude_project/lean-dep-out/installed-modules.bash" >/dev/null 2>&1; then
+  if grep -F 'contrib_shared_name' "$_exclude_project/lean-dep-out/bash.sh" >/dev/null 2>&1; then
     fail "a qualified variant exclusion removes a layer module reached as a dependency"
     cat "$_test_root/exclude-lean-dep.out" >&2
   else
@@ -738,13 +726,13 @@ fi
 # A bare exclusion names a primary module. It must not remove a layer module
 # that happens to share the name, and it must not remove a primary module
 # that the exclusion did not name.
-printf '# bundle\tshell\troots\ndefault\tbash\troot contrib_shared_name@shell/layers/vendor/module.d\ndefault\tzsh\troot contrib_shared_name@shell/layers/vendor/module.d\ndefault\tksh\troot contrib_shared_name@shell/layers/vendor/module.d\n' \
-  >"$_exclude_project/shell/release/bundle-roots"
+printf '# bundle\tshell\troots\ndefault\tbash\troot contrib_shared_name@layers/vendor/module.d\ndefault\tzsh\troot contrib_shared_name@layers/vendor/module.d\ndefault\tksh\troot contrib_shared_name@layers/vendor/module.d\n' \
+  >"$_exclude_project/bundles.tsv"
 printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\nworkstation-lean\tNo primary root\troot\n' \
-  >"$_exclude_project/shell/release/install-variants"
+  >"$_exclude_project/variants.tsv"
 if (cd "$_exclude_project" && "$_link" compile --variant=workstation-lean lean-bare-out) >"$_test_root/exclude-bare.out" 2>&1; then
-  if grep -F '# order=contrib_shared_name' "$_exclude_project/lean-bare-out/installed-modules.bash" >/dev/null 2>&1 &&
-    ! grep -F 'root_ready' "$_exclude_project/lean-bare-out/installed-modules.bash" >/dev/null 2>&1; then
+  if grep -F '# order=contrib_shared_name' "$_exclude_project/lean-bare-out/bash.sh" >/dev/null 2>&1 &&
+    ! grep -F 'root_ready' "$_exclude_project/lean-bare-out/bash.sh" >/dev/null 2>&1; then
     pass "a bare variant exclusion removes only the named primary module"
   else
     fail "a bare variant exclusion removes only the named primary module"
@@ -757,7 +745,7 @@ fi
 
 # An exclusion that breaks a required dependency must name both modules, not
 # surface as the compiler's generic "unknown module".
-cat >"$_exclude_project/shell/module.d/needs_vendor.meta" <<'EOF'
+cat >"$_exclude_project/module.d/needs_vendor.meta" <<'EOF'
 name=needs_vendor
 version=
 side_effect=read-only
@@ -768,12 +756,11 @@ platforms=any
 exports=needs_vendor_ready
 load=modules/needs_vendor.sh
 EOF
-printf 'needs_vendor_ready() { :; }\n' >"$_exclude_project/shell/modules/needs_vendor.sh"
+printf 'needs_vendor_ready() { :; }\n' >"$_exclude_project/modules/needs_vendor.sh"
 printf '# bundle\tshell\troots\ndefault\tbash\tneeds_vendor\ndefault\tzsh\tneeds_vendor\ndefault\tksh\tneeds_vendor\n' \
-  >"$_exclude_project/shell/release/bundle-roots"
-printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\nworkstation-lean\tNo provider layer\tcontrib_shared_name@shell/layers/vendor/module.d\n' \
-  >"$_exclude_project/shell/release/install-variants"
-(cd "$_exclude_project" && "$_link" registry) >/dev/null 2>&1
+  >"$_exclude_project/bundles.tsv"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\nworkstation-lean\tNo provider layer\tcontrib_shared_name@layers/vendor/module.d\n' \
+  >"$_exclude_project/variants.tsv"
 if (cd "$_exclude_project" && "$_link" compile --variant=workstation-lean broken-out) >"$_test_root/exclude-broken.out" 2>&1; then
   fail "an exclusion that breaks a required dependency fails the compile"
   cat "$_test_root/exclude-broken.out" >&2
@@ -791,7 +778,7 @@ fi
 # A previous successful build must survive a bad variant or bundle: the
 # default output is replaced only after the new tree has compiled.
 if (cd "$_project" && "$_link" build --variant=default >/dev/null 2>&1); then
-  _kept_plan="$_project/build/release/generated/installed-modules.bash"
+  _kept_plan="$_project/build/release/plans/bash.sh"
   if (cd "$_project" && "$_link" build --variant=no-such-variant) >"$_test_root/typo-variant.out" 2>"$_test_root/typo-variant.err"; then
     fail "a typo variant does not build"
   elif [ -f "$_kept_plan" ]; then
@@ -799,7 +786,7 @@ if (cd "$_project" && "$_link" build --variant=default >/dev/null 2>&1); then
   else
     fail "a typo variant preserves the previous build output"
   fi
-  printf 'broken\tBroken\tno_such_module\n' >>"$_project/shell/release/install-variants"
+  printf 'broken\tBroken\tno_such_module\n' >>"$_project/variants.tsv"
   if (cd "$_project" && "$_link" build --variant=broken) >"$_test_root/typo-exclusion.out" 2>"$_test_root/typo-exclusion.err"; then
     fail "a variant with a bad exclusion does not build"
   elif [ -f "$_kept_plan" ]; then
@@ -807,7 +794,7 @@ if (cd "$_project" && "$_link" build --variant=default >/dev/null 2>&1); then
   else
     fail "a variant with a bad exclusion preserves the previous build output"
   fi
-  printf 'broken-bundle\tbash\tmissing_root\nbroken-bundle\tzsh\tmissing_root\nbroken-bundle\tksh\tmissing_root\n' >>"$_project/shell/release/bundle-roots"
+  printf 'broken-bundle\tbash\tmissing_root\nbroken-bundle\tzsh\tmissing_root\nbroken-bundle\tksh\tmissing_root\n' >>"$_project/bundles.tsv"
   if (cd "$_project" && "$_link" build --bundle=broken-bundle) >"$_test_root/typo-bundle.out" 2>"$_test_root/typo-bundle.err"; then
     fail "a bundle with a missing root does not build"
   elif [ -f "$_kept_plan" ]; then

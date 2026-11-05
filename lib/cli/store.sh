@@ -147,6 +147,13 @@ release_lock() {
     if [ -e "$_rg_tmp" ] || [ -L "$_rg_tmp" ]; then _cleanup_failed=1; fi
     _rg_tmp=""
   fi
+  if [ -n "${_publish_previous:-}" ]; then
+    # A publication that failed after moving the previous output aside left
+    # it here; the error already named the output, so keep the tree for the
+    # user rather than deleting the only copy.
+    printf 'valise: previous output kept at %s\n' "$_publish_previous/tree" >&2
+    _publish_previous=""
+  fi
   if [ -n "$_stage" ]; then
     remove_tree "$_stage" || _cleanup_failed=1
     _stage=""
@@ -237,10 +244,10 @@ source_path_is_physical() {
 validate_manifest() {
   _awk_path=$(trusted_utility_path awk) || return 1
   "$_awk_path" -F '\t' '
-    NR == 1 { if ($0 != "shell-profile-release-manifest-v1") exit 10; next }
+    NR == 1 { if ($0 != "valise-manifest-v2") exit 10; next }
     NR == 2 { if ($1 != "destination" || $2 != "source" || $3 != "source_mode" || $4 != "install_mode" || $5 != "bytes" || $6 != "sha256" || NF != 6) exit 11; next }
     NF == 0 { next }
-    NF != 6 || $1 == "" || $2 == "" || $1 !~ /^[A-Za-z0-9._\/-]+$/ || $2 !~ /^[A-Za-z0-9._\/-]+$/ || $1 ~ /^\// || $2 ~ /^\// || $1 ~ /\/$/ || $2 ~ /\/$/ || $1 ~ /^#/ || $1 == "destination" || $1 == "shell-profile-release-manifest-v1" || $3 !~ /^0(644|755)$/ || $4 != (($3 == "0644") ? "0444" : "0555") || $5 !~ /^[0-9]+$/ || length($6) != 64 || $6 !~ /^[0-9a-fA-F]+$/ || $1 ~ /(^|\/)\.($|\/)/ || index($1, "//") || $1 ~ /(^|\/)\.\.($|\/)/ || index($2, "//") || $2 ~ /(^|\/)\.($|\/)/ || $2 ~ /(^|\/)\.\.($|\/)/ || seen[$1]++ || seen_source[$2]++ { exit 12 }
+    NF != 6 || $1 == "" || $2 == "" || $1 !~ /^[A-Za-z0-9._\/-]+$/ || $2 !~ /^[A-Za-z0-9._\/-]+$/ || $1 ~ /^\// || $2 ~ /^\// || $1 ~ /\/$/ || $2 ~ /\/$/ || $1 ~ /^#/ || $1 == "destination" || $1 == "valise-manifest-v2" || $3 !~ /^0(644|755)$/ || $4 != (($3 == "0644") ? "0444" : "0555") || $5 !~ /^[0-9]+$/ || length($6) != 64 || $6 !~ /^[0-9a-fA-F]+$/ || $1 ~ /(^|\/)\.($|\/)/ || index($1, "//") || $1 ~ /(^|\/)\.\.($|\/)/ || index($2, "//") || $2 ~ /(^|\/)\.($|\/)/ || $2 ~ /(^|\/)\.\.($|\/)/ || seen[$1]++ || seen_source[$2]++ { exit 12 }
     { data_rows = 1 }
     END { if (NR < 3 || data_rows != 1) exit 13 }
   ' "$1"
@@ -333,8 +340,8 @@ prepare_manifest_rows() {
 }
 
 locate_manifest() {
-  if [ -f "./shell/install/profile-release.manifest" ]; then
-    printf '%s\n' "./shell/install/profile-release.manifest"
+  if [ -f "./manifest.tsv" ] && [ ! -L "./manifest.tsv" ]; then
+    printf '%s\n' "./manifest.tsv"
     return 0
   fi
   return 1
@@ -378,7 +385,7 @@ verify_release_dir() {
   fi
   while IFS="$(printf '\t')" read -r _dest _src _mode _imode _size _sha; do
     [ -n "$_dest" ] || continue
-    case "$_dest" in shell-profile-release-manifest-v1|destination) continue ;; esac
+    case "$_dest" in valise-manifest-v2|destination) continue ;; esac
     _verify_file="$_verify_dir/$_dest"
     [ -f "$_verify_file" ] || _verify_fail "release file missing: $_dest" || return 1
     [ ! -L "$_verify_file" ] || _verify_fail "release file must not be a symlink: $_dest" || return 1
@@ -535,11 +542,11 @@ cmd_release() {
         _manifest="$_target_manifest"
       else
         _manifest=$(locate_manifest) ||
-          die "cannot find shell/install/profile-release.manifest in the current directory"
+          die "cannot find manifest.tsv in the current directory"
       fi
-      prepare_manifest_rows "$_manifest" || die "cannot snapshot profile-release.manifest"
+      prepare_manifest_rows "$_manifest" || die "cannot snapshot manifest.tsv"
       _manifest="$_manifest_rows"
-      validate_manifest "$_manifest" || die "invalid profile-release.manifest schema or row"
+      validate_manifest "$_manifest" || die "invalid manifest.tsv schema or row"
       verify_release_dir "$_target_dir" "$_manifest" "$_target"
       _config_parent=$(path_parent "$VALISE_ACTIVE_LINK")
       if [ ! -d "$_config_parent" ]; then
@@ -683,11 +690,11 @@ cmd_install() {
   done
 
   _manifest_source=$(locate_manifest) ||
-    die "cannot find shell/install/profile-release.manifest in the current directory (run valise install from the release tree)"
-  _manifest_root=$(cd "$(path_parent "$_manifest_source")/../.." && pwd -P) || die "cannot resolve manifest source root"
-  prepare_manifest_rows "$_manifest_source" || die "cannot normalize profile-release.manifest"
+    die "cannot find manifest.tsv in the current directory (run valise install from a release tree built by valise build)"
+  _manifest_root=$(cd "$(path_parent "$_manifest_source")" && pwd -P) || die "cannot resolve manifest source root"
+  prepare_manifest_rows "$_manifest_source" || die "cannot normalize manifest.tsv"
   _manifest="$_manifest_rows"
-  validate_manifest "$_manifest" || die "invalid profile-release.manifest schema or row"
+  validate_manifest "$_manifest" || die "invalid manifest.tsv schema or row"
 
   # Release identity is content-derived; the schema header is not an ID.
   _release_id=$(file_sha256 "$_manifest") || die "no trusted SHA-256 utility available"
@@ -736,7 +743,7 @@ cmd_install() {
     # The manifest format is: destination source mode install_mode size sha256
     while IFS="$(printf '\t')" read -r _dest _src _mode _imode _size _sha; do
       [ -n "$_dest" ] || continue
-      case "$_dest" in \#*|shell-profile-release-manifest-v1|destination) continue ;; esac
+      case "$_dest" in \#*|valise-manifest-v2|destination) continue ;; esac
       case "$_src" in
         ""|.|./*|*/.|*/./*|*//*|/*|*/../*|../*|*/..|..*) die "invalid manifest source path: $_src" ;;
       esac
@@ -774,7 +781,7 @@ cmd_install() {
     _verify_ok=1
     while IFS="$(printf '\t')" read -r _dest _src _mode _imode _size _sha; do
       [ -n "$_dest" ] || continue
-      case "$_dest" in \#*|shell-profile-release-manifest-v1|destination) continue ;; esac
+      case "$_dest" in \#*|valise-manifest-v2|destination) continue ;; esac
       case "$_dest" in
         ""|.|./*|*/.|*/./*|*//*|/*|*/../*|../*|*/..|..*) die "invalid manifest destination path: $_dest" ;;
       esac
@@ -903,7 +910,7 @@ cmd_make_manifest() {
   [ -n "$_mm_tree" ] || die "usage: valise make-manifest <tree> [--output <file>]"
   [ -d "$_mm_tree" ] || die "manifest tree is not a directory: $_mm_tree"
   _mm_root=$(cd "$_mm_tree" && pwd -P) || die "cannot resolve manifest tree: $_mm_tree"
-  _mm_default_out="$_mm_root/shell/install/profile-release.manifest"
+  _mm_default_out="$_mm_root/manifest.tsv"
   if [ -z "$_mm_out" ]; then
     _mm_out="$_mm_default_out"
   fi
@@ -945,7 +952,7 @@ cmd_make_manifest() {
   _mm_nl='
 '
   _mm_count=0
-  printf '%s\n' "shell-profile-release-manifest-v1" >"$_mm_tmp" || die "cannot write manifest"
+  printf '%s\n' "valise-manifest-v2" >"$_mm_tmp" || die "cannot write manifest"
   printf 'destination\tsource\tsource_mode\tinstall_mode\tbytes\tsha256\n' >>"$_mm_tmp" || die "cannot write manifest"
   _mm_sorted=$(printf '%s\n' "$_mm_list" | LC_ALL=C "$_mm_sort_path") || die "cannot sort manifest tree listing"
   while IFS= read -r _mm_full || [ -n "$_mm_full" ]; do

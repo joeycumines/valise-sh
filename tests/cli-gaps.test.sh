@@ -368,7 +368,8 @@ fi
 # --- explain-bundles without python3 ---
 
 _project="$_test_root/project"
-mkdir -p "$_project/shell/module.d" "$_project/shell/modules" "$_project/shell/release"
+mkdir -p "$_project/module.d" "$_project/modules"
+: >"$_project/valise.conf"
 printf '%s\n' \
   'name=root_mod' \
   'version=1.0.0' \
@@ -380,8 +381,8 @@ printf '%s\n' \
   'exports=root_mod_ready' \
   \
   'load=modules/root_mod.sh' \
-  >"$_project/shell/module.d/root_mod.meta"
-printf 'root_mod_ready() { :; }\n' >"$_project/shell/modules/root_mod.sh"
+  >"$_project/module.d/root_mod.meta"
+printf 'root_mod_ready() { :; }\n' >"$_project/modules/root_mod.sh"
 printf '%s\n' \
   'name=dep_mod' \
   'version=1.0.0' \
@@ -393,12 +394,12 @@ printf '%s\n' \
   'exports=dep_mod_ready' \
   \
   'load=modules/dep_mod.sh' \
-  >"$_project/shell/module.d/dep_mod.meta"
-printf 'dep_mod_ready() { :; }\n' >"$_project/shell/modules/dep_mod.sh"
+  >"$_project/module.d/dep_mod.meta"
+printf 'dep_mod_ready() { :; }\n' >"$_project/modules/dep_mod.sh"
 printf '# bundle\tshell\troots\ndefault\tbash\tdep_mod\ndefault\tzsh\tdep_mod\n' \
-  >"$_project/shell/release/bundle-roots"
+  >"$_project/bundles.tsv"
 printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll modules\t\n' \
-  >"$_project/shell/release/install-variants"
+  >"$_project/variants.tsv"
 
 # A PATH without python3 proves the native implementation is used.
 _no_python_path="$_test_root/no-python-bin"
@@ -422,7 +423,7 @@ else
   fail "explain-bundles runs without python3"
   cat "$_test_root/explain-bundles.err" >&2
 fi
-if grep -F 'Installed bundle resolution' "$_test_root/explain-bundles.out" >/dev/null 2>&1 &&
+if grep -F 'Bundle resolution' "$_test_root/explain-bundles.out" >/dev/null 2>&1 &&
   grep -F 'dep_mod' "$_test_root/explain-bundles.out" >/dev/null 2>&1 &&
   grep -F 'root_mod' "$_test_root/explain-bundles.out" >/dev/null 2>&1; then
   pass "explain-bundles reports the roots and the module closure"
@@ -454,35 +455,34 @@ fi
 # closure, a qualified exclusion removes its layer module, and shells=posix does
 # not make a module available under Fish.
 _closure_project="$_test_root/closure-project"
-mkdir -p "$_closure_project/shell/module.d" "$_closure_project/shell/modules" \
-  "$_closure_project/shell/layers/demo/module.d" "$_closure_project/shell/layers/demo/modules" \
-  "$_closure_project/shell/release"
+mkdir -p "$_closure_project/module.d" "$_closure_project/modules" \
+  "$_closure_project/layers/demo/module.d" "$_closure_project/layers/demo/modules"
+: >"$_closure_project/valise.conf"
 printf '%s\n' \
   'name=base_mod' 'version=' 'side_effect=read-only' 'requires=' \
   'optional=opt_mod contrib_demo' \
   'shells=posix' 'platforms=any' 'exports=base_mod_ready' \
-  'load=modules/base_mod.sh' >"$_closure_project/shell/module.d/base_mod.meta"
-printf 'base_mod_ready() { :; }\n' >"$_closure_project/shell/modules/base_mod.sh"
+  'load=modules/base_mod.sh' >"$_closure_project/module.d/base_mod.meta"
+printf 'base_mod_ready() { :; }\n' >"$_closure_project/modules/base_mod.sh"
 printf '%s\n' \
   'name=opt_mod' 'version=' 'side_effect=read-only' 'requires=' \
   'optional=' 'shells=posix' 'platforms=any' 'exports=opt_mod_ready' \
-  'load=modules/opt_mod.sh' >"$_closure_project/shell/module.d/opt_mod.meta"
-printf 'opt_mod_ready() { :; }\n' >"$_closure_project/shell/modules/opt_mod.sh"
+  'load=modules/opt_mod.sh' >"$_closure_project/module.d/opt_mod.meta"
+printf 'opt_mod_ready() { :; }\n' >"$_closure_project/modules/opt_mod.sh"
 printf '%s\n' \
   'name=contrib_demo' 'version=1.0.0' 'side_effect=read-only' 'requires=' \
   'optional=' 'shells=posix' 'platforms=any' 'exports=contrib_demo_ready' \
-  'load=modules/contrib_demo.sh' >"$_closure_project/shell/layers/demo/module.d/contrib_demo.meta"
-printf 'contrib_demo_ready() { :; }\n' >"$_closure_project/shell/layers/demo/modules/contrib_demo.sh"
-printf '# bundle\tshell\troots\ndefault\tbash\tbase_mod\ndefault\tfish\tbase_mod\n' \
-  >"$_closure_project/shell/release/bundle-roots"
-printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\tcontrib_demo@shell/layers/demo/module.d\n' \
-  >"$_closure_project/shell/release/install-variants"
+  'load=modules/contrib_demo.sh' >"$_closure_project/layers/demo/module.d/contrib_demo.meta"
+printf 'contrib_demo_ready() { :; }\n' >"$_closure_project/layers/demo/modules/contrib_demo.sh"
+printf '# bundle\tshell\troots\ndefault\tbash\tbase_mod\n' \
+  >"$_closure_project/bundles.tsv"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\tcontrib_demo@layers/demo/module.d\n' \
+  >"$_closure_project/variants.tsv"
 if (cd "$_closure_project" && "$_valise" explain-bundles) \
   >"$_test_root/explain-closure.out" 2>"$_test_root/explain-closure.err"; then
   if grep -F 'bash: 1 root(s), 2 module(s)' "$_test_root/explain-closure.out" >/dev/null 2>&1 &&
     grep -F 'module opt_mod' "$_test_root/explain-closure.out" >/dev/null 2>&1 &&
-    ! grep -F 'contrib_demo' "$_test_root/explain-closure.out" >/dev/null 2>&1 &&
-    grep -F 'fish: 1 root(s), 0 module(s)' "$_test_root/explain-closure.out" >/dev/null 2>&1; then
+    ! grep -F 'contrib_demo' "$_test_root/explain-closure.out" >/dev/null 2>&1; then
     pass "explain-bundles matches compile closure semantics"
   else
     fail "explain-bundles matches compile closure semantics"
@@ -493,9 +493,22 @@ else
   cat "$_test_root/explain-closure.err" >&2
 fi
 
+# shells=posix does not cover Fish: a Fish bundle row naming a posix-only root
+# is a configuration error that names the root and the shell.
+printf '# bundle\tshell\troots\ndefault\tbash\tbase_mod\ndefault\tfish\tbase_mod\n' \
+  >"$_closure_project/bundles.tsv"
+if (cd "$_closure_project" && "$_valise" explain-bundles) >/dev/null 2>"$_test_root/explain-fish.err"; then
+  fail "a Fish bundle row with a posix-only root is rejected"
+elif grep -F 'bundle root base_mod does not support shell fish' "$_test_root/explain-fish.err" >/dev/null 2>&1; then
+  pass "a Fish bundle row with a posix-only root is rejected"
+else
+  fail "a Fish bundle row with a posix-only root is rejected"
+  cat "$_test_root/explain-fish.err" >&2
+fi
+
 # --- layer-lint without python3 ---
 
-_layer="$_project/shell/layers/vendor"
+_layer="$_project/layers/vendor"
 mkdir -p "$_layer/module.d" "$_layer/modules/shared"
 printf '%s\n' \
   'name=contrib_vendor_tool' \
@@ -524,7 +537,7 @@ else
 fi
 
 # An unprefixed name must be rejected.
-mkdir -p "$_project/shell/layers/unprefixed/module.d" "$_project/shell/layers/unprefixed/modules/shared"
+mkdir -p "$_project/layers/unprefixed/module.d" "$_project/layers/unprefixed/modules/shared"
 printf '%s\n' \
   'name=no_prefix_module' \
   'version=1.0.0' \
@@ -536,8 +549,8 @@ printf '%s\n' \
   'exports=' \
   \
   'load=modules/shared/no_prefix_module.sh' \
-  >"$_project/shell/layers/unprefixed/module.d/no_prefix_module.meta"
-printf '# body\n' >"$_project/shell/layers/unprefixed/modules/shared/no_prefix_module.sh"
+  >"$_project/layers/unprefixed/module.d/no_prefix_module.meta"
+printf '# body\n' >"$_project/layers/unprefixed/modules/shared/no_prefix_module.sh"
 if (
   cd "$_project" &&
     PATH="$_no_python_path" HOME="$_test_root/home" \
@@ -549,7 +562,7 @@ else
 fi
 
 # An unversioned module must be rejected.
-mkdir -p "$_project/shell/layers/unversioned/module.d" "$_project/shell/layers/unversioned/modules/shared"
+mkdir -p "$_project/layers/unversioned/module.d" "$_project/layers/unversioned/modules/shared"
 printf '%s\n' \
   'name=contrib_unversioned' \
   'version=' \
@@ -561,8 +574,8 @@ printf '%s\n' \
   'exports=' \
   \
   'load=modules/shared/contrib_unversioned.sh' \
-  >"$_project/shell/layers/unversioned/module.d/contrib_unversioned.meta"
-printf '# body\n' >"$_project/shell/layers/unversioned/modules/shared/contrib_unversioned.sh"
+  >"$_project/layers/unversioned/module.d/contrib_unversioned.meta"
+printf '# body\n' >"$_project/layers/unversioned/modules/shared/contrib_unversioned.sh"
 if (
   cd "$_project" &&
     PATH="$_no_python_path" HOME="$_test_root/home" \
@@ -574,7 +587,7 @@ else
 fi
 
 # A broken load target must be rejected.
-mkdir -p "$_project/shell/layers/broken/module.d"
+mkdir -p "$_project/layers/broken/module.d"
 printf '%s\n' \
   'name=contrib_broken' \
   'version=1.0.0' \
@@ -586,7 +599,7 @@ printf '%s\n' \
   'exports=' \
   \
   'load=modules/shared/contrib_broken.sh' \
-  >"$_project/shell/layers/broken/module.d/contrib_broken.meta"
+  >"$_project/layers/broken/module.d/contrib_broken.meta"
 if (
   cd "$_project" &&
     PATH="$_no_python_path" HOME="$_test_root/home" \
@@ -598,7 +611,7 @@ else
 fi
 
 # A dependency outside the layer and outside the engine must be rejected.
-mkdir -p "$_project/shell/layers/outside/module.d" "$_project/shell/layers/outside/modules/shared"
+mkdir -p "$_project/layers/outside/module.d" "$_project/layers/outside/modules/shared"
 printf '%s\n' \
   'name=contrib_outside' \
   'version=1.0.0' \
@@ -610,8 +623,8 @@ printf '%s\n' \
   'exports=' \
   \
   'load=modules/shared/contrib_outside.sh' \
-  >"$_project/shell/layers/outside/module.d/contrib_outside.meta"
-printf '# body\n' >"$_project/shell/layers/outside/modules/shared/contrib_outside.sh"
+  >"$_project/layers/outside/module.d/contrib_outside.meta"
+printf '# body\n' >"$_project/layers/outside/modules/shared/contrib_outside.sh"
 if (
   cd "$_project" &&
     PATH="$_no_python_path" HOME="$_test_root/home" \
@@ -758,31 +771,24 @@ done
 # (5) layer-lint must accept a valid layer whose dependency sorts LAST.
 # The name lists are matched with " $name ", so they need a trailing
 # space or the final entry never matches.
-mkdir -p "$_test_root/order-project/shell/module.d" \
-  "$_test_root/order-project/shell/modules" \
-  "$_test_root/order-project/shell/layers/ordered/module.d" \
-  "$_test_root/order-project/shell/layers/ordered/modules/shared"
-printf '%s\n' \
-  'name=valise_platform_posix' 'version=1.0.0' 'side_effect=read-only' 'requires=' \
-  'optional=' 'shells=posix' 'platforms=any' 'exports=' \
-  'load=modules/valise_platform_posix.sh' \
-  >"$_test_root/order-project/shell/module.d/valise_platform_posix.meta"
-printf '# body\n' >"$_test_root/order-project/shell/modules/valise_platform_posix.sh"
+mkdir -p "$_test_root/order-project/layers/ordered/module.d" \
+  "$_test_root/order-project/layers/ordered/modules/shared"
+: >"$_test_root/order-project/valise.conf"
 for _ord_name in contrib_aaa contrib_zzz; do
   printf '%s\n' \
     "name=$_ord_name" 'version=1.0.0' 'side_effect=read-only' 'requires=' \
     'optional=' 'shells=posix' 'platforms=any' 'exports=' \
     "load=modules/shared/$_ord_name.sh" \
-    >"$_test_root/order-project/shell/layers/ordered/module.d/$_ord_name.meta"
+    >"$_test_root/order-project/layers/ordered/module.d/$_ord_name.meta"
   printf '# body\n' \
-    >"$_test_root/order-project/shell/layers/ordered/modules/shared/$_ord_name.sh"
+    >"$_test_root/order-project/layers/ordered/modules/shared/$_ord_name.sh"
 done
 # contrib_aaa depends on contrib_zzz, which sorts last.
 printf '%s\n' \
   'name=contrib_aaa' 'version=1.0.0' 'side_effect=read-only' \
   'requires=contrib_zzz' 'optional=' 'shells=posix' 'platforms=any' 'exports=' \
   'load=modules/shared/contrib_aaa.sh' \
-  >"$_test_root/order-project/shell/layers/ordered/module.d/contrib_aaa.meta"
+  >"$_test_root/order-project/layers/ordered/module.d/contrib_aaa.meta"
 if (
   cd "$_test_root/order-project" && "$_valise" layer-lint ordered
 ) >"$_test_root/layer-lint-order.out" 2>&1; then
@@ -888,16 +894,16 @@ fi
 _leak_home="$_test_root/leak-home"
 _leak_project="$_test_root/leak-project"
 _leak_tmp="$_test_root/leak-tmp"
-mkdir -p "$_leak_home" "$_leak_project/shell/module.d" "$_leak_project/shell/modules" \
-  "$_leak_project/shell/release" "$_leak_tmp"
+mkdir -p "$_leak_home" "$_leak_project/module.d" "$_leak_project/modules" "$_leak_tmp"
+: >"$_leak_project/valise.conf"
 printf '%s\n' \
   'name=leak_module' 'version=1.0.0' 'side_effect=read-only' 'requires=' \
   'optional=' 'shells=posix' 'platforms=any' 'exports=' \
   'load=modules/leak_module.sh' \
-  >"$_leak_project/shell/module.d/leak_module.meta"
-printf '# body\n' >"$_leak_project/shell/modules/leak_module.sh"
+  >"$_leak_project/module.d/leak_module.meta"
+printf '# body\n' >"$_leak_project/modules/leak_module.sh"
 printf '# bundle\tshell\troots\ndefault\tbash\tleak_module\n' \
-  >"$_leak_project/shell/release/bundle-roots"
+  >"$_leak_project/bundles.tsv"
 if (
   cd "$_leak_project" &&
     TMPDIR="$_leak_tmp" HOME="$_leak_home" \

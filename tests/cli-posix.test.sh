@@ -170,7 +170,7 @@ else
   fail "make-manifest writes a manifest for a tree"
 fi
 check_output_contains "make-manifest reports file count" "2 files" cat "$_test_home/make-manifest.out"
-_mm_manifest="$_mm_tree/shell/install/profile-release.manifest"
+_mm_manifest="$_mm_tree/manifest.tsv"
 _mm_row1=$(awk -F'\t' 'NR==3 { print $1, $2, $3, $4 }' "$_mm_manifest")
 if [ "$_mm_row1" = "bin/tool.sh bin/tool.sh 0755 0555" ]; then
   pass "make-manifest records executable mode pair"
@@ -208,7 +208,7 @@ chmod 0755 "$_mm_outdir"
 if "$_valise" make-manifest "$_mm_tree" --output "$_mm_outdir" >/dev/null 2>&1; then
   fail "make-manifest rejects a directory output"
 elif [ "$(stat -c %a "$_mm_outdir" 2>/dev/null || stat -f %Lp "$_mm_outdir")" = 755 ] &&
-  [ ! -e "$_mm_outdir/profile-release.manifest" ]; then
+  [ ! -e "$_mm_outdir/manifest.tsv" ]; then
   pass "make-manifest rejects a directory output without changing it"
 else
   fail "make-manifest rejects a directory output without changing it"
@@ -285,10 +285,10 @@ if command -v npm >/dev/null 2>&1; then
   _pack_probe="$_test_home/pack-probe"
   mkdir -p "$_pack_probe/examples/profile-project/build/release" \
            "$_pack_probe/examples/e2e/build/release" \
-           "$_pack_probe/examples/profile-project/shell"
+           "$_pack_probe/examples/profile-project/modules"
   printf 'generated\n' >"$_pack_probe/examples/profile-project/build/release/plan.sh"
   printf 'generated\n' >"$_pack_probe/examples/e2e/build/release/plan.sh"
-  printf 'source\n' >"$_pack_probe/examples/profile-project/shell/keep.sh"
+  printf 'source\n' >"$_pack_probe/examples/profile-project/modules/keep.sh"
   # A build directory nested below a subdirectory is the case that a
   # single-level '!examples/*/build/' would miss, so pin it too.
   mkdir -p "$_pack_probe/examples/profile-project/vendor/dep/build/release"
@@ -310,7 +310,7 @@ if command -v npm >/dev/null 2>&1; then
     else
       fail "npm pack excludes generated examples build output (no example files listed)"
     fi
-    if printf '%s\n' "$_pack_out" | grep -Eq '"path": *"examples/profile-project/shell/keep\.sh"'; then
+    if printf '%s\n' "$_pack_out" | grep -Eq '"path": *"examples/profile-project/modules/keep\.sh"'; then
       pass "npm pack still ships example project sources"
     else
       fail "npm pack still ships example project sources"
@@ -394,7 +394,7 @@ fi
 
 # --- Install (requires manifest context) ---
 # Create a minimal fake manifest for testing
-_manifest_dir="$_test_home/repo/shell/install"
+_manifest_dir="$_test_home/repo"
 mkdir -p "$_manifest_dir"
 _release_sha="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 _fixture_source="$_test_home/repo/fixture.sh"
@@ -411,9 +411,9 @@ else
   exit 1
 fi
 printf '%s\n' \
-  'shell-profile-release-manifest-v1' \
+  'valise-manifest-v2' \
   'destination	source	source_mode	install_mode	bytes	sha256' \
-  "fixture.sh	fixture.sh	0644	0444	10	$_fixture_digest" > "$_manifest_dir/profile-release.manifest"
+  "fixture.sh	fixture.sh	0644	0444	10	$_fixture_digest" > "$_manifest_dir/manifest.tsv"
 
 # Test install from repo root context
 (cd "$_test_home/repo" && "$_valise" install 2>&1)

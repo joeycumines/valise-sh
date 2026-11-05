@@ -6,26 +6,31 @@
 # Emit the POSIX integration block for the active release.
 #
 # It works in every POSIX shell and with both release shapes. A built release
-# carries generated/installed-modules.<shell> plans; an engine release carries
-# entrypoints/profile.sh and the loader. The plan for the running shell is tried
-# first, then the loader, so a startup file never silently loads nothing when
-# the release has a way to load. The guard makes several startup files safe: a
-# login shell that reads more than one of them loads the profile once.
+# carries plans/<shell>.sh for the shell classes its bundle covers; an engine
+# release carries entrypoints/profile.sh and the loader. The guard makes several
+# startup files safe: a login shell that reads more than one of them loads the
+# profile once. It is set only after a plan was sourced, so a shell started
+# before the first install, or while the release was missing, tries again from
+# the next startup file. A plan that failed is not re-run in the same shell;
+# VALISE_RELOAD=1 forces another attempt. The shell is named by the first of
+# KSH_VERSION, ZSH_VERSION and BASH_VERSION that is set; any other shell uses
+# the generic sh plan.
 print_posix_integration() {
   _pix_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
   printf '%s\n' \
     '# BEGIN valise managed block' \
     "_valise_active_link=$_pix_active_literal" \
     'if [ -z "${_valise_profile_loaded:-}" ] || [ "${VALISE_RELOAD:-}" = 1 ]; then' \
-    '  _valise_profile_loaded=1' \
-    '  if [ -n "${BASH_VERSION-}" ]; then _valise_plan=bash; elif [ -n "${ZSH_VERSION-}" ]; then _valise_plan=zsh; elif [ -n "${KSH_VERSION-}" ]; then _valise_plan=ksh; else _valise_plan=; fi' \
+    '  if [ -n "${KSH_VERSION-}" ]; then _valise_plan=ksh; elif [ -n "${ZSH_VERSION-}" ]; then _valise_plan=zsh; elif [ -n "${BASH_VERSION-}" ]; then _valise_plan=bash; else _valise_plan=sh; fi' \
     '  _valise_active=$(cd "$_valise_active_link" 2>/dev/null && pwd -P)' \
     '  if [ -n "$_valise_active" ]; then' \
-    '    if [ -n "$_valise_plan" ] && [ -f "$_valise_active/generated/installed-modules.$_valise_plan" ]; then' \
+    '    if [ -f "$_valise_active/plans/$_valise_plan.sh" ]; then' \
+    '      _valise_profile_loaded=1' \
     '      VALISE_MODULE_ROOT="$_valise_active"' \
-    '      . "$_valise_active/generated/installed-modules.$_valise_plan"' \
+    '      . "$_valise_active/plans/$_valise_plan.sh"' \
     '      unset VALISE_MODULE_ROOT' \
     '    elif [ -f "$_valise_active/entrypoints/profile.sh" ]; then' \
+    '      _valise_profile_loaded=1' \
     '      VALISE_ROOT="$_valise_active"' \
     '      . "$_valise_active/entrypoints/profile.sh"' \
     '    fi' \
@@ -35,6 +40,18 @@ print_posix_integration() {
     'unset _valise_active_link' \
     '# END valise managed block'
   unset _pix_active_literal
+}
+
+# integration_markers_paired <file>
+# Succeed when every BEGIN marker of the managed block is followed by an END
+# marker before the next BEGIN, and no END appears without a BEGIN.
+integration_markers_paired() {
+  _imp_awk=$(trusted_utility_path awk) || return 1
+  "$_imp_awk" '
+    /^# BEGIN valise managed block$/ { if (open) bad = 1; open = 1; next }
+    /^# END valise managed block$/ { if (!open) bad = 1; open = 0; next }
+    END { exit (bad || open) ? 1 : 0 }
+  ' "$1"
 }
 
 cmd_init() {

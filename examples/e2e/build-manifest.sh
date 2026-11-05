@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: MIT
 
 # build-manifest.sh: vendor engine files into an e2e release tree and
-# generate a profile-release.manifest with correct sizes and SHA-256 digests.
+# write its manifest.tsv with correct sizes and SHA-256 digests.
 #
 # Usage: sh build-manifest.sh [output-dir]
 # Default output-dir: examples/e2e/build/release

@@ -9,6 +9,14 @@ set -eu
 
 VALISE_VERSION="0.2.0"
 
+# The path this CLI was invoked by, made absolute before -C can change the
+# working directory. The Fish hook calls the CLI back through it, so a package
+# symlink stays the entry point across upgrades.
+case "$0" in
+  /*) _valise_cli_path=$0 ;;
+  *) _valise_cli_path="$(pwd -P)/$0" ;;
+esac
+
 # Locate the engine from this script's physical path, so package installs
 # that expose bin/valise through a symlink (bun, npm) still find ../lib. This
 # runs before any helper is loaded, so it uses only parameter expansion,
@@ -48,6 +56,22 @@ done
 unset _valise_part _valise_self _valise_self_dir _valise_link
 
 # --- Main dispatch ---
+
+# -C <dir> runs the command as if valise had been started in dir.
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -C)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || die "-C needs a directory"
+      cd "$2" 2>/dev/null || die "cannot change to directory: $2"
+      shift 2
+      ;;
+    -C*)
+      cd "${1#-C}" 2>/dev/null || die "cannot change to directory: ${1#-C}"
+      shift
+      ;;
+    *) break ;;
+  esac
+done
 
 _cmd="${1:-}"
 # POSIX shells may treat a zero-argument shift as a fatal error under -e,
