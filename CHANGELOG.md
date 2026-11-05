@@ -35,6 +35,8 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
   runs a script there.
 - `valise env` prints the engine, project, and storage paths as shell-quoted
   `KEY=value` lines.
+- `valise test` and `valise run` export `VALISE_TEST_RELEASE` and
+  `VALISE_TEST_PLAN`, so a test can load the same modules in a child shell.
 - `valise uninstall [--keep-releases]` removes the managed blocks (keeping
   every other byte and the file mode), the startup files install created
   that are left empty, the Fish hook, the owned command stubs, the active
@@ -106,6 +108,9 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 - `valise explain-variant` counts the roots and modules a variant keeps per
   shell, resolving qualified names.
 - `bin/valise` is a dispatcher over the parts in `lib/cli/`.
+- The package `files` list names file types per directory, so packing a
+  local tree ships only the runtime, the docs, and the example sources, not
+  stray local files.
 
 ### Removed
 

@@ -102,6 +102,7 @@ release_activate() {
   prepare_manifest_rows "$_ra_manifest" || die "cannot snapshot the release manifest"
   validate_manifest "$_manifest_rows" || die "invalid release manifest snapshot"
   verify_release_dir "$_ra_dir" "$_manifest_rows" "$_ra_id"
+  release_commands "$_ra_dir" >/dev/null || die "release $_ra_id lists an invalid command name"
   _ra_config_parent=$(path_parent "$VALISE_ACTIVE_LINK")
   if [ ! -d "$_ra_config_parent" ]; then
     _ra_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
@@ -168,20 +169,38 @@ install_txn_abort() {
     fi
   fi
   if [ "$_txn_had_previous" -eq 1 ]; then
-    (write_previous_record "$_txn_old_previous") >/dev/null 2>&1 ||
+    (
+      trap '[ -z "${_prev_tmp:-}" ] || [ -z "$_ita_rm" ] || "$_ita_rm" -f "$_prev_tmp"' EXIT
+      write_previous_record "$_txn_old_previous"
+    ) >/dev/null 2>&1 ||
       printf 'valise: cannot restore the previous-release record\n' >&2
   elif [ -n "$_ita_rm" ]; then
     "$_ita_rm" -f "$(previous_record_path)" 2>/dev/null || :
   fi
-  if [ -n "$_txn_old_target" ] && [ -d "$_txn_old_target" ] && [ -f "$(commands_ledger_path)" ]; then
-    (reconcile_commands "$_txn_old_target") >/dev/null 2>&1 ||
-      printf 'valise: cannot move the command stubs back to the restored release\n' >&2
+  # The subshells remove their own staging files: a die inside them exits
+  # the subshell, and this process's lock handler never saw those names.
+  if [ -f "$(commands_ledger_path)" ]; then
+    if [ -n "$_txn_old_target" ] && [ -d "$_txn_old_target" ]; then
+      (
+        trap 'for _t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do [ -z "$_t" ] || [ -z "$_ita_rm" ] || "$_ita_rm" -f "$_t"; done' EXIT
+        reconcile_commands "$_txn_old_target"
+      ) >/dev/null 2>&1 ||
+        printf 'valise: cannot move the command stubs back to the restored release\n' >&2
+    elif [ -z "$_txn_old_target" ]; then
+      # No release was active before, so no stub may point at one now.
+      (remove_owned_commands) >/dev/null 2>&1 ||
+        printf 'valise: cannot remove the command stubs this install published\n' >&2
+    fi
   fi
   if [ -n "$_txn_changed" ]; then
     printf 'valise: already updated (they load whichever release is active):%s\n' "$_txn_changed" >&2
   fi
   unset _ita_ln _ita_rm
 }
+
+# The line a managed block carries when install appended it to a file whose
+# last line had no newline.
+VALISE_NONL_NOTE='# valise: the line before this block had no trailing newline'
 
 # --- Integration checks ---
 
@@ -215,8 +234,16 @@ EOF
     if [ -e "$_ipf_hook" ] && [ ! -f "$_ipf_hook" ]; then
       die "Fish hook path is not a regular file: $_ipf_hook"
     fi
+    # The hook directory is created when missing, so the nearest directory
+    # that exists must be writable: the hook is staged and renamed there.
+    _ipf_dir=$(path_parent "$_ipf_hook")
+    while [ ! -e "$_ipf_dir" ] && [ ! -L "$_ipf_dir" ]; do
+      _ipf_dir=$(path_parent "$_ipf_dir")
+    done
+    [ -d "$_ipf_dir" ] || die "Fish hook directory is not a directory: $_ipf_dir"
+    [ -w "$_ipf_dir" ] || die "cannot write the Fish hook in $_ipf_dir"
   fi
-  unset _ipf_home _ipf_targets _ipf_target _ipf_parent _ipf_hook
+  unset _ipf_home _ipf_targets _ipf_target _ipf_parent _ipf_hook _ipf_dir
 }
 
 # integration_unmanaged_lines <file>
@@ -298,10 +325,20 @@ uninstall_strip_block() {
   _usb_parent=$(path_parent "$_usb_target")
   _un_tmp=$(trusted_mktemp_at "$_usb_parent" file "$_usb_parent/.valise-uninstall.XXXXXX") ||
     die "cannot create uninstall staging file in $_usb_parent"
-  "$_usb_awk" '
-    /^# BEGIN valise managed block$/ { skip = 1; next }
-    /^# END valise managed block$/ { skip = 0; next }
-    !skip { print }
+  # A block carrying the no-newline note was appended to a last line that
+  # had no newline; when nothing follows the block, that newline goes too.
+  _VALISE_NOTE=$VALISE_NONL_NOTE "$_usb_awk" '
+    /^# BEGIN valise managed block$/ { inblock = 1; next }
+    inblock && $0 == ENVIRON["_VALISE_NOTE"] { had_note = 1; next }
+    inblock && /^# END valise managed block$/ { inblock = 0; closed = 1; next }
+    inblock { next }
+    { if (closed) after = 1; line[++n] = $0 }
+    END {
+      for (i = 1; i <= n; i++) {
+        if (i == n && had_note && !after) printf "%s", line[i]
+        else print line[i]
+      }
+    }
   ' "$_usb_target" >"$_un_tmp" || die "cannot read startup file: $_usb_target"
   _usb_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
   if [ ! -s "$_un_tmp" ] && startup_created_has "$_usb_target"; then
@@ -487,7 +524,7 @@ EOF
   fi
   printf 'commands\n'
   _ip_any=0
-  _ip_want=$(release_commands "$_ip_root")
+  _ip_want=$(release_commands "$_ip_root") || die "the release lists an invalid command name"
   if _ip_bin=$(commands_bin_dir); then
     _ip_ledger=$(commands_ledger_path)
     _ip_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"

@@ -167,13 +167,14 @@ release_lock() {
     if [ -e "$_hook_tmp" ] || [ -L "$_hook_tmp" ]; then _cleanup_failed=1; fi
     _hook_tmp=""
   fi
-  for _release_tmp in "${_rc_tmp:-}" "${_rc_stub:-}" "${_prev_tmp:-}" "${_dry_tmp:-}" "${_un_tmp:-}"; do
+  for _release_tmp in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}" "${_prev_tmp:-}" "${_dry_tmp:-}" "${_un_tmp:-}"; do
     [ -n "$_release_tmp" ] || continue
     [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_release_tmp" 2>/dev/null || :
     if [ -e "$_release_tmp" ] || [ -L "$_release_tmp" ]; then _cleanup_failed=1; fi
   done
   _rc_tmp=""
   _rc_stub=""
+  _rc_pub=""
   _prev_tmp=""
   _dry_tmp=""
   _un_tmp=""
@@ -693,6 +694,8 @@ cmd_install() {
     die "manifest.tsv does not list valise-release.conf: only a release tree built by valise build can be installed"
   [ "$(release_conf_value "$_manifest_root" format 2>/dev/null)" = 2 ] ||
     die "valise-release.conf does not declare format=2: rebuild the release with this valise"
+  release_commands "$_manifest_root" >/dev/null ||
+    die "valise-release.conf lists an invalid command name: rebuild the release with valise build"
 
   # Everything install will write must be writable before anything changes.
   if [ "$_install_integration" -eq 1 ]; then

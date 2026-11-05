@@ -185,6 +185,7 @@ trusted_utility_path() {
     mv) _trusted_candidates='/bin/mv /usr/bin/mv' ;;
     rm) _trusted_candidates='/bin/rm /usr/bin/rm' ;;
     stat) _trusted_candidates='/usr/bin/stat /bin/stat' ;;
+    tail) _trusted_candidates='/usr/bin/tail /bin/tail' ;;
     tr) _trusted_candidates='/usr/bin/tr /bin/tr' ;;
     wc) _trusted_candidates='/usr/bin/wc /bin/wc' ;;
     sha256sum) _trusted_candidates='/usr/bin/sha256sum /bin/sha256sum /sbin/sha256sum /opt/homebrew/bin/sha256sum /usr/local/bin/sha256sum' ;;

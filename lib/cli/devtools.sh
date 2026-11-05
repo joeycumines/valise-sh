@@ -72,7 +72,9 @@ devtool_build() {
 
 # devtool_runner <class> <release> <file> <body-file>
 # Write a script that loads the release for one shell class in strict mode,
-# defines valise_test_reload, then runs the body.
+# defines valise_test_reload, then runs the body. VALISE_TEST_RELEASE and
+# VALISE_TEST_PLAN are exported so the body can load the same modules in a
+# child shell.
 devtool_runner() {
   _dr_release=$(shell_quote "$2") || return 1
   _dr_cat=$(trusted_utility_path cat) || return 1
@@ -81,6 +83,8 @@ devtool_runner() {
     {
       printf '%s\n' \
         "set -gx SHELL_PROJECT_ROOT $_dr_release" \
+        "set -gx VALISE_TEST_RELEASE $_dr_release" \
+        'set -gx VALISE_TEST_PLAN "$VALISE_TEST_RELEASE/runtime/fish/profile.fish"' \
         'source "$SHELL_PROJECT_ROOT/runtime/fish/profile.fish"' \
         'or begin' \
         "  printf '%s\\n' 'valise: the modules failed to load' >&2" \
@@ -95,6 +99,9 @@ devtool_runner() {
     {
       printf '%s\n' \
         "_valise_dev_release=$_dr_release" \
+        'VALISE_TEST_RELEASE=$_valise_dev_release' \
+        "VALISE_TEST_PLAN=\$_valise_dev_release/plans/$1.sh" \
+        'export VALISE_TEST_RELEASE VALISE_TEST_PLAN' \
         'valise_test_reload() {' \
         '  VALISE_MODULE_ROOT=$_valise_dev_release' \
         '  VALISE_MODE=strict' \

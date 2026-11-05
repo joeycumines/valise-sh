@@ -58,7 +58,9 @@ builds, installs, and then uses the same writer.
 Each POSIX file receives a managed block between `# BEGIN valise managed
 block` and `# END valise managed block`. Existing content is preserved, and
 a repeat install replaces the block in place. A new block is appended with
-nothing added around it, so removing the block restores the file. A
+nothing added around it, so removing the block restores the file. When the
+file's last line has no newline, install adds one before the block and a note
+line inside it, and uninstall removes both. A
 symlinked POSIX startup file is reported and left untouched.
 
 Install checks every startup file and the Fish hook path before it changes
@@ -192,7 +194,10 @@ switching releases never rewrites a stub; install and `valise release use`
 add the stubs the new release needs and remove the ones it no longer has.
 
 valise records each stub it writes, with its SHA-256, in
-`$XDG_STATE_HOME/valise/commands.tsv`, and only touches files listed there:
+`$XDG_STATE_HOME/valise/commands.tsv` before writing the stub, so an
+interrupted install never leaves a stub valise does not know about. It only
+touches files listed there, and it refuses a release whose `commands=` holds
+a name the build would have rejected:
 
 - A file valise did not write is never replaced. Install reports the
   command as not published, and `valise doctor` reports the collision.

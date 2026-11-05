@@ -321,6 +321,37 @@ if command -v npm >/dev/null 2>&1; then
 else
   printf '  SKIP: npm pack example exclusion check (npm unavailable)\n'
 fi
+
+# The files list is an allowlist: packing a tree that holds the tracked files
+# plus stray local files must ship exactly the tracked payload.
+if command -v npm >/dev/null 2>&1 && command -v git >/dev/null 2>&1 &&
+  git -C "$_pkg_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  _allow_probe="$_test_home/allow-probe"
+  mkdir -p "$_allow_probe"
+  (cd "$_pkg_root" && git ls-files -z | xargs -0 tar cf -) | (cd "$_allow_probe" && tar xf -)
+  for _junk in lib/.env lib/cli/.cache/c module.d/x.meta.bak docs/notes/private.md \
+    examples/.env examples/e2e/node_modules/x/a.sh examples/e2e/build/release/plans/sh.sh \
+    modules/system/notes.txt bin/valise.orig entrypoints/scratch.txt; do
+    mkdir -p "$_allow_probe/${_junk%/*}"
+    printf 'junk\n' >"$_allow_probe/$_junk"
+  done
+  _allow_out=$(cd "$_allow_probe" && npm pack --dry-run --json 2>/dev/null |
+    sed -n 's/^ *"path": *"\([^"]*\)".*/\1/p' | LC_ALL=C sort) || _allow_out=
+  _allow_want=$(cd "$_pkg_root" && { git ls-files bin lib modules module.d entrypoints manifests docs examples |
+    grep -v -e '/\.gitkeep$' -e '/build/' -e '/\.gitignore$'; printf '%s\n' LICENSE CHANGELOG.md README.md package.json; } |
+    LC_ALL=C sort)
+  if [ -n "$_allow_out" ] && [ "$_allow_out" = "$_allow_want" ]; then
+    pass "npm pack ships exactly the tracked payload from a tree with stray files"
+  else
+    fail "npm pack ships exactly the tracked payload from a tree with stray files"
+    printf '%s\n' "$_allow_out" >"$_test_home/allow.got"
+    printf '%s\n' "$_allow_want" >"$_test_home/allow.want"
+    diff "$_test_home/allow.want" "$_test_home/allow.got" >&2 || :
+  fi
+  unset _allow_probe _allow_out _allow_want _junk
+else
+  printf '  SKIP: npm pack allowlist check (npm or git unavailable)\n'
+fi
 unset _pkg_root
 if command -v npm >/dev/null 2>&1; then
   _npm_root="$_test_home/npm-pack"

@@ -50,6 +50,11 @@ _v() {
     "$_valise" -C "$_v_project" "$@"
 }
 
+# _mode <path>: the permission bits as octal, on GNU and BSD stat.
+_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
 _active_id() {
   _ai=$(cd "$_home/.config/valise/active" 2>/dev/null && pwd -P) || return 1
   printf '%s\n' "${_ai##*/}"
@@ -116,6 +121,29 @@ elif [ "$(_active_id)" = "$_lean_id" ] && [ ! -e "$_home/.local/state/valise/pre
 else
   fail "an unpaired marker stops a later install with the active release unchanged"
   cat "$_tmp/preflight2.err" >&2
+fi
+
+_have_fish=0
+for _f in /opt/homebrew/bin/fish /usr/local/bin/fish /usr/bin/fish /bin/fish; do
+  [ ! -x "$_f" ] || _have_fish=1
+done
+if [ "$_have_fish" -eq 1 ]; then
+  _use_home fishdir
+  mkdir -p "$_home/.config/fish/conf.d"
+  chmod 555 "$_home/.config/fish/conf.d"
+  if _v "$_proj" apply >/dev/null 2>"$_tmp/fishdir.err"; then
+    fail "an unwritable Fish hook directory stops install before anything changes"
+  elif grep -F "cannot write the Fish hook in $_home/.config/fish/conf.d" "$_tmp/fishdir.err" >/dev/null &&
+    [ ! -L "$_home/.config/valise/active" ] && [ ! -e "$_home/.local/share/valise/releases" ] &&
+    [ ! -e "$_home/.profile" ]; then
+    pass "an unwritable Fish hook directory stops install before anything changes"
+  else
+    fail "an unwritable Fish hook directory stops install before anything changes"
+    cat "$_tmp/fishdir.err" >&2
+  fi
+  chmod 755 "$_home/.config/fish/conf.d"
+else
+  printf '  SKIP: Fish hook directory preflight (no trusted fish)\n'
 fi
 
 # --- A failure after the switch restores the previous release ---
@@ -279,6 +307,21 @@ elif [ -L "$_home/.config/valise/active" ] && [ "$(cksum <"$_home/.bashrc")" = "
   pass "uninstall stops on unpaired markers with nothing removed"
 else
   fail "uninstall stops on unpaired markers with nothing removed"
+fi
+
+_use_home nonl
+printf 'export FOO=1\n# user line\nno newline at end' >"$_home/.zshrc"
+chmod 600 "$_home/.zshrc"
+cp -p "$_home/.zshrc" "$_tmp/zshrc.orig"
+_v "$_proj" apply >/dev/null 2>&1
+_v "$_proj" apply >/dev/null 2>&1
+if grep -Fx 'no newline at end' "$_home/.zshrc" >/dev/null &&
+  _v "$_proj" uninstall >"$_tmp/nonl.out" 2>&1 && cmp -s "$_tmp/zshrc.orig" "$_home/.zshrc" &&
+  [ "$(_mode "$_home/.zshrc")" = 600 ]; then
+  pass "uninstall restores a startup file whose last line had no newline"
+else
+  fail "uninstall restores a startup file whose last line had no newline"
+  od -c "$_home/.zshrc" | tail -3 >&2
 fi
 
 # --- apply --dry-run ---

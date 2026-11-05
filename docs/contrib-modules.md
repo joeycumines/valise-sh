@@ -119,9 +119,18 @@ The output names each run (`ok hello [bash] tests/hello.sh`), shows a
 failing test's output, and ends with a count; any failure makes the command
 fail. A test that needs a file before the module loads (a secret, a config
 file) writes it and calls `valise_test_reload`, which loads the module again.
+A test that starts another shell loads the module there from
+`VALISE_TEST_PLAN`, the plan the test was loaded with, with
+`VALISE_MODULE_ROOT` set to `VALISE_TEST_RELEASE`:
+
+```sh
+bash -c 'VALISE_MODULE_ROOT=$VALISE_TEST_RELEASE; . "$VALISE_TEST_PLAN"; hello world'
+```
+
 Tests see `VALISE_TEST_ROOT` (the scratch directory, which holds `HOME`),
-`VALISE_TEST_MODULE`, `VALISE_TEST_MODULE_DIR`, `VALISE_TEST_SHELL`, and
-`VALISE_PROJECT_ROOT`. Fish tests (`.fish`) run only in Fish; other tests
+`VALISE_TEST_MODULE`, `VALISE_TEST_MODULE_DIR`, `VALISE_TEST_SHELL`,
+`VALISE_TEST_RELEASE`, `VALISE_TEST_PLAN` (`runtime/fish/profile.fish` in
+Fish), and `VALISE_PROJECT_ROOT`. Fish tests (`.fish`) run only in Fish; other tests
 run only in POSIX shells.
 
 `valise run [--shell=<class>] [--module=<m>]... [--bundle=<b>]

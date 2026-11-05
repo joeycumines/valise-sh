@@ -64,7 +64,10 @@ _meta "$_proj/module.d/main.meta" name=main side_effect=read-only 'requires=cont
 printf 'main_ready() { printf "ready:%%s\\n" "$*"; }\n' >"$_proj/modules/main.sh"
 printf '%s\n' '[ "$(main_ready x)" = ready:x ] || { echo "main_ready: $(main_ready x)"; exit 1; }' \
   '[ "$HOME" = "$VALISE_TEST_ROOT/home" ] || { echo "HOME=$HOME"; exit 1; }' \
-  '[ "$VALISE_TEST_MODULE" = main ] || exit 1' >"$_proj/tests/main.sh"
+  '[ "$VALISE_TEST_MODULE" = main ] || exit 1' \
+  '[ -f "$VALISE_TEST_PLAN" ] && [ "${VALISE_TEST_PLAN%/plans/*}" = "$VALISE_TEST_RELEASE" ] || { echo "plan=$VALISE_TEST_PLAN"; exit 1; }' \
+  '_child=$(/bin/sh -c '"'"'VALISE_MODULE_ROOT=$VALISE_TEST_RELEASE VALISE_MODE=strict; . "$VALISE_TEST_PLAN" && main_ready child'"'"')' \
+  '[ "$_child" = ready:child ] || { echo "child shell: $_child"; exit 1; }' >"$_proj/tests/main.sh"
 _meta "$_proj/module.d/secrets.meta" name=secrets side_effect=local-secret shells=posix platforms=any \
   exports=secret_loaded load=modules/secrets.sh tests=tests/secrets.sh
 cat >"$_proj/modules/secrets.sh" <<'EOF'

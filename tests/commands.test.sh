@@ -304,6 +304,76 @@ else
   fail "VALISE_BIN_DIR chooses the command directory"
 fi
 
+# --- Release contents are not trusted for command names ---
+
+_home4="$_tmp/home4"
+mkdir -p "$_home4"
+_evil="$_tmp/evil-release"
+cp -R "$_proj/build/release" "$_evil"
+chmod -R u+w "$_evil"
+sed 's/^commands=.*/commands=hello ..\/..\/escaped-stub/' "$_evil/valise-release.conf" >"$_tmp/conf" &&
+  cat "$_tmp/conf" >"$_evil/valise-release.conf"
+rm -f "$_evil/manifest.tsv"
+"$_valise" make-manifest "$_evil" >/dev/null 2>&1
+if (cd "$_evil" && env -i HOME="$_home4" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home4/.local/share" \
+  XDG_CONFIG_HOME="$_home4/.config" XDG_STATE_HOME="$_home4/.local/state" SHELL=/bin/sh \
+  "$_valise" install) >"$_tmp/evil.out" 2>&1; then
+  fail "install refuses a release that lists an invalid command name"
+elif grep -F 'invalid command name' "$_tmp/evil.out" >/dev/null &&
+  [ ! -e "$_home4/escaped-stub" ] && [ ! -e "$_home4/.local/bin" ] && [ ! -e "$_home4/.config/valise/active" ]; then
+  pass "install refuses a release that lists an invalid command name"
+else
+  fail "install refuses a release that lists an invalid command name"
+  cat "$_tmp/evil.out" >&2
+fi
+
+# --- An interrupted publication leaves no stub valise does not own ---
+
+_many="$_tmp/many"
+mkdir -p "$_many/module.d" "$_many/modules"
+printf '%s\n' 'bundle=default' 'variant=default' >"$_many/valise.conf"
+_names=
+_i=0
+: >"$_many/modules/many.sh"
+while [ "$_i" -lt 400 ]; do
+  _names="$_names c$_i"
+  printf 'c%d() { :; }\n' "$_i" >>"$_many/modules/many.sh"
+  _i=$((_i + 1))
+done
+_meta "$_many/module.d/many.meta" many '' posix "${_names# }" modules/many.sh "${_names# }"
+printf 'bundle\tshell\troots\ndefault\tsh\tmany\n' >"$_many/bundles.tsv"
+_v "$_many" build >/dev/null 2>&1
+for _scenario in first second; do
+  _home5="$_tmp/home5-$_scenario"
+  mkdir -p "$_home5"
+  _env5="HOME=$_home5 XDG_DATA_HOME=$_home5/.local/share XDG_CONFIG_HOME=$_home5/.config XDG_STATE_HOME=$_home5/.local/state"
+  if [ "$_scenario" = second ]; then
+    (cd "$_proj/build/release" && env -i $_env5 PATH=/usr/bin:/bin SHELL=/bin/sh "$_valise" install) >/dev/null 2>&1
+  fi
+  (cd "$_many/build/release" && exec env -i $_env5 PATH=/usr/bin:/bin SHELL=/bin/sh "$_valise" install) \
+    >"$_tmp/many-$_scenario.out" 2>&1 &
+  _pid=$!
+  _n=0
+  while [ ! -e "$_home5/.local/bin/c3" ] && [ "$_n" -lt 6000 ] && kill -0 "$_pid" 2>/dev/null; do
+    sleep 0.01 2>/dev/null || sleep 1
+    _n=$((_n + 1))
+  done
+  _seen=0
+  [ ! -e "$_home5/.local/bin/c3" ] || _seen=1
+  kill -TERM "$_pid" 2>/dev/null || :
+  _rc=0
+  wait "$_pid" || _rc=$?
+  _left=$(ls "$_home5/.local/bin" 2>/dev/null | grep -E '^c[0-9]+$' || :)
+  if [ "$_rc" -eq 0 ] || [ "$_seen" -eq 0 ]; then
+    printf '  SKIP: the install was not interrupted while publishing stubs (%s install)\n' "$_scenario"
+  elif [ -z "$_left" ]; then
+    pass "an install interrupted while publishing stubs removes them ($_scenario install)"
+  else
+    fail "an install interrupted while publishing stubs removes them ($_scenario install)"
+    printf '    left: %s\n' $_left >&2
+  fi
+done
+
 printf '\n=== published commands summary ===\n'
 printf 'Total: %d  Pass: %d  Fail: %d\n' "$_total" "$_pass" "$_fail"
 [ "$_fail" -eq 0 ] || exit 1
