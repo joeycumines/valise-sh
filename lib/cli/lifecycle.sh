@@ -204,8 +204,22 @@ VALISE_NONL_NOTE='# valise: the line before this block had no trailing newline'
 
 # --- Integration checks ---
 
-# integration_preflight: fail before anything changes when install could not
-# write the integration it is about to write.
+# preflight_dir_writable <dir> <what>: fail unless <dir>, or the nearest
+# ancestor that exists when <dir> does not, is a writable directory. Install
+# creates missing directories and stages files beside their targets.
+preflight_dir_writable() {
+  _pdw_dir=$1
+  while [ ! -e "$_pdw_dir" ] && [ ! -L "$_pdw_dir" ]; do
+    _pdw_dir=$(path_parent "$_pdw_dir")
+  done
+  [ -d "$_pdw_dir" ] || die "$2 directory is not a directory: $_pdw_dir"
+  [ -w "$_pdw_dir" ] || die "cannot write the $2 in $_pdw_dir"
+  unset _pdw_dir
+}
+
+# integration_preflight <release-dir>: fail before anything changes when
+# install could not write the integration or command stubs it is about to
+# write.
 integration_preflight() {
   if [ -n "${HOME:-}" ]; then
     _ipf_home=$(path_normalize "$HOME") || die "cannot resolve HOME"
@@ -234,16 +248,15 @@ EOF
     if [ -e "$_ipf_hook" ] && [ ! -f "$_ipf_hook" ]; then
       die "Fish hook path is not a regular file: $_ipf_hook"
     fi
-    # The hook directory is created when missing, so the nearest directory
-    # that exists must be writable: the hook is staged and renamed there.
-    _ipf_dir=$(path_parent "$_ipf_hook")
-    while [ ! -e "$_ipf_dir" ] && [ ! -L "$_ipf_dir" ]; do
-      _ipf_dir=$(path_parent "$_ipf_dir")
-    done
-    [ -d "$_ipf_dir" ] || die "Fish hook directory is not a directory: $_ipf_dir"
-    [ -w "$_ipf_dir" ] || die "cannot write the Fish hook in $_ipf_dir"
+    preflight_dir_writable "$(path_parent "$_ipf_hook")" "Fish hook"
   fi
-  unset _ipf_home _ipf_targets _ipf_target _ipf_parent _ipf_hook _ipf_dir
+  # Stubs are written when the release publishes commands and removed when a
+  # ledger lists stubs this release no longer provides.
+  if [ -n "$(release_commands "$1")" ] || [ -f "$(commands_ledger_path)" ]; then
+    _ipf_bin=$(commands_bin_dir) || die "cannot resolve the command directory: set HOME or VALISE_BIN_DIR"
+    preflight_dir_writable "$_ipf_bin" "command stubs"
+  fi
+  unset _ipf_home _ipf_targets _ipf_target _ipf_parent _ipf_hook _ipf_bin
 }
 
 # integration_unmanaged_lines <file>
@@ -327,7 +340,11 @@ uninstall_strip_block() {
     die "cannot create uninstall staging file in $_usb_parent"
   # A block carrying the no-newline note was appended to a last line that
   # had no newline; when nothing follows the block, that newline goes too.
-  _VALISE_NOTE=$VALISE_NONL_NOTE "$_usb_awk" '
+  # Text after the block keeps the file's own ending (nonl: no final newline).
+  _usb_tail=$(trusted_utility_path tail) || die "no trusted tail utility available"
+  _usb_nonl=0
+  [ ! -s "$_usb_target" ] || [ -z "$("$_usb_tail" -c 1 "$_usb_target")" ] || _usb_nonl=1
+  _VALISE_NOTE=$VALISE_NONL_NOTE "$_usb_awk" -v nonl="$_usb_nonl" '
     /^# BEGIN valise managed block$/ { inblock = 1; next }
     inblock && $0 == ENVIRON["_VALISE_NOTE"] { had_note = 1; next }
     inblock && /^# END valise managed block$/ { inblock = 0; closed = 1; next }
@@ -335,7 +352,7 @@ uninstall_strip_block() {
     { if (closed) after = 1; line[++n] = $0 }
     END {
       for (i = 1; i <= n; i++) {
-        if (i == n && had_note && !after) printf "%s", line[i]
+        if (i == n && ((had_note && !after) || (nonl && after))) printf "%s", line[i]
         else print line[i]
       }
     }
@@ -356,7 +373,7 @@ uninstall_strip_block() {
     _un_tmp=""
     info "removed the managed block from $_usb_target"
   fi
-  unset _usb_target _usb_awk _usb_parent _usb_rm _usb_mode _usb_chmod _usb_mv
+  unset _usb_target _usb_awk _usb_tail _usb_nonl _usb_parent _usb_rm _usb_mode _usb_chmod _usb_mv
 }
 
 cmd_uninstall() {

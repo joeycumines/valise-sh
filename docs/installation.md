@@ -60,13 +60,16 @@ block` and `# END valise managed block`. Existing content is preserved, and
 a repeat install replaces the block in place. A new block is appended with
 nothing added around it, so removing the block restores the file. When the
 file's last line has no newline, install adds one before the block and a note
-line inside it, and uninstall removes both. A
-symlinked POSIX startup file is reported and left untouched.
+line inside it, and uninstall removes both. Rows or lines after the block
+keep the file's own ending, newline or not, and a repeat install leaves them
+alone. A symlinked POSIX startup file is reported and left untouched.
 
-Install checks every startup file and the Fish hook path before it changes
-the active release. An unpaired marker, a startup path that is not a regular
-file, a directory install cannot write, or a Fish hook path that is a symlink
-or a directory stops the install with nothing changed. If a later step fails
+Install checks every startup file, the Fish hook path, and the command
+directory before it changes the active release. The command directory is
+checked only when the release publishes commands or a command ledger exists.
+An unpaired marker, a startup path that is not a regular file, a directory
+install cannot write, a command directory it cannot write, or a Fish hook
+path that is a symlink or a directory stops the install with nothing changed. If a later step fails
 anyway, install puts the previous active release back (or removes the active
 link when there was none) and names the files it had already written. Those
 files load whichever release is active, so they need no repair.

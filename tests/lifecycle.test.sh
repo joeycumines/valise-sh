@@ -146,19 +146,40 @@ else
   printf '  SKIP: Fish hook directory preflight (no trusted fish)\n'
 fi
 
+_use_home bindir
+: >"$_tmp/not-a-dir"
+mkdir -p "$_tmp/ro-bin"
+chmod 555 "$_tmp/ro-bin"
+for _bad in "$_tmp/not-a-dir/bin" "$_tmp/ro-bin/bin"; do
+  _bin_override=$_bad
+  if _v "$_proj" apply >/dev/null 2>"$_tmp/bindir.err"; then
+    fail "an unusable command directory stops install before anything changes ($_bad)"
+  elif grep -F 'command stubs' "$_tmp/bindir.err" >/dev/null &&
+    [ ! -L "$_home/.config/valise/active" ] && [ ! -e "$_home/.local/share/valise/releases" ] &&
+    [ ! -e "$_home/.profile" ] && [ ! -e "$_home/.bashrc" ]; then
+    pass "an unusable command directory stops install before anything changes ($_bad)"
+  else
+    fail "an unusable command directory stops install before anything changes ($_bad)"
+    cat "$_tmp/bindir.err" >&2
+  fi
+done
+_bin_override=
+chmod 755 "$_tmp/ro-bin"
+
 # --- A failure after the switch restores the previous release ---
 
 _use_home txn
 _v "$_proj" apply --variant=lean >/dev/null 2>&1
 _lean_id=$(_active_id)
 _profile_before=$(cksum <"$_home/.profile")
-# The command directory sits under a regular file, so publishing hello fails
-# after the active link has moved.
-: >"$_tmp/not-a-dir"
-_bin_override="$_tmp/not-a-dir/bin"
+# The command ledger path is a directory, which preflight does not inspect,
+# so publishing hello fails after the active link has moved.
+_ledger="$_home/.local/state/valise/commands.tsv"
+rm -f "$_ledger"
+mkdir -p "$_ledger/x"
 _txn_rc=0
 _v "$_proj" apply >/dev/null 2>"$_tmp/txn.err" || _txn_rc=$?
-_bin_override=
+rm -rf "$_ledger"
 if [ "$_txn_rc" -eq 0 ]; then
   fail "a failure after the switch leaves the previous release active"
 elif [ "$(_active_id)" = "$_lean_id" ] &&
@@ -171,10 +192,10 @@ else
   cat "$_tmp/txn.err" >&2
 fi
 _use_home txn-first
-_bin_override="$_tmp/not-a-dir/bin"
+mkdir -p "$_home/.local/state/valise/commands.tsv/x"
 _txn_rc=0
 _v "$_proj" apply >/dev/null 2>"$_tmp/txn-first.err" || _txn_rc=$?
-_bin_override=
+rm -rf "$_home/.local/state/valise/commands.tsv"
 if [ "$_txn_rc" -eq 0 ]; then
   fail "a failed first install leaves no active release"
 elif [ ! -e "$_home/.config/valise/active" ] && [ ! -L "$_home/.config/valise/active" ] &&
@@ -321,6 +342,32 @@ if grep -Fx 'no newline at end' "$_home/.zshrc" >/dev/null &&
   pass "uninstall restores a startup file whose last line had no newline"
 else
   fail "uninstall restores a startup file whose last line had no newline"
+  od -c "$_home/.zshrc" | tail -3 >&2
+fi
+
+# Text after an existing block keeps the file's ending: re-applying changes
+# nothing and uninstall restores the file exactly.
+_use_home nonl-after
+_v "$_proj" apply >/dev/null 2>&1
+printf 'tail-no-nl' >>"$_home/.bashrc"
+cp -p "$_home/.bashrc" "$_tmp/bashrc.edited"
+_v "$_proj" apply >"$_tmp/nonl-after.out" 2>&1
+if cmp -s "$_tmp/bashrc.edited" "$_home/.bashrc" &&
+  grep -F "shell integration current: $_home/.bashrc" "$_tmp/nonl-after.out" >/dev/null; then
+  pass "re-applying leaves text after the block without a final newline unchanged"
+else
+  fail "re-applying leaves text after the block without a final newline unchanged"
+  od -c "$_home/.bashrc" | tail -3 >&2
+fi
+printf 'export A=1\nbefore\n' >"$_home/.zshrc"
+cp -p "$_home/.zshrc" "$_tmp/zshrc.plain"
+_v "$_proj" apply >/dev/null 2>&1
+printf 'after' >>"$_home/.zshrc"
+_v "$_proj" uninstall >/dev/null 2>&1
+if [ "$(od -c "$_home/.zshrc")" = "$(printf 'export A=1\nbefore\nafter' | od -c)" ]; then
+  pass "uninstall keeps text after the block without a final newline"
+else
+  fail "uninstall keeps text after the block without a final newline"
   od -c "$_home/.zshrc" | tail -3 >&2
 fi
 

@@ -91,12 +91,14 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 - The POSIX managed block picks the plan for `ksh`, `zsh`, `bash`, or `sh`
   and sets its guard only after the plan loaded, so a later startup file
   retries after a failure.
-- Install is transactional. It checks every startup file and the Fish hook
-  path before changing the active release and, if a later step fails,
+- Install is transactional. It checks every startup file, the Fish hook
+  path, and (when commands are published or already tracked) the command
+  directory before changing the active release and, if a later step fails,
   restores the previous active release, the previous-release record, and
   the command stubs, and names the files it already wrote. A new managed
   block is appended with nothing around it, so uninstall restores the file
-  exactly.
+  exactly. Text after a block keeps the file's ending, with or without a
+  final newline, and a repeat install rewrites nothing.
 - Install warns, and `valise doctor` fails, on a line outside a managed block
   that loads valise by hand.
 - `valise build` moves the previous `build/release` aside and restores it if
@@ -108,9 +110,9 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 - `valise explain-variant` counts the roots and modules a variant keeps per
   shell, resolving qualified names.
 - `bin/valise` is a dispatcher over the parts in `lib/cli/`.
-- The package `files` list names file types per directory, so packing a
-  local tree ships only the runtime, the docs, and the example sources, not
-  stray local files.
+- The package `files` list names every shipped file, so packing a local tree
+  ships only the runtime, the docs, and the example sources, not stray local
+  files. A test fails when a tracked file is missing from the list.
 
 ### Removed
 

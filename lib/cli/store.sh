@@ -699,7 +699,7 @@ cmd_install() {
 
   # Everything install will write must be writable before anything changes.
   if [ "$_install_integration" -eq 1 ]; then
-    integration_preflight
+    integration_preflight "$_manifest_root"
     if ! _install_unmanaged=$(integration_unmanaged_report); then
       info "warning: these lines load valise outside a managed block, so it may load twice; remove them:"
       printf '%s\n' "$_install_unmanaged"

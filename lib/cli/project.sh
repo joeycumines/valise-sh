@@ -731,25 +731,25 @@ project_release_strip() {
 
 # integration_render <target> <block>
 # Print the startup file as install would leave it: the block replaces the
-# first managed block, or is appended when there is none. Every other line is
+# first managed block, or is appended when there is none. Every other byte is
 # kept, so removing the block restores the file.
 integration_render() {
   if [ -f "$1" ]; then
     _ir_awk=$(trusted_utility_path awk) || return 1
     _ir_tail=$(trusted_utility_path tail) || return 1
-    # A file whose last line has no newline gets one before an appended
-    # block. The block then carries a note line, so uninstall can take that
-    # newline away again and restore the file exactly.
+    # nonl: the file's last line has no newline. An appended block puts one
+    # there and carries a note line, so uninstall can take that newline away
+    # again. A block that replaces an existing one leaves the end of the file
+    # as it was.
     _ir_nonl=0
     [ ! -s "$1" ] || [ -z "$("$_ir_tail" -c 1 "$1")" ] || _ir_nonl=1
     # The block travels through ENVIRON: awk -v would interpret its backslashes.
     _VALISE_BLOCK=$2 _VALISE_NOTE=$VALISE_NONL_NOTE "$_ir_awk" -v nonl="$_ir_nonl" '
       function emit(with_note,   at) {
-        if (!with_note) { print ENVIRON["_VALISE_BLOCK"]; return }
+        if (!with_note) { out = out ENVIRON["_VALISE_BLOCK"] "\n"; return }
         at = index(ENVIRON["_VALISE_BLOCK"], "\n")
-        print substr(ENVIRON["_VALISE_BLOCK"], 1, at - 1)
-        print ENVIRON["_VALISE_NOTE"]
-        print substr(ENVIRON["_VALISE_BLOCK"], at + 1)
+        out = out substr(ENVIRON["_VALISE_BLOCK"], 1, at - 1) "\n" ENVIRON["_VALISE_NOTE"] "\n" \
+          substr(ENVIRON["_VALISE_BLOCK"], at + 1) "\n"
       }
       /^# BEGIN valise managed block$/ { inblock = 1; had_note = 0; next }
       inblock && $0 == ENVIRON["_VALISE_NOTE"] { had_note = 1; next }
@@ -760,8 +760,12 @@ integration_render() {
         next
       }
       inblock { next }
-      { print }
-      END { if (!written) emit(nonl) }
+      { out = out $0 "\n" }
+      END {
+        if (!written) emit(nonl)
+        else if (nonl) out = substr(out, 1, length(out) - 1)
+        printf "%s", out
+      }
     ' "$1"
   else
     printf '%s\n' "$2"

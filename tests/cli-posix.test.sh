@@ -284,15 +284,16 @@ done
 # a built checkout must still ship only the intended example sources.
 if command -v npm >/dev/null 2>&1; then
   _pack_probe="$_test_home/pack-probe"
+  # One listed example file, then build output beside it and below it.
   mkdir -p "$_pack_probe/examples/profile-project/build/release" \
            "$_pack_probe/examples/e2e/build/release" \
-           "$_pack_probe/examples/profile-project/modules"
+           "$_pack_probe/examples/profile-project/modules" \
+           "$_pack_probe/examples/profile-project/vendor/dep/build/release"
+  printf 'source\n' >"$_pack_probe/examples/profile-project/modules/greeting.sh"
   printf 'generated\n' >"$_pack_probe/examples/profile-project/build/release/plan.sh"
   printf 'generated\n' >"$_pack_probe/examples/e2e/build/release/plan.sh"
-  printf 'source\n' >"$_pack_probe/examples/profile-project/modules/keep.sh"
   # A build directory nested below a subdirectory is the case that a
   # single-level '!examples/*/build/' would miss, so pin it too.
-  mkdir -p "$_pack_probe/examples/profile-project/vendor/dep/build/release"
   printf 'generated\n' >"$_pack_probe/examples/profile-project/vendor/dep/build/release/plan.sh"
   cp "$_pkg_root/package.json" "$_pack_probe/package.json"
   _pack_status=0
@@ -311,10 +312,14 @@ if command -v npm >/dev/null 2>&1; then
     else
       fail "npm pack excludes generated examples build output (no example files listed)"
     fi
-    if printf '%s\n' "$_pack_out" | grep -Eq '"path": *"examples/profile-project/modules/keep\.sh"'; then
-      pass "npm pack still ships example project sources"
+    # The file list is explicit, so an unlisted example file cannot ship and a
+    # deleted source makes npm fail; this probe pins the exclusion.
+    _pack_has=$(printf '%s\n' "$_pack_out" | grep -E '"path": *"examples/profile-project/modules/greeting\.sh"' | wc -l)
+    _pack_absent=$(printf '%s\n' "$_pack_out" | grep -E '"path": *"examples/profile-project/modules/keep\.sh"' | wc -l)
+    if [ "$_pack_has" -eq 1 ] && [ "$_pack_absent" -eq 0 ]; then
+      pass "npm pack ships listed example sources and nothing else"
     else
-      fail "npm pack still ships example project sources"
+      fail "npm pack ships listed example sources and nothing else"
     fi
   fi
   unset _pack_probe _pack_out _pack_status
@@ -322,8 +327,10 @@ else
   printf '  SKIP: npm pack example exclusion check (npm unavailable)\n'
 fi
 
-# The files list is an allowlist: packing a tree that holds the tracked files
-# plus stray local files must ship exactly the tracked payload.
+# The files list names every shipped file: packing a tree that holds the
+# tracked files plus stray local files, including ones whose names look like
+# shipped sources, must ship exactly the tracked payload. A tracked file
+# missing from the list fails here too.
 if command -v npm >/dev/null 2>&1 && command -v git >/dev/null 2>&1 &&
   git -C "$_pkg_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   _allow_probe="$_test_home/allow-probe"
@@ -331,7 +338,9 @@ if command -v npm >/dev/null 2>&1 && command -v git >/dev/null 2>&1 &&
   (cd "$_pkg_root" && git ls-files -z | xargs -0 tar cf -) | (cd "$_allow_probe" && tar xf -)
   for _junk in lib/.env lib/cli/.cache/c module.d/x.meta.bak docs/notes/private.md \
     examples/.env examples/e2e/node_modules/x/a.sh examples/e2e/build/release/plans/sh.sh \
-    modules/system/notes.txt bin/valise.orig entrypoints/scratch.txt; do
+    modules/system/notes.txt bin/valise.orig entrypoints/scratch.txt \
+    lib/scratch.sh lib/cli/extra.sh docs/private.md module.d/stray.meta \
+    examples/profile-project/modules/stray.sh examples/e2e/stray.tsv; do
     mkdir -p "$_allow_probe/${_junk%/*}"
     printf 'junk\n' >"$_allow_probe/$_junk"
   done
