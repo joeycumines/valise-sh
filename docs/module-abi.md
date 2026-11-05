@@ -31,6 +31,7 @@ Optional fields:
 | `exports` | Space-separated exported command/function identifiers. |
 | `commands` | Space-separated exports a built release publishes as commands on PATH. |
 | `executables` | Space-separated module-relative paths of scripts published as commands. |
+| `tests` | Space-separated module-relative test scripts that `valise test` runs. |
 | `version` | Optional module version used to reject version skew across roots. |
 
 ## Meta modules

@@ -62,6 +62,7 @@ project_config_load() {
   _project_variant=default
   _project_bundle=default
   _project_requires=
+  _project_lint_forbid=
   _pc_seen=" "
   while IFS= read -r _pc_line || [ -n "$_pc_line" ]; do
     case "$_pc_line" in
@@ -78,7 +79,8 @@ project_config_load() {
     variant) _project_variant=${_pc_line#*=} ;;
     bundle) _project_bundle=${_pc_line#*=} ;;
     requires_valise) _project_requires=${_pc_line#*=} ;;
-    *) die "valise.conf: unknown key: $_pc_key (known: variant, bundle, requires_valise)" ;;
+    lint_layer_forbid) _project_lint_forbid=${_pc_line#*=} ;;
+    *) die "valise.conf: unknown key: $_pc_key (known: variant, bundle, requires_valise, lint_layer_forbid)" ;;
     esac
   done <"$_project_root/valise.conf"
   [ -n "$_project_variant" ] || die "valise.conf: variant must not be empty"
@@ -1342,7 +1344,14 @@ project_build() {
     ;;
   esac
   project_output_check "$_pb_out" "$4"
-  _pb_excludes=$(project_variant_field "$_project_root" "$_pb_variant" excluded) || die "cannot read variant $_pb_variant"
+  # The developer commands build throwaway releases from explicit roots:
+  # with _pb_override=1 the roots for each shell come from _pbo_<shell> and
+  # no variant exclusions apply.
+  if [ "${_pb_override:-0}" -eq 1 ]; then
+    _pb_excludes=
+  else
+    _pb_excludes=$(project_variant_field "$_project_root" "$_pb_variant" excluded) || die "cannot read variant $_pb_variant"
+  fi
   _pb_engine=$(engine_root) || die "cannot locate the valise engine"
   _pb_parent=$(path_parent "$_pb_out")
   _pb_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
@@ -1363,8 +1372,13 @@ project_build() {
   _pb_any=0
   _pb_fish=0
   for _pb_shell in $VALISE_PROJECT_SHELLS fish; do
-    _pb_roots=$(project_bundle_roots "$_project_root" "$_pb_shell" "$_pb_bundle") ||
-      die "cannot read bundle $_pb_bundle"
+    if [ "${_pb_override:-0}" -eq 1 ]; then
+      # _pb_shell is one of the fixed shell names, so the expansion is safe.
+      eval "_pb_roots=\${_pbo_$_pb_shell:-}"
+    else
+      _pb_roots=$(project_bundle_roots "$_project_root" "$_pb_shell" "$_pb_bundle") ||
+        die "cannot read bundle $_pb_bundle"
+    fi
     if [ -z "$_pb_roots" ]; then
       _pb_conf_roots="$_pb_conf_roots${_pb_conf_roots:+
 }roots_$_pb_shell="

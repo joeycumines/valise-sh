@@ -18,6 +18,10 @@ usage() {
     "  apply [--variant=<name>] [--bundle=<name>] [--no-integration] [--dry-run]" \
     "                            Build the project, install it, and integrate it" \
     "  status                    Show project, active release, integration, and drift" \
+    "  lint [--require-parsers] [module...]  Check metadata, layers, bundles, and syntax" \
+    "  test [--shell=<class>] [--require-shells] [module...]  Run module tests" \
+    "  run [--shell=<class>] [--module=<m>]... -- <script>  Run a script with modules loaded" \
+    "  env                       Print the engine, project, and storage paths" \
     "" \
     "Release commands:" \
     "  install [--no-integration]  Install the release tree in the current directory" \
@@ -92,6 +96,59 @@ usage_doctor() {
     "  --pre-install     Skip the active-release and integration checks, for use" \
     "                    before the first install." \
     "  --no-integration  Check the environment and active release only."
+}
+
+usage_lint() {
+  printf '%s\n' \
+    "usage: valise lint [--require-parsers] [module...]" \
+    "" \
+    "Check the project: every metadata record and the files it names, each layer" \
+    "(contrib_ names, version=, dependencies inside the layer or the engine), the" \
+    "lint_layer_forbid pattern from valise.conf, every bundle compiled for every" \
+    "variant and shell, and the syntax of each body and test with the parser of" \
+    "every shell it declares. Listing modules limits the syntax checks to them." \
+    "" \
+    "  --require-parsers  Fail instead of skipping when a shell's parser is missing."
+}
+
+usage_test() {
+  printf '%s\n' \
+    "usage: valise test [--shell=<class>[,<class>...]] [--require-shells] [module...]" \
+    "" \
+    "Run the tests= scripts of each module (default: every module that has them)" \
+    "in every shell class it declares whose interpreter is installed: dash (or a" \
+    "plain sh) for sh, bash, zsh, ksh, and fish. Each run builds a release with" \
+    "the module as its only root, starts the shell with env -i, a fresh HOME," \
+    "TMPDIR and XDG directories, and PATH=\${VALISE_TEST_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+    "plus the interpreter's directory, loads the module in strict mode, then runs" \
+    "the test. A test passes when it exits 0. Fish tests (*.fish) run only in" \
+    "Fish, other tests only in POSIX shells. A test can write fixtures and call" \
+    "valise_test_reload to load the module again. VALISE_TEST_ROOT, VALISE_TEST_MODULE," \
+    "VALISE_TEST_MODULE_DIR, VALISE_TEST_SHELL and VALISE_PROJECT_ROOT are set." \
+    "" \
+    "  --shell=<class>   Run only these shell classes." \
+    "  --require-shells  Fail instead of skipping when an interpreter is missing."
+}
+
+usage_run() {
+  printf '%s\n' \
+    "usage: valise run [--shell=<class>] [--module=<m>]... [--bundle=<b>] [--variant=<v>] [--keep-env] -- <script> [args...]" \
+    "" \
+    "Load modules into a shell and run a script there; the exit status is the" \
+    "script's. With --module the named modules are the only roots; otherwise the" \
+    "bundle and variant (default: valise.conf) select them. The shell class" \
+    "defaults to the one \$SHELL names, else sh. The environment is quarantined as" \
+    "for valise test unless --keep-env is given."
+}
+
+usage_env() {
+  printf '%s\n' \
+    "usage: valise env" \
+    "" \
+    "Print KEY=value lines, shell-quoted, for VALISE_VERSION, VALISE_ENGINE_ROOT," \
+    "VALISE_PROJECT_ROOT (empty outside a project), VALISE_DATA_DIR," \
+    "VALISE_CONFIG_DIR, VALISE_STATE_DIR, VALISE_RELEASES_DIR, VALISE_ACTIVE_LINK," \
+    "and VALISE_BIN_DIR."
 }
 
 usage_uninstall() {

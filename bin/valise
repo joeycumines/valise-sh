@@ -46,7 +46,7 @@ _valise_engine_bin=$(cd "${_valise_self_dir:-/}" && pwd -P) || {
   exit 1
 }
 VALISE_CLI_DIR="${_valise_engine_bin%/}/../lib/cli"
-for _valise_part in usage common store fish-hook integration commands lifecycle project; do
+for _valise_part in usage common store fish-hook integration commands lifecycle devtools project; do
   if [ ! -f "$VALISE_CLI_DIR/$_valise_part.sh" ]; then
     printf 'valise: error: incomplete installation: missing lib/cli/%s.sh\n' "$_valise_part" >&2
     exit 1
@@ -94,6 +94,10 @@ case "$_cmd" in
   build) cmd_build "$@" ;;
   apply) cmd_apply "$@" ;;
   status) cmd_status "$@" ;;
+  lint) cmd_lint "$@" ;;
+  test) cmd_test "$@" ;;
+  run) cmd_run "$@" ;;
+  env) cmd_env "$@" ;;
   compile) cmd_compile "$@" ;;
   explain-variant) cmd_explain_variant "$@" ;;
   explain-bundles) cmd_explain_bundles "$@" ;;

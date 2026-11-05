@@ -154,6 +154,10 @@ release_lock() {
     printf 'valise: previous output kept at %s\n' "$_publish_previous/tree" >&2
     _publish_previous=""
   fi
+  if [ -n "${_dev_tmp:-}" ]; then
+    remove_tree "$_dev_tmp" || _cleanup_failed=1
+    _dev_tmp=""
+  fi
   if [ -n "$_stage" ]; then
     remove_tree "$_stage" || _cleanup_failed=1
     _stage=""
