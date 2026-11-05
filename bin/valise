@@ -7,7 +7,7 @@
 
 set -eu
 
-VALISE_VERSION="0.2.0"
+VALISE_VERSION="0.3.0"
 
 # The path this CLI was invoked by, made absolute before -C can change the
 # working directory. The Fish hook calls the CLI back through it, so a package

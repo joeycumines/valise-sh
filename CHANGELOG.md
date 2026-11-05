@@ -5,6 +5,130 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-06
+
+0.3.0 changes the project layout, the metadata, and the release format. A
+0.2 project must be moved to the new layout and its releases rebuilt; see
+[What changed in 0.3.0](docs/release-policy.md#what-changed-in-030).
+
+### Added
+
+- Published commands. Metadata `commands=` names exports to publish and
+  `executables=` names scripts. `valise build` writes a command plan per
+  module under `plans/commands/` and a launcher per name under `bin/`, and
+  install writes a stub for each into
+  `${VALISE_BIN_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}`. valise records
+  the stubs it writes in `$XDG_STATE_HOME/valise/commands.tsv` and never
+  replaces or removes a file it did not write. `valise doctor` reports
+  collisions and a command directory missing from `PATH`.
+- `valise lint [--require-parsers] [module...]` checks metadata, layers,
+  every bundle compiled for every variant and shell, and the syntax of each
+  body and test with the parser of every shell the module declares. The
+  `valise.conf` key `lint_layer_forbid` makes lint reject a pattern, such as
+  an employer name, anywhere under `layers/`.
+- `valise test [--shell=<class>] [--require-shells] [module...]` runs each
+  module's `tests=` scripts in every declared shell that is installed, in
+  an `env -i` environment with a fresh `HOME` and XDG tree.
+  `valise_test_reload` lets a test write fixtures and load the module again.
+- `valise run [--shell=<class>] [--module=<m>]... [--bundle=<b>]
+  [--variant=<v>] [--keep-env] -- <script>` loads modules into a shell and
+  runs a script there.
+- `valise env` prints the engine, project, and storage paths as shell-quoted
+  `KEY=value` lines.
+- `valise uninstall [--keep-releases]` removes the managed blocks (keeping
+  every other byte and the file mode), the startup files install created
+  that are left empty, the Fish hook, the owned command stubs, the active
+  link, and the installed releases.
+- `valise release rollback` makes the previously active release active
+  again. Every switch records the release it replaced in
+  `$XDG_STATE_HOME/valise/previous`.
+- `valise apply --dry-run` builds the project and prints what install would
+  change in the release store, the startup files, the Fish hook, and the
+  command directory, without writing outside `build/`.
+- A bundle's `fish` rows build the native Fish runtime into the release
+  under `runtime/fish/`, and the Fish hook loads the bundle's Fish roots
+  from it. `valise new` scaffolds a Fish seed module.
+- `valise -C <dir>` runs a command as if started in `dir`. Project commands
+  find the project from any subdirectory.
+- `valise.conf` key `requires_valise`: an older valise refuses to build the
+  project.
+- `valise module new --into=<module>[,...]` and `--no-wire` for projects
+  whose default bundle has several POSIX roots.
+- Metadata `tests=` names the test scripts of a module.
+- `shells=posix` names every POSIX shell.
+- `docs/projects.md` describes the project layout, bundles, variants,
+  compile, and build.
+
+### Changed
+
+- A project is the directory holding `valise.conf`, with `module.d/`,
+  `modules/`, `layers/<provider>/`, `bundles.tsv`, and `variants.tsv` at its
+  root. `valise.conf` replaces `shell/release/project.conf`, `bundles.tsv`
+  replaces `shell/release/bundle-roots`, and `variants.tsv` replaces
+  `shell/release/install-variants`. The `shell/` layout is not read.
+- The registry is internal: `valise build` generates it on demand from the
+  metadata, and `valise registry` prints it. It has columns for `commands`,
+  `executables`, and `tests` and a `source` of `module.d`,
+  `layers/<provider>/module.d`, or `valise`.
+- The engine modules are renamed into the reserved `valise_` namespace
+  (`valise_path`, `valise_editor`, `valise_history`, `valise_pager`,
+  `valise_xdg`, `valise_platform_posix`, `valise_platform_macos`,
+  `valise_platform_linux`, `valise_platform_bsd`), with exports renamed to
+  match, such as `valise_path_prepend`. They are available to every
+  project without vendoring. A project or layer module may not use the
+  `valise_` prefix, and layer modules must use `contrib_`.
+- `shells=sh` names only the generic POSIX class (dash, BusyBox ash, and
+  other plain `sh`), so `shells=sh bash ksh` loads in dash, bash, and ksh
+  and not in zsh. Use `shells=posix` for every POSIX shell.
+- Release format 2. A release holds `plans/<shell>.sh` for `sh`, `bash`,
+  `zsh`, and `ksh`, `runtime/capabilities.sh`, `valise-release.conf`
+  (`format=2`, the bundle, the variant, the roots per shell, the modules,
+  and the commands), and `manifest.tsv`. It contains only the modules some
+  plan loads, so a module a variant excludes is absent with its body.
+  Install refuses a tree without `format=2`.
+- The POSIX managed block picks the plan for `ksh`, `zsh`, `bash`, or `sh`
+  and sets its guard only after the plan loaded, so a later startup file
+  retries after a failure.
+- Install is transactional. It checks every startup file and the Fish hook
+  path before changing the active release and, if a later step fails,
+  restores the previous active release, the previous-release record, and
+  the command stubs, and names the files it already wrote. A new managed
+  block is appended with nothing around it, so uninstall restores the file
+  exactly.
+- Install warns, and `valise doctor` fails, on a line outside a managed block
+  that loads valise by hand.
+- `valise build` moves the previous `build/release` aside and restores it if
+  publication fails.
+- An identical installed Fish hook is left in place, and apply reports
+  `Fish hook current`.
+- `valise status` reports the bundle, variant, and valise version the active
+  release was built with, separately from the project defaults.
+- `valise explain-variant` counts the roots and modules a variant keeps per
+  shell, resolving qualified names.
+- `bin/valise` is a dispatcher over the parts in `lib/cli/`.
+
+### Removed
+
+- The `shell/` project layout, `registry --check`, and the committed
+  registry.
+- Metadata `updates=`. Metadata naming it fails with a message naming
+  0.3.0.
+- The engine release shape: `entrypoints/fish/profile.fish`, the POSIX
+  block's loader fallback, and the Fish hook's `generated/`, `vendor/`, and
+  entrypoint routes.
+- `examples/e2e/build-manifest.sh`; `examples/e2e` is a valise project built
+  with `valise build`.
+- `docs/variants.md`, replaced by `docs/projects.md`.
+
+### Fixed
+
+- A repeated metadata field was silently overwritten by the last value; the
+  POSIX and Fish readers now reject it.
+- The Fish loader rejected caller aliases, because `functions --copy` drops
+  `--wraps`.
+- `valise doctor` did not accept FreeBSD's `sha256`.
+- `valise module new` assumed the seed module was `profile_main`.
+
 ## [0.2.0] - 2026-10-31
 
 ### Added
@@ -172,6 +296,7 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 - The editor-defaults test is independent of host-installed editors by
   supplying a temporary test `vi` executable.
 
-[Unreleased]: https://github.com/joeycumines/valise-sh/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/joeycumines/valise-sh/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/joeycumines/valise-sh/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/joeycumines/valise-sh/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/joeycumines/valise-sh/releases/tag/v0.1.0

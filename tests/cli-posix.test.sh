@@ -89,7 +89,7 @@ printf '  valise: %s\n' "$_valise"
 printf '  home: %s\n\n' "$_test_home"
 
 # --- Version ---
-check_output_equals "version prints version string" "0.2.0" "$_valise" version
+check_output_equals "version prints version string" "0.3.0" "$_valise" version
 
 # The release policy requires package.json and bin/valise to carry the same
 # version. A bump that updates one and forgets the other ships a tarball
@@ -363,7 +363,7 @@ if command -v npm >/dev/null 2>&1; then
   _npm_prefix="$_test_home/npm-prefix"
   if npm install --global --offline --prefix "$_npm_prefix" "$_npm_root/$_npm_tgz" >"$_test_home/npm-install.out" 2>&1; then
     pass "npm installs the packed CLI without a registry"
-    if "$_npm_prefix/bin/valise" version 2>/dev/null | grep '^0.2.0$' >/dev/null 2>&1; then
+    if "$_npm_prefix/bin/valise" version 2>/dev/null | grep '^0.3.0$' >/dev/null 2>&1; then
       pass "installed npm binary runs"
     else
       fail "installed npm binary runs"
