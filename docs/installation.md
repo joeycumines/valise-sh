@@ -53,30 +53,34 @@ file shadows it. It then adds the files each shell reads instead:
 - `${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/valise.fish` when valise
   finds a Fish executable in a trusted location.
 
-`--no-integration` writes no startup file and no Fish hook. `valise apply`
+`--no-integration` writes no startup file, no Fish hook, and no command
+stubs. `valise apply`
 builds, installs, and then uses the same writer.
 
 Each POSIX file receives a managed block between `# BEGIN valise managed
 block` and `# END valise managed block`. Existing content is preserved, and
-a repeat install replaces the block in place. An unpaired marker is refused
-and stops the install; a file already processed keeps its updated block. A
-symlinked POSIX startup file is reported and left untouched. If the Fish
-hook path is a symlink or a directory, install fails rather than write
-through it. Install prints every path it wrote and how to remove the
-integration.
+a repeat install replaces the block in place. A new block is appended with
+nothing added around it, so removing the block restores the file. A
+symlinked POSIX startup file is reported and left untouched.
 
-The POSIX snippet adapts to the release shape:
+Install checks every startup file and the Fish hook path before it changes
+the active release. An unpaired marker, a startup path that is not a regular
+file, a directory install cannot write, or a Fish hook path that is a symlink
+or a directory stops the install with nothing changed. If a later step fails
+anyway, install puts the previous active release back (or removes the active
+link when there was none) and names the files it had already written. Those
+files load whichever release is active, so they need no repair.
 
-- A project release built by `valise build` carries
-  `generated/installed-modules.<shell>` for each shell its bundle seeds
-  (`bash`, `zsh`, and `ksh` for the scaffold and the example). The snippet
-  sources the plan for the running shell.
-- An engine release carries `entrypoints/profile.sh` and the loader. The
-  snippet sources that entrypoint.
-- If the release has neither a plan for the running shell nor the loader,
-  the snippet leaves the session alone. This is the result for a login
-  `dash` session with a built release: `dash` has no plan, and a built
-  release has no loader.
+Install also warns about lines outside a managed block that load valise by
+hand: a reference to `valise/active`, a 0.1 `installed-modules.` list, or a
+line that sources a compiled plan. Such a line loads the profile a second
+time; remove it. `valise doctor` reports the same lines as a failure.
+
+The block detects the running shell class, `ksh`, `zsh`, `bash`, or `sh` for
+any other POSIX shell, and sources `plans/<class>.sh` from the active
+release. It sets `_valise_profile_loaded` only when the plan succeeds, so a
+later startup file in the same session retries after a failure.
+`VALISE_RELOAD=1` makes a later block load the profile again.
 
 `valise install` writes `~/.profile`, which ksh reads at login. A non-login
 interactive ksh reads the file named by `$ENV` when that variable is set.
@@ -235,13 +239,27 @@ controls.
 | Lock and state | `~/.local/state/valise/` | `$XDG_STATE_HOME/valise/` |
 | Command stubs | `~/.local/bin/` | `$VALISE_BIN_DIR`, then `$XDG_BIN_HOME` |
 
-The active path is a symlink to the selected release.
+The active path is a symlink to the selected release. The state directory
+holds the lock, the previous-release record (`previous`), the command-stub
+ledger (`commands.tsv`), and the list of startup files install created
+(`startup-created`). Uninstall uses the same locations, including any XDG
+overrides.
 
 ## Managing installed releases
 
 `valise release list` shows the installed releases and marks the active one.
-`valise release use <release-id>` points the active symlink at an existing
-release.
+`valise release use <release-id>` verifies an installed release and points
+the active symlink at it. Each time the active release changes, valise
+records the one it replaced in `$XDG_STATE_HOME/valise/previous`;
+`valise release rollback` verifies that release and makes it active again, so
+two rollbacks in a row return to where they started. Both move the command
+stubs to the new active release when install published them.
+
+`valise apply --dry-run` builds the project and prints what install would
+do: whether the release is installed or active already, and for each startup
+file, the Fish hook, and each command stub whether it is current or would be
+created, updated, published, skipped, or removed. It writes nothing outside
+`build/`.
 
 `valise release prune --keep=<n>` removes old releases. It always keeps the
 active release and the `n` newest others, and it never removes a release that
@@ -267,23 +285,24 @@ Update a source checkout with Git. To update an npm installation, repack and
 reinstall the tarball. `valise install` updates the active profile release;
 it does not update the CLI itself.
 
-There is no `valise uninstall` command. Before removing the CLI, remove the
-managed integration from every startup file valise wrote: delete only the
-block between `# BEGIN valise managed block` and `# END valise managed
-block` in `~/.profile` and in any of `~/.bash_profile`, `~/.bash_login`,
-`~/.bashrc`, `~/.zshrc`, and `~/.zprofile`. For Fish, remove
-`${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/valise.fish` if it is still
-the valise-managed hook. Delete each command stub listed in
-`$XDG_STATE_HOME/valise/commands.tsv`. Then uninstall the CLI and remove the valise XDG
-state. Installed release files are read-only, so make them writable first:
+`valise uninstall` removes what install wrote:
+
+- the managed block from `~/.profile`, `~/.bash_profile`, `~/.bash_login`,
+  `~/.bashrc`, `~/.zprofile`, and `~/.zshrc`, keeping every other byte and
+  the file mode; a file install created is deleted when nothing else is left
+  in it
+- the Fish hook, when its first line is the valise header
+- the command stubs valise owns, except a stub that was edited after valise
+  wrote it
+- the active link, the previous-release record, and the installed releases
+
+It checks every startup file for paired markers before it changes anything.
+A symlinked startup file and lines that load valise outside a managed block
+are reported for you to edit. `--keep-releases` keeps the installed releases.
+Then remove the CLI:
 
 ```sh
-chmod -R u+w "$HOME/.local/share/valise" 2>/dev/null || :
-rm -rf "$HOME/.local/share/valise" "$HOME/.config/valise" "$HOME/.local/state/valise"
 # Run only if installed from npm:
 npm uninstall -g valise-sh
 # For a source install, remove bin/ from PATH and delete any symlink you created.
 ```
-
-If you use non-default XDG directories, remove the corresponding `valise/`
-subdirectories there instead.

@@ -178,27 +178,26 @@ cmd_doctor() {
   info "checking environment..."
 
   # Check POSIX utilities
-  for _cmd in mkdir rm cp mv ln cat sha256sum shasum stat cmp find; do
+  for _cmd in mkdir rm cp mv ln cat stat cmp find; do
     if command -v "$_cmd" >/dev/null 2>&1; then
       printf '  ok: %s\n' "$_cmd"
     else
-      case "$_cmd" in
-        sha256sum|shasum)
-          # Need at least one
-          if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
-            printf '  FAIL: no SHA-256 utility (need sha256sum or shasum)\n'
-            _status=1
-          else
-            printf '  ok: sha256 (via %s)\n' "$(command -v sha256sum 2>/dev/null || command -v shasum 2>/dev/null)"
-          fi
-          ;;
-        *)
-          printf '  FAIL: missing required utility: %s\n' "$_cmd"
-          _status=1
-          ;;
-      esac
+      printf '  FAIL: missing required utility: %s\n' "$_cmd"
+      _status=1
     fi
   done
+  # file_sha256 accepts any one of these, found in a trusted location.
+  _doctor_sha=
+  for _cmd in sha256sum shasum sha256; do
+    _doctor_sha=$(trusted_utility_path "$_cmd" 2>/dev/null || :)
+    [ -z "$_doctor_sha" ] || break
+  done
+  if [ -n "$_doctor_sha" ]; then
+    printf '  ok: sha256 (via %s)\n' "$_doctor_sha"
+  else
+    printf '  FAIL: no SHA-256 utility (need sha256sum, shasum, or sha256)\n'
+    _status=1
+  fi
 
   # Check XDG directories
   for _dir in "$VALISE_XDG_DATA" "$VALISE_XDG_CONFIG" "$VALISE_XDG_STATE"; do
@@ -311,6 +310,11 @@ cmd_doctor() {
       done <"$_doctor_cand_file"
       _doctor_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
       "$_doctor_rm" -f "$_doctor_cand_file" || die "cannot remove doctor candidate staging file"
+      if ! _doctor_unmanaged=$(integration_unmanaged_report); then
+        printf '  FAIL: valise is loaded outside a managed block (it may load twice):\n'
+        printf '    %s\n' "$_doctor_unmanaged"
+        _status=1
+      fi
       if [ "$_doctor_found" -eq 0 ]; then
         printf '  FAIL: no valise integration found for %s (checked:%s)\n' \
           "${_doctor_shell:-the current shell}" "$_doctor_candidates"

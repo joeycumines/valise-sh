@@ -727,10 +727,35 @@ project_release_strip() {
   unset _rs_parent _rs_status _rs_mode _rs_chmod _rs_mv
 }
 
+# integration_render <target> <block>
+# Print the startup file as install would leave it: the block replaces the
+# first managed block, or is appended when there is none. Every other line is
+# kept, so removing the block restores the file.
+integration_render() {
+  if [ -f "$1" ]; then
+    _ir_awk=$(trusted_utility_path awk) || return 1
+    # The block travels through ENVIRON: awk -v would interpret its backslashes.
+    _VALISE_BLOCK=$2 "$_ir_awk" '
+      /^# BEGIN valise managed block$/ {
+        if (!written) print ENVIRON["_VALISE_BLOCK"]
+        written = 1
+        skip = 1
+        next
+      }
+      /^# END valise managed block$/ { skip = 0; next }
+      !skip { print }
+      END { if (!written) print ENVIRON["_VALISE_BLOCK"] }
+    ' "$1"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+
 # project_write_integration <file> <block>
 # Replace the valise managed block in place, or append one. A symlink belongs to
 # whatever manages it, so it is reported and left alone. Unpaired markers mean the
 # file was edited by hand: rewriting could delete the user's lines, so refuse.
+# A file install creates is recorded so uninstall can delete it again.
 project_write_integration() {
   _pi_target=$1
   _pi_snippet=$2
@@ -739,7 +764,6 @@ project_write_integration() {
     unset _pi_target _pi_snippet
     return 0
   fi
-  _pi_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   if [ -f "$_pi_target" ]; then
     integration_markers_paired "$_pi_target" ||
       die "unpaired valise managed block markers in $_pi_target (restore or remove the BEGIN and END lines, then retry)"
@@ -749,46 +773,31 @@ project_write_integration() {
   _pi_parent=$(path_parent "$_pi_target")
   _pi_tmp=$(trusted_mktemp_at "$_pi_parent" file "$_pi_parent/.valise-integration.XXXXXX") ||
     die "cannot create integration staging file"
+  integration_render "$_pi_target" "$_pi_snippet" >"$_pi_tmp" || die "cannot read startup file: $_pi_target"
   if [ -f "$_pi_target" ]; then
-    # The block travels through ENVIRON: awk -v would interpret its backslashes.
-    _VALISE_BLOCK=$_pi_snippet "$_pi_awk" '
-      /^# BEGIN valise managed block$/ {
-        if (!written) print ENVIRON["_VALISE_BLOCK"]
-        written = 1
-        skip = 1
-        next
-      }
-      /^# END valise managed block$/ { skip = 0; next }
-      !skip { print; last = $0; lines++ }
-      END {
-        if (!written) {
-          if (lines > 0 && last != "") print ""
-          print ENVIRON["_VALISE_BLOCK"]
-        }
-      }
-    ' "$_pi_target" >"$_pi_tmp" || die "cannot read startup file: $_pi_target"
     _pi_cmp=$(trusted_utility_path cmp) || die "no trusted cmp utility available"
     if "$_pi_cmp" -s "$_pi_tmp" "$_pi_target"; then
       _pi_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
       "$_pi_rm" -f "$_pi_tmp" || die "cannot remove unchanged integration staging file"
       _pi_tmp=""
       info "shell integration current: $_pi_target"
-      unset _pi_target _pi_snippet _pi_parent _pi_awk _pi_cmp _pi_rm
+      unset _pi_target _pi_snippet _pi_parent _pi_cmp _pi_rm
       return 0
     fi
     _pi_mode=$(file_mode "$_pi_target")
     [ -n "$_pi_mode" ] || die "cannot read startup file mode: $_pi_target"
   else
-    printf '%s\n' "$_pi_snippet" >"$_pi_tmp" || die "cannot write integration staging file"
     _pi_mode=0644
+    startup_created_add "$_pi_target"
   fi
   _pi_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
   "$_pi_chmod" "$_pi_mode" "$_pi_tmp" || die "cannot set startup file mode"
   _pi_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
   "$_pi_mv" "$_pi_tmp" "$_pi_target" || die "cannot publish startup file: $_pi_target"
   _pi_tmp=""
+  _txn_changed="$_txn_changed $_pi_target"
   info "shell integration written: $_pi_target"
-  unset _pi_target _pi_snippet _pi_parent _pi_awk _pi_cmp _pi_rm _pi_mode _pi_chmod _pi_mv
+  unset _pi_target _pi_snippet _pi_parent _pi_cmp _pi_rm _pi_mode _pi_chmod _pi_mv
 }
 
 cmd_new() {
@@ -1448,11 +1457,13 @@ cmd_apply() {
   _apply_variant=
   _apply_bundle=
   _apply_install_arg=
+  _apply_dry_run=0
   for _apply_arg do
     case "$_apply_arg" in
     --variant=*) _apply_variant=${_apply_arg#--variant=}; [ -n "$_apply_variant" ] || die "variant name must not be empty" ;;
     --bundle=*) _apply_bundle=${_apply_arg#--bundle=}; [ -n "$_apply_bundle" ] || die "bundle name must not be empty" ;;
     --no-integration) _apply_install_arg=--no-integration ;;
+    --dry-run) _apply_dry_run=1 ;;
     --help | -h) usage_apply; return 0 ;;
     *) die "unknown apply option: $_apply_arg" ;;
     esac
@@ -1464,11 +1475,21 @@ cmd_apply() {
   project_build "$_apply_variant" "$_apply_bundle" "$_apply_build_out" 1
   _apply_old_pwd=$(pwd -P) || die "cannot resolve current directory"
   cd "$_apply_build_out" || die "cannot enter build output: $_apply_build_out"
+  if [ "$_apply_dry_run" -eq 1 ]; then
+    # Only build/ has changed; describe the install without performing it.
+    _apply_integration=1
+    [ -z "$_apply_install_arg" ] || _apply_integration=0
+    install_preview "$_apply_integration"
+    cd "$_apply_old_pwd" || die "cannot restore project directory: $_apply_old_pwd"
+    unset _apply_arg _apply_variant _apply_bundle _apply_install_arg _apply_build_out _apply_old_pwd \
+      _apply_dry_run _apply_integration
+    return 0
+  fi
   cmd_install $_apply_install_arg || die "valise install failed"
   cd "$_apply_old_pwd" || die "cannot restore project directory: $_apply_old_pwd"
   cmd_verify_active
   info "applied project: $_project_root"
-  unset _apply_arg _apply_variant _apply_bundle _apply_install_arg _apply_build_out _apply_old_pwd
+  unset _apply_arg _apply_variant _apply_bundle _apply_install_arg _apply_build_out _apply_old_pwd _apply_dry_run
 }
 
 # release_conf_value <release-dir> <key>

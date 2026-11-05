@@ -705,56 +705,66 @@ fi
 
 # (3) A Fish user's deployed conf.d hook must be checked. install writes
 # the hook; doctor must look for it when $SHELL names fish.
-_fish_home="$_test_root/fish-home"
-mkdir -p "$_fish_home"
-_fish_release="$_test_root/fish-release"
-_make_release "$_fish_release" '# fish release'
-(
-  cd "$_fish_release" &&
-    HOME="$_fish_home" \
-      XDG_DATA_HOME="$_fish_home/.local/share" \
-      XDG_CONFIG_HOME="$_fish_home/.config" \
-      XDG_STATE_HOME="$_fish_home/.local/state" \
-      SHELL=/usr/local/bin/fish \
-      "$_valise" install
-) >"$_test_root/install-fish.out" 2>&1 || :
-if (
-  HOME="$_fish_home" \
-    XDG_DATA_HOME="$_fish_home/.local/share" \
-    XDG_CONFIG_HOME="$_fish_home/.config" \
-    XDG_STATE_HOME="$_fish_home/.local/state" \
-    SHELL=/usr/local/bin/fish \
-    "$_valise" doctor
-) >"$_test_root/doctor-fish.out" 2>&1; then
-  pass "doctor checks the fish integration hook"
+# install writes the hook only when it finds Fish in a trusted location.
+_have_trusted_fish=0
+for _fish_candidate in /opt/homebrew/bin/fish /usr/local/bin/fish /usr/bin/fish /bin/fish; do
+  [ -x "$_fish_candidate" ] && _have_trusted_fish=1 && break
+done
+if [ "$_have_trusted_fish" -eq 0 ]; then
+  skip "doctor checks the fish integration hook (no Fish in a trusted location)"
+  skip "doctor accepts a hand-saved init fish hook (no Fish in a trusted location)"
 else
-  fail "doctor checks the fish integration hook"
-  cat "$_test_root/doctor-fish.out" >&2
-fi
-
-# A user who follows the manual instructions saves `valise init fish`
-# output as the hook. It must carry the same header install writes, or
-# doctor rejects the very file the docs told the user to create.
-if (
-  HOME="$_fish_home" \
-    XDG_DATA_HOME="$_fish_home/.local/share" \
-    XDG_CONFIG_HOME="$_fish_home/.config" \
-    XDG_STATE_HOME="$_fish_home/.local/state" \
-    SHELL=/usr/local/bin/fish \
-    "$_valise" init fish
-) >"$_fish_home/.config/fish/conf.d/valise.fish" 2>"$_test_root/init-fish.err" &&
+  _fish_home="$_test_root/fish-home"
+  mkdir -p "$_fish_home"
+  _fish_release="$_test_root/fish-release"
+  _make_release "$_fish_release" '# fish release'
   (
+    cd "$_fish_release" &&
+      HOME="$_fish_home" \
+        XDG_DATA_HOME="$_fish_home/.local/share" \
+        XDG_CONFIG_HOME="$_fish_home/.config" \
+        XDG_STATE_HOME="$_fish_home/.local/state" \
+        SHELL=/usr/local/bin/fish \
+        "$_valise" install
+  ) >"$_test_root/install-fish.out" 2>&1 || :
+  if (
     HOME="$_fish_home" \
       XDG_DATA_HOME="$_fish_home/.local/share" \
       XDG_CONFIG_HOME="$_fish_home/.config" \
       XDG_STATE_HOME="$_fish_home/.local/state" \
       SHELL=/usr/local/bin/fish \
       "$_valise" doctor
-  ) >"$_test_root/doctor-fish-manual.out" 2>&1; then
-  pass "doctor accepts a hand-saved init fish hook"
-else
-  fail "doctor accepts a hand-saved init fish hook"
-  cat "$_test_root/doctor-fish-manual.out" "$_test_root/init-fish.err" >&2 2>/dev/null || :
+  ) >"$_test_root/doctor-fish.out" 2>&1; then
+    pass "doctor checks the fish integration hook"
+  else
+    fail "doctor checks the fish integration hook"
+    cat "$_test_root/doctor-fish.out" >&2
+  fi
+
+  # A user who follows the manual instructions saves `valise init fish`
+  # output as the hook. It must carry the same header install writes, or
+  # doctor rejects the very file the docs told the user to create.
+  if (
+    HOME="$_fish_home" \
+      XDG_DATA_HOME="$_fish_home/.local/share" \
+      XDG_CONFIG_HOME="$_fish_home/.config" \
+      XDG_STATE_HOME="$_fish_home/.local/state" \
+      SHELL=/usr/local/bin/fish \
+      "$_valise" init fish
+  ) >"$_fish_home/.config/fish/conf.d/valise.fish" 2>"$_test_root/init-fish.err" &&
+    (
+      HOME="$_fish_home" \
+        XDG_DATA_HOME="$_fish_home/.local/share" \
+        XDG_CONFIG_HOME="$_fish_home/.config" \
+        XDG_STATE_HOME="$_fish_home/.local/state" \
+        SHELL=/usr/local/bin/fish \
+        "$_valise" doctor
+    ) >"$_test_root/doctor-fish-manual.out" 2>&1; then
+    pass "doctor accepts a hand-saved init fish hook"
+  else
+    fail "doctor accepts a hand-saved init fish hook"
+    cat "$_test_root/doctor-fish-manual.out" "$_test_root/init-fish.err" >&2 2>/dev/null || :
+  fi
 fi
 
 # (4) `layer-lint` with no argument must print its usage and fail on

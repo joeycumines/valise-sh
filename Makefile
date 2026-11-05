@@ -12,12 +12,12 @@ VALISE_REQUIRED_PARSERS ?= $(if $(filter 1,$(VALISE_REQUIRE_TOOLING)),sh$(comma)
 
 VALISE_CLI_LIBS := $(wildcard lib/cli/*.sh)
 
-.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-project-layout test-commands test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-consumer-profile clean distclean
+.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-project-layout test-commands test-lifecycle test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-consumer-profile clean distclean
 .NOTPARALLEL: check test
 
 TEST_ENV_PATH = /usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
-TEST_RUNNER = PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_CONSUMER_PROFILE="$${VALISE_CONSUMER_PROFILE:-}" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_REQUIRED_PARSERS="$(VALISE_REQUIRED_PARSERS)" MACOS_PROFILE_PARSER_SEARCH_PATH="$${MACOS_PROFILE_PARSER_SEARCH_PATH:-}" T07_TEST_CHILD_SHELL="$${T07_TEST_CHILD_SHELL:-/bin/bash}" T07_TEST_CHILD_SHELL_ARGS="$${T07_TEST_CHILD_SHELL_ARGS:-}" T07_TEST_CHILD_PATH="$${T07_TEST_CHILD_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
-RUNTIME_TEST_RUNNER = PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_LINUX_IMAGE="$${VALISE_LINUX_IMAGE:-}" VALISE_BSD_IMAGE="$${VALISE_BSD_IMAGE:-}" VALISE_RUNTIME_SEARCH_PATH="$${VALISE_RUNTIME_SEARCH_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
+TEST_RUNNER = umask 022; PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_CONSUMER_PROFILE="$${VALISE_CONSUMER_PROFILE:-}" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_REQUIRED_PARSERS="$(VALISE_REQUIRED_PARSERS)" MACOS_PROFILE_PARSER_SEARCH_PATH="$${MACOS_PROFILE_PARSER_SEARCH_PATH:-}" T07_TEST_CHILD_SHELL="$${T07_TEST_CHILD_SHELL:-/bin/bash}" T07_TEST_CHILD_SHELL_ARGS="$${T07_TEST_CHILD_SHELL_ARGS:-}" T07_TEST_CHILD_PATH="$${T07_TEST_CHILD_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
+RUNTIME_TEST_RUNNER = umask 022; PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_LINUX_IMAGE="$${VALISE_LINUX_IMAGE:-}" VALISE_BSD_IMAGE="$${VALISE_BSD_IMAGE:-}" VALISE_RUNTIME_SEARCH_PATH="$${VALISE_RUNTIME_SEARCH_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
 
 check: syntax test test-fish-syntax test-docs test-detection-contract-busybox test-loader-multi-root-lanes test-e2e
 
@@ -69,6 +69,7 @@ test: test-runner-quarantine
 	@$(MAKE) test-project-ux
 	@$(MAKE) test-project-layout
 	@$(MAKE) test-commands
+	@$(MAKE) test-lifecycle
 	@$(MAKE) test-compiler-benchmark
 	@$(MAKE) test-fish-runtime
 	@$(MAKE) test-consumer-profile
@@ -221,6 +222,9 @@ test-project-layout: tests/project-layout.test.sh bin/valise $(VALISE_CLI_LIBS) 
 test-commands: tests/commands.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
+test-lifecycle: tests/lifecycle.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
+	@$(TEST_RUNNER)
+
 test-compiler-benchmark: tests/compiler-benchmark.test.sh lib/compiler.awk
 	@$(TEST_RUNNER)
 
@@ -269,4 +273,4 @@ clean: ## Delete build products, temporary release trees, and pack tarballs.
 distclean: clean ## Delete all generated files and local build directories.
 	@rm -rf build
 
-check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-registry test-project-ux test-project-layout test-commands test-cli-gaps test-contrib-modules test-consumer-profile test-docs test-doc-links
+check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-registry test-project-ux test-project-layout test-commands test-lifecycle test-cli-gaps test-contrib-modules test-consumer-profile test-docs test-doc-links

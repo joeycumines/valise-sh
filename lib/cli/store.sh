@@ -163,13 +163,16 @@ release_lock() {
     if [ -e "$_hook_tmp" ] || [ -L "$_hook_tmp" ]; then _cleanup_failed=1; fi
     _hook_tmp=""
   fi
-  for _release_tmp in "${_rc_tmp:-}" "${_rc_stub:-}"; do
+  for _release_tmp in "${_rc_tmp:-}" "${_rc_stub:-}" "${_prev_tmp:-}" "${_dry_tmp:-}" "${_un_tmp:-}"; do
     [ -n "$_release_tmp" ] || continue
     [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_release_tmp" 2>/dev/null || :
     if [ -e "$_release_tmp" ] || [ -L "$_release_tmp" ]; then _cleanup_failed=1; fi
   done
   _rc_tmp=""
   _rc_stub=""
+  _prev_tmp=""
+  _dry_tmp=""
+  _un_tmp=""
   if [ -n "$_mm_tmp" ]; then
     [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_mm_tmp" 2>/dev/null || :
     if [ -e "$_mm_tmp" ] || [ -L "$_mm_tmp" ]; then _cleanup_failed=1; fi
@@ -186,17 +189,19 @@ release_lock() {
 
 _handle_int() {
   trap - INT
+  [ "${_install_txn:-0}" -ne 1 ] || install_txn_abort
   release_lock
   exit 130
 }
 
 _handle_term() {
   trap - TERM
+  [ "${_install_txn:-0}" -ne 1 ] || install_txn_abort
   release_lock
   exit 143
 }
 
-trap '_exit_status=$?; release_lock; if [ "$_exit_status" -eq 0 ] && [ "$_cleanup_failed" -ne 0 ]; then _exit_status=1; fi; exit "$_exit_status"' EXIT
+trap '_exit_status=$?; [ "${_install_txn:-0}" -ne 1 ] || install_txn_abort; release_lock; if [ "$_exit_status" -eq 0 ] && [ "$_cleanup_failed" -ne 0 ]; then _exit_status=1; fi; exit "$_exit_status"' EXIT
 trap '_handle_int' INT
 trap '_handle_term' TERM
 
@@ -222,6 +227,7 @@ switch_active_link() {
   fi
   [ -L "$VALISE_ACTIVE_LINK" ] || die "active symlink was not created"
   [ "$($_readlink_path "$VALISE_ACTIVE_LINK" 2>/dev/null)" = "$1" ] || die "active symlink target mismatch"
+  note_switch "$_switch_old_target" "$1"
   unset _switch_old_target
 }
 
@@ -529,45 +535,8 @@ cmd_release() {
       esac
       _target="${2:-}"
       [ -n "$_target" ] || die "usage: valise release use <sha256>"
-      case "$_target" in
-        *[!A-Za-z0-9_.-]*|.*|*-|.-*|*..*) die "invalid release name: $_target" ;;
-      esac
-      _target_dir="$VALISE_RELEASES_DIR/$_target"
-      [ -e "$_target_dir" ] || die "release not found: $_target"
-      [ -d "$_target_dir" ] || die "release target is not a directory: $_target"
-      [ ! -L "$_target_dir" ] || die "release target must not be a symlink: $_target"
-      _releases_root=$(cd "$VALISE_RELEASES_DIR" 2>/dev/null && pwd -P) || die "release root unavailable"
-      _target_parent=$(cd "$(path_parent "$_target_dir")" 2>/dev/null && pwd -P) || die "release target parent unavailable"
-      case "$_target_parent/" in
-        "$_releases_root/"*) : ;;
-        *) die "release target escapes release root: $_target" ;;
-      esac
-      _target_manifest="$_target_dir/.valise-manifest"
-      if [ -e "$_target_manifest" ] || [ -L "$_target_manifest" ]; then
-        [ -f "$_target_manifest" ] || die "release manifest snapshot is not a regular file"
-        [ ! -L "$_target_manifest" ] || die "release manifest snapshot must not be a symlink"
-        _manifest="$_target_manifest"
-      else
-        _manifest=$(locate_manifest) ||
-          die "cannot find manifest.tsv in the current directory"
-      fi
-      prepare_manifest_rows "$_manifest" || die "cannot snapshot manifest.tsv"
-      _manifest="$_manifest_rows"
-      validate_manifest "$_manifest" || die "invalid manifest.tsv schema or row"
-      verify_release_dir "$_target_dir" "$_manifest" "$_target"
-      _config_parent=$(path_parent "$VALISE_ACTIVE_LINK")
-      if [ ! -d "$_config_parent" ]; then
-        _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
-        "$_mkdir_path" -p "$_config_parent"
-      fi
-      acquire_lock
-      switch_active_link "$_target_dir"
-      # Commands follow the active release only where install published
-      # them: a ledger exists once an install ran with integration.
-      if [ -f "$(commands_ledger_path)" ]; then
-        reconcile_commands "$_target_dir"
-      fi
-      release_lock
+      [ "$#" -le 2 ] || die "usage: valise release use <sha256>"
+      release_activate "$_target"
       info "switched to release $_target"
       ;;
     prune)
@@ -679,6 +648,10 @@ cmd_release() {
         info "prune kept $_prune_kept release(s); removed $_prune_removed (no active release)"
       fi
       ;;
+    rollback)
+      shift
+      cmd_release_rollback "$@"
+      ;;
     verify)
       if [ "$#" -gt 0 ]; then
         shift
@@ -686,7 +659,7 @@ cmd_release() {
       cmd_verify_active "$@"
       ;;
     *)
-      die "unknown release subcommand: $_subcmd (use list, use, prune, or verify)"
+      die "unknown release subcommand: $_subcmd (use list, use, rollback, prune, or verify)"
       ;;
   esac
 }
@@ -716,6 +689,15 @@ cmd_install() {
     die "manifest.tsv does not list valise-release.conf: only a release tree built by valise build can be installed"
   [ "$(release_conf_value "$_manifest_root" format 2>/dev/null)" = 2 ] ||
     die "valise-release.conf does not declare format=2: rebuild the release with this valise"
+
+  # Everything install will write must be writable before anything changes.
+  if [ "$_install_integration" -eq 1 ]; then
+    integration_preflight
+    if ! _install_unmanaged=$(integration_unmanaged_report); then
+      info "warning: these lines load valise outside a managed block, so it may load twice; remove them:"
+      printf '%s\n' "$_install_unmanaged"
+    fi
+  fi
 
   # Release identity is content-derived; the schema header is not an ID.
   _release_id=$(file_sha256 "$_manifest") || die "no trusted SHA-256 utility available"
@@ -851,6 +833,9 @@ cmd_install() {
     if [ -e "$VALISE_ACTIVE_LINK" ] && [ ! -L "$VALISE_ACTIVE_LINK" ]; then
       die "active path exists and is not a symlink: $VALISE_ACTIVE_LINK"
     fi
+    # From here a failure puts the previous active release back.
+    install_txn_begin
+    _install_txn=1
     switch_active_link "$_target_dir"
     info "active release set to $_release_id"
   fi
@@ -898,6 +883,7 @@ cmd_install() {
       [ "$(file_mode "$_fish_hook")" = 0644 ] || die "Fish hook mode mismatch"
       _hook_actual=$("$_cat_path" "$_fish_hook") || die "cannot read published Fish hook"
       [ "$_hook_actual" = "$_hook_expected" ] || die "published Fish hook contents mismatch"
+      _txn_changed="$_txn_changed $_fish_hook"
       info "Fish hook deployed: $_fish_hook"
       info "remove this file to uninstall the Fish integration"
     fi
@@ -908,6 +894,7 @@ cmd_install() {
     reconcile_commands "$_target_dir"
   fi
 
+  _install_txn=0
   release_lock
   info "installation complete"
   info "run 'valise init' to print the shell integration snippet for manual setup"

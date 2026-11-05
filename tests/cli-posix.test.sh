@@ -164,6 +164,7 @@ mkdir -p "$_mm_tree/bin"
 printf '#!/bin/sh\necho hi\n' >"$_mm_tree/bin/tool.sh"
 chmod 0755 "$_mm_tree/bin/tool.sh"
 printf 'plain\n' >"$_mm_tree/readme.txt"
+chmod 0644 "$_mm_tree/readme.txt"
 if "$_valise" make-manifest "$_mm_tree" >"$_test_home/make-manifest.out" 2>&1; then
   pass "make-manifest writes a manifest for a tree"
 else
@@ -574,26 +575,30 @@ else
 fi
 
 # --- Atomic symlink swap test ---
-# Create two fake releases and verify swap doesn't touch .profile
-_rel1="$XDG_DATA_HOME/valise/releases/release_a"
-_rel2="$XDG_DATA_HOME/valise/releases/release_b"
-_installed_active=$(readlink "$XDG_CONFIG_HOME/valise/active")
-mkdir -p "$_rel1" "$_rel2"
-for _rel in "$_rel1" "$_rel2"; do
-  cp -p "$_installed_active/fixture.sh" "$_installed_active/valise-release.conf" "$_rel/"
-  chmod 0444 "$_rel/fixture.sh" "$_rel/valise-release.conf"
-done
-chmod 0555 "$_rel1" "$_rel2"
+# Install a second real release beside the first (release use verifies the
+# sealed manifest snapshot, whose digest is the release name) and verify the
+# swap does not touch .profile.
+_rel1=$(cd "$XDG_CONFIG_HOME/valise/active" && pwd -P)
+_repo2="$_test_home/repo2"
+mkdir -p "$_repo2"
+printf '# fixture two\n' >"$_repo2/fixture.sh"
+cp "$_release_conf_source" "$_repo2/valise-release.conf"
+chmod 0644 "$_repo2/fixture.sh" "$_repo2/valise-release.conf"
+"$_valise" make-manifest "$_repo2" >/dev/null
+(cd "$_repo2" && "$_valise" install --no-integration >/dev/null)
+_rel2=$(cd "$XDG_CONFIG_HOME/valise/active" && pwd -P)
+release_a=${_rel1##*/}
+release_b=${_rel2##*/}
 
 # Set initial active
-ln -sfn "$_rel1" "$XDG_CONFIG_HOME/valise/active"
+(cd "$_test_home/repo" && "$_valise" release use "$release_a" >/dev/null)
 
 # Create a .profile that should NOT be modified by variant switch
 printf '# test profile\n' > "$_test_home/.profile"
 _profile_before=$(cat "$_test_home/.profile")
 
 # Switch variant
-(cd "$_test_home/repo" && "$_valise" release use release_b 2>/dev/null)
+(cd "$_test_home/repo" && "$_valise" release use "$release_b" >/dev/null)
 
 _profile_after=$(cat "$_test_home/.profile")
 if [ "$_profile_before" = "$_profile_after" ]; then
@@ -616,7 +621,7 @@ else
 fi
 
 # Switch back
-(cd "$_test_home/repo" && "$_valise" release use release_a 2>/dev/null)
+(cd "$_test_home/repo" && "$_valise" release use "$release_a" >/dev/null)
 _active_target=$(readlink "$XDG_CONFIG_HOME/valise/active" 2>/dev/null || :)
 _active_resolved=$(cd "$_active_target" 2>/dev/null && pwd -P) || _active_resolved=
 _rel1_resolved=$(cd "$_rel1" 2>/dev/null && pwd -P) || _rel1_resolved=

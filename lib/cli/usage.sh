@@ -15,13 +15,14 @@ usage() {
     "  module <new|list|remove>  Create, list, or remove project modules" \
     "  build [--variant=<name>] [--bundle=<name>] [out]" \
     "                            Build a release tree (default: build/release)" \
-    "  apply [--variant=<name>] [--bundle=<name>] [--no-integration]" \
+    "  apply [--variant=<name>] [--bundle=<name>] [--no-integration] [--dry-run]" \
     "                            Build the project, install it, and integrate it" \
     "  status                    Show project, active release, integration, and drift" \
     "" \
     "Release commands:" \
     "  install [--no-integration]  Install the release tree in the current directory" \
-    "  release <list|use|prune|verify>  Manage installed releases" \
+    "  release <list|use|rollback|prune|verify>  Manage installed releases" \
+    "  uninstall [--keep-releases]  Remove the integration, commands, and releases" \
     "  init [posix|fish]         Print the shell integration snippet" \
     "  doctor [--pre-install] [--no-integration]  Run environment diagnostics" \
     "" \
@@ -73,7 +74,11 @@ usage_install() {
     "and ~/.zshrc when that shell is \$SHELL or the file exists; and to ~/.zprofile" \
     "when zsh is installed or the file exists. Symlinked files are left alone. A" \
     "Fish conf.d hook is written when Fish is installed. Each install replaces the" \
-    "block in place." \
+    "block in place. Each command the release publishes gets a stub in the command" \
+    "directory (see valise doctor)." \
+    "" \
+    "Every startup file is checked before the active release changes. If a later" \
+    "step fails, the previous active release is restored." \
     "" \
     "  --no-integration  Write no startup file, Fish hook, or command stubs."
 }
@@ -89,12 +94,28 @@ usage_doctor() {
     "  --no-integration  Check the environment and active release only."
 }
 
+usage_uninstall() {
+  printf '%s\n' \
+    "usage: valise uninstall [--keep-releases]" \
+    "" \
+    "Remove what valise install wrote: the managed block from each startup file" \
+    "(every other line is kept, and a file install created is deleted when it is" \
+    "left empty), the Fish hook, the command stubs valise owns, the active link," \
+    "and the installed releases. Files valise does not own are left alone." \
+    "" \
+    "  --keep-releases   Keep the installed releases." \
+    "" \
+    "The valise CLI itself is not removed."
+}
+
 usage_release() {
   printf '%s\n' \
-    "usage: valise release <list|use|prune|verify> [options]" \
+    "usage: valise release <list|use|rollback|prune|verify> [options]" \
     "" \
     "  list                List installed releases and mark the active one." \
     "  use <sha256>        Verify a release and make it active." \
+    "  rollback            Verify the release that was active before the last" \
+    "                      switch and make it active again." \
     "  prune [--keep=N]    Remove older releases, keeping the active one and the" \
     "                      N newest by modification time. A release that fails" \
     "                      verification is kept, not removed." \
@@ -151,12 +172,15 @@ usage_build() {
 
 usage_apply() {
   printf '%s\n' \
-    "usage: valise apply [--variant=<name>] [--bundle=<name>] [--no-integration]" \
+    "usage: valise apply [--variant=<name>] [--bundle=<name>] [--no-integration] [--dry-run]" \
     "" \
     "Build the project, install the result, write the shell integration, and verify" \
     "the active release. See 'valise install --help' for the files it writes." \
     "" \
-    "  --no-integration  Write no startup file, Fish hook, or command stubs."
+    "  --no-integration  Write no startup file, Fish hook, or command stubs." \
+    "  --dry-run         Build, then print what install would change: the release," \
+    "                    each startup file, the Fish hook, and the command stubs." \
+    "                    Nothing outside build/ is written."
 }
 
 usage_status() {
