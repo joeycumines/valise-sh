@@ -75,7 +75,7 @@ usage_install() {
     "Fish conf.d hook is written when Fish is installed. Each install replaces the" \
     "block in place." \
     "" \
-    "  --no-integration  Write no startup file and no Fish hook."
+    "  --no-integration  Write no startup file, Fish hook, or command stubs."
 }
 
 usage_doctor() {
@@ -156,7 +156,7 @@ usage_apply() {
     "Build the project, install the result, write the shell integration, and verify" \
     "the active release. See 'valise install --help' for the files it writes." \
     "" \
-    "  --no-integration  Write no startup file and no Fish hook."
+    "  --no-integration  Write no startup file, Fish hook, or command stubs."
 }
 
 usage_status() {

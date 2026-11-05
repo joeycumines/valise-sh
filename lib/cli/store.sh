@@ -163,6 +163,13 @@ release_lock() {
     if [ -e "$_hook_tmp" ] || [ -L "$_hook_tmp" ]; then _cleanup_failed=1; fi
     _hook_tmp=""
   fi
+  for _release_tmp in "${_rc_tmp:-}" "${_rc_stub:-}"; do
+    [ -n "$_release_tmp" ] || continue
+    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_release_tmp" 2>/dev/null || :
+    if [ -e "$_release_tmp" ] || [ -L "$_release_tmp" ]; then _cleanup_failed=1; fi
+  done
+  _rc_tmp=""
+  _rc_stub=""
   if [ -n "$_mm_tmp" ]; then
     [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_mm_tmp" 2>/dev/null || :
     if [ -e "$_mm_tmp" ] || [ -L "$_mm_tmp" ]; then _cleanup_failed=1; fi
@@ -555,6 +562,11 @@ cmd_release() {
       fi
       acquire_lock
       switch_active_link "$_target_dir"
+      # Commands follow the active release only where install published
+      # them: a ledger exists once an install ran with integration.
+      if [ -f "$(commands_ledger_path)" ]; then
+        reconcile_commands "$_target_dir"
+      fi
       release_lock
       info "switched to release $_target"
       ;;
@@ -843,9 +855,8 @@ cmd_install() {
     info "active release set to $_release_id"
   fi
 
-  # Deploy the Fish conf.d hook when Fish is available. A built release has no
-  # Fish surface; an engine release exposes the project Fish entrypoint, so the
-  # emitted integration handles that shape.
+  # Deploy the Fish conf.d hook when Fish is available. The hook loads the
+  # release's Fish runtime when it has one and does nothing otherwise.
   _fish_path=$(trusted_utility_path fish 2>/dev/null || :)
   if [ "$_install_integration" -eq 1 ] && [ -n "$_fish_path" ]; then
     _fish_conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
@@ -894,6 +905,7 @@ cmd_install() {
 
   if [ "$_install_integration" -eq 1 ]; then
     write_posix_integration
+    reconcile_commands "$_target_dir"
   fi
 
   release_lock

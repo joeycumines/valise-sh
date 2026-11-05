@@ -12,7 +12,7 @@ VALISE_REQUIRED_PARSERS ?= $(if $(filter 1,$(VALISE_REQUIRE_TOOLING)),sh$(comma)
 
 VALISE_CLI_LIBS := $(wildcard lib/cli/*.sh)
 
-.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-project-layout test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-consumer-profile clean distclean
+.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-project-layout test-commands test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-consumer-profile clean distclean
 .NOTPARALLEL: check test
 
 TEST_ENV_PATH = /usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
@@ -68,6 +68,7 @@ test: test-runner-quarantine
 	@$(MAKE) test-registry
 	@$(MAKE) test-project-ux
 	@$(MAKE) test-project-layout
+	@$(MAKE) test-commands
 	@$(MAKE) test-compiler-benchmark
 	@$(MAKE) test-fish-runtime
 	@$(MAKE) test-consumer-profile
@@ -217,6 +218,9 @@ test-project-ux: tests/project-ux.test.sh bin/valise $(VALISE_CLI_LIBS) lib/meta
 test-project-layout: tests/project-layout.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
+test-commands: tests/commands.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
+	@$(TEST_RUNNER)
+
 test-compiler-benchmark: tests/compiler-benchmark.test.sh lib/compiler.awk
 	@$(TEST_RUNNER)
 
@@ -265,4 +269,4 @@ clean: ## Delete build products, temporary release trees, and pack tarballs.
 distclean: clean ## Delete all generated files and local build directories.
 	@rm -rf build
 
-check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-registry test-project-ux test-project-layout test-cli-gaps test-contrib-modules test-consumer-profile test-docs test-doc-links
+check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-registry test-project-ux test-project-layout test-commands test-cli-gaps test-contrib-modules test-consumer-profile test-docs test-doc-links

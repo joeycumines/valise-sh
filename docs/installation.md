@@ -191,6 +191,28 @@ release; it carries `entrypoints/profile.sh` and `lib/`, not `generated/`.
 The included [e2e example](../examples/e2e/README.md) demonstrates a small
 complete profile.
 
+## Published commands
+
+A release whose modules declare `commands=` or `executables=` carries a
+`bin/` directory (see [the module ABI](module-abi.md#published-commands)).
+`valise install` writes a stub for each name into the command directory,
+`${VALISE_BIN_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}`. A stub is a short
+`sh` script that runs the same name under the active release link, so
+switching releases never rewrites a stub; install and `valise release use`
+add the stubs the new release needs and remove the ones it no longer has.
+
+valise records each stub it writes, with its SHA-256, in
+`$XDG_STATE_HOME/valise/commands.tsv`, and only touches files listed there:
+
+- A file valise did not write is never replaced. Install reports the
+  command as not published, and `valise doctor` reports the collision.
+- A stub that was edited after valise wrote it is left in place and
+  dropped from the ledger.
+
+`valise install --no-integration` writes no stubs and no ledger, and a later
+`valise release use` leaves the command directory alone. Install and
+`valise doctor` warn when the command directory is not on PATH.
+
 ## Integrity and provenance
 
 The manifest detects changes to release files after it is created. It does
@@ -211,6 +233,7 @@ controls.
 | Releases | `~/.local/share/valise/releases/` | `$XDG_DATA_HOME/valise/releases/` |
 | Active release | `~/.config/valise/active` | `$XDG_CONFIG_HOME/valise/active` |
 | Lock and state | `~/.local/state/valise/` | `$XDG_STATE_HOME/valise/` |
+| Command stubs | `~/.local/bin/` | `$VALISE_BIN_DIR`, then `$XDG_BIN_HOME` |
 
 The active path is a symlink to the selected release.
 
@@ -250,7 +273,8 @@ block between `# BEGIN valise managed block` and `# END valise managed
 block` in `~/.profile` and in any of `~/.bash_profile`, `~/.bash_login`,
 `~/.bashrc`, `~/.zshrc`, and `~/.zprofile`. For Fish, remove
 `${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/valise.fish` if it is still
-the valise-managed hook. Then uninstall the CLI and remove the valise XDG
+the valise-managed hook. Delete each command stub listed in
+`$XDG_STATE_HOME/valise/commands.tsv`. Then uninstall the CLI and remove the valise XDG
 state. Installed release files are read-only, so make them writable first:
 
 ```sh

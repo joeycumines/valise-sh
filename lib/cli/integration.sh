@@ -262,6 +262,9 @@ cmd_doctor() {
   elif [ "$_doctor_pre_install" -eq 1 ]; then
     printf '  info: skipping the active release check (--pre-install)\n'
   fi
+  if [ "$_doctor_active_ok" -eq 1 ] && [ "$_doctor_check_integration" -eq 1 ]; then
+    doctor_commands "$_doctor_active_target"
+  fi
 
   if [ -n "${HOME:-}" ]; then
     # Check the startup files the running shell actually reads. The shell is

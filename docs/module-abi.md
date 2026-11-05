@@ -29,7 +29,8 @@ Optional fields:
 | `requires` | Space-separated required dependency module identifiers. |
 | `optional` | Space-separated optional dependency module identifiers. |
 | `exports` | Space-separated exported command/function identifiers. |
-| `updates` | Space-separated update identifiers registered by the consuming project. |
+| `commands` | Space-separated exports a built release publishes as commands on PATH. |
+| `executables` | Space-separated module-relative paths of scripts published as commands. |
 | `version` | Optional module version used to reject version skew across roots. |
 
 ## Meta modules
@@ -54,7 +55,6 @@ optional=
 shells=bash zsh ksh
 platforms=any
 exports=
-updates=
 ```
 
 At least one of `load` or `requires` is required: a module with neither a
@@ -278,11 +278,34 @@ successfully loaded. An export must name a function, so shell reserved words
 (`case`, `do`, `done`, `elif`, `else`, `esac`, `fi`, `for`, `if`, `in`,
 `then`, `until`, `while`, and `time`) are rejected.
 
-`updates` lists update registrations declared by the module. Each value is an ABI
-identifier that maps one-to-one to a row in the project update manifest. The
-project validator rejects missing, duplicate, or unowned registrations. URL,
-destination, digest, trust policy, and rollback state belong in that manifest;
-module metadata states registration only and does not execute update lifecycle work.
+### Published commands
+
+`commands` names exports that should also run as ordinary commands, from any
+program and not only from an interactive shell. Every entry must also appear in
+`exports`. `executables` names standalone scripts in the module's directory;
+each is published under its file name, which must start with a letter, digit,
+or underscore and contain only letters, digits, `.`, `_`, and `-`. The
+metadata field `updates` was removed in 0.3.0; a metadata file that still sets
+it is rejected.
+
+`valise build` turns both into entries under the release's `bin/`:
+
+- For a module with `commands`, it compiles `plans/commands/<module>.sh`, a
+  plan whose only root is that module, for the module's command shell: `sh`
+  when the module supports `posix` or `sh`, otherwise the first of `bash`,
+  `zsh`, and `ksh` it lists. Each command gets a launcher `bin/<command>` that
+  runs under that shell, loads the plan in strict mode from the release that
+  contains it, restores the caller's `VALISE_MODE`, and calls the function
+  with the command's arguments. The function's exit status is the command's.
+- Each `executables` path is copied to `bin/<file name>` and keeps its own
+  interpreter line.
+
+The plan's closure ships in the release even when no shell bundle loads it.
+A Fish-only module cannot declare `commands`; it may declare `executables`.
+Two modules that publish the same command name, from either field, fail the
+build. `valise-release.conf` lists the published names in `commands=`.
+Installation puts a stub for each name on PATH; see
+[installation.md](installation.md#published-commands).
 
 ## Update channel for shared modules
 
@@ -291,9 +314,7 @@ updates. To update a provider, vendor a reviewed revision and rebuild the
 release manifest. Bump `version=` when making an incompatible module change;
 the loader rejects conflicting versions of the same module across roots.
 The manifest detects changes to installed files but does not authenticate
-their author; see [installation.md](installation.md). The `updates=` field
-is registration for a consuming project's separate update manifest, not an
-engine update mechanism.
+their author; see [installation.md](installation.md).
 
 ## Side-effect phases
 
@@ -388,7 +409,8 @@ Permissive mode reports the affected module and continues with unrelated modules
 
 ## Path fields
 
-`load` paths are repository-relative implementation paths. Absolute
+`load` and `executables` paths are relative to the module's source
+directory (the project root, `layers/<provider>/`, or the engine). Absolute
 paths, `..` path segments, spaces, quotes, shell metacharacters, and glob
 characters are invalid. Reading metadata must not source these paths.
 
