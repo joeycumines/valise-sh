@@ -37,9 +37,10 @@ _link="$_test_root/bin/valise"
 
 mkdir -p "$_project/shell/module.d" "$_project/shell/modules" \
   "$_project/shell/layers/vendor/module.d" "$_project/shell/layers/vendor/modules" \
-  "$_project/shell/release" "$_pkg/bin" "$_pkg/lib" "$_test_root/bin"
+  "$_project/shell/release" "$_pkg/bin" "$_pkg/lib/cli" "$_test_root/bin"
 
 cp "$_repo/bin/valise" "$_pkg/bin/valise"
+cp "$_repo"/lib/cli/*.sh "$_pkg/lib/cli/"
 cp "$_repo/lib/compiler.awk" "$_pkg/lib/compiler.awk"
 cp "$_repo/lib/capabilities.sh" "$_pkg/lib/capabilities.sh"
 cp "$_repo/lib/metadata.sh" "$_pkg/lib/metadata.sh"

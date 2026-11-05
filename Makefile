@@ -10,6 +10,8 @@ VALISE_REQUIRE_TOOLING ?= $(if $(filter true TRUE 1 yes YES,$(CI) $(GITHUB_ACTIO
 comma := ,
 VALISE_REQUIRED_PARSERS ?= $(if $(filter 1,$(VALISE_REQUIRE_TOOLING)),sh$(comma)dash$(comma)ksh$(comma)busybox-ash$(comma)bash$(comma)fish,)
 
+VALISE_CLI_LIBS := $(wildcard lib/cli/*.sh)
+
 .PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-consumer-profile clean distclean
 .NOTPARALLEL: check test
 
@@ -198,22 +200,22 @@ test-contrib-modules: tests/contrib-modules.test.sh entrypoints/profile.sh lib/m
 test-non-macos-runtime: tests/non-macos-runtime.test.sh manifests/parser-support.tsv entrypoints/profile.sh lib/capabilities.sh lib/metadata.sh lib/loader.sh module.d/platform_posix.meta module.d/platform_linux.meta module.d/platform_bsd.meta modules/platform/posix.sh modules/platform/linux/capabilities.sh modules/platform/bsd/capabilities.sh
 	@$(RUNTIME_TEST_RUNNER)
 
-test-cli-posix: tests/cli-posix.test.sh bin/valise
+test-cli-posix: tests/cli-posix.test.sh bin/valise $(VALISE_CLI_LIBS)
 	@$(TEST_RUNNER)
 
-test-cli-gaps: tests/cli-gaps.test.sh bin/valise
+test-cli-gaps: tests/cli-gaps.test.sh bin/valise $(VALISE_CLI_LIBS)
 	@$(TEST_RUNNER)
 
-test-compile-assemble: tests/compile-assemble.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
+test-compile-assemble: tests/compile-assemble.test.sh bin/valise $(VALISE_CLI_LIBS) lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
-test-compiler-plan: tests/compiler-plan.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
+test-compiler-plan: tests/compiler-plan.test.sh bin/valise $(VALISE_CLI_LIBS) lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
-test-registry: tests/registry.test.sh bin/valise lib/metadata.sh lib/compiler.awk lib/capabilities.sh
+test-registry: tests/registry.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
-test-project-ux: tests/project-ux.test.sh bin/valise lib/metadata.sh lib/compiler.awk lib/capabilities.sh
+test-project-ux: tests/project-ux.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
 test-compiler-benchmark: tests/compiler-benchmark.test.sh lib/compiler.awk
@@ -245,7 +247,7 @@ test-doc-links: tests/docs/doc-links.test.sh README.md AGENTS.md $(wildcard docs
 	@echo "=== shell-profile doc-link case-sensitivity ==="
 	@$(TEST_RUNNER)
 
-test-e2e: tests/e2e.test.sh bin/valise examples/e2e/build-manifest.sh
+test-e2e: tests/e2e.test.sh bin/valise $(VALISE_CLI_LIBS) examples/e2e/build-manifest.sh
 	@echo "=== valise end-to-end test ==="
 	@VALISE_REQUIRE_TOOLING="$(VALISE_REQUIRE_TOOLING)" /bin/bash tests/e2e.test.sh
 
@@ -254,7 +256,7 @@ test-e2e: tests/e2e.test.sh bin/valise examples/e2e/build-manifest.sh
 # and works only on the copy, so the original tree and the live profile
 # are never touched. It skips with a visible message when the tree is
 # absent, which is the case in CI and in a package install.
-test-consumer-profile: tests/consumer-profile.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
+test-consumer-profile: tests/consumer-profile.test.sh bin/valise $(VALISE_CLI_LIBS) lib/compiler.awk lib/capabilities.sh
 	@echo "=== valise consumer-profile end-to-end test ==="
 	@$(TEST_RUNNER)
 

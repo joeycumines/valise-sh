@@ -343,7 +343,7 @@ if command -v npm >/dev/null 2>&1; then
   else
     fail "packed tarball extracts"
   fi
-  for _tar_member in package/bin/valise package/entrypoints/profile.sh package/entrypoints/fish/profile.fish package/lib/loader.sh package/lib/metadata.sh package/lib/capabilities.sh package/lib/fish/loader.fish package/lib/fish/metadata.fish package/manifests/parser-support.tsv package/module.d/contrib_path.meta package/modules/system/contrib_path.sh package/docs/installation.md package/docs/release-policy.md package/examples/local/modules/hello_valise.sh package/LICENSE package/CHANGELOG.md; do
+  for _tar_member in package/bin/valise package/lib/cli/usage.sh package/lib/cli/common.sh package/lib/cli/store.sh package/lib/cli/fish-hook.sh package/lib/cli/integration.sh package/lib/cli/project.sh package/entrypoints/profile.sh package/entrypoints/fish/profile.fish package/lib/loader.sh package/lib/metadata.sh package/lib/capabilities.sh package/lib/fish/loader.fish package/lib/fish/metadata.fish package/manifests/parser-support.tsv package/module.d/contrib_path.meta package/modules/system/contrib_path.sh package/docs/installation.md package/docs/release-policy.md package/examples/local/modules/hello_valise.sh package/LICENSE package/CHANGELOG.md; do
     if [ -f "$_tar_root/$_tar_member" ]; then
       pass "tarball contains $_tar_member"
     else

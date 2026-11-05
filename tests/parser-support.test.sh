@@ -296,7 +296,7 @@ while IFS= read -r _rel; do
   [ -n "$_rel" ] || continue
   case "$_rel" in
   */.gitkeep | .gitkeep) continue ;;
-  *.sh | *.zsh | *.fish | *.awk) ;;
+  bin/valise | *.sh | *.zsh | *.fish | *.awk) ;;
   *)
     _total=$((_total + 1))
     fail "architecture-path file has parser-manifest compatible suffix" "$_rel"
@@ -325,7 +325,7 @@ ROW
   done
   IFS="$_old_ifs"
   unset _rows _row_count _row _pattern _class _parsers _requirement _old_ifs _parser_name
-done < <(cd "$ROOT_DIR" && find entrypoints lib modules -type f -print | sed 's|^./||' | sort)
+done < <(cd "$ROOT_DIR" && find bin entrypoints lib modules -type f -print | sed 's|^./||' | sort)
 
 if [ "$_found_files" -eq 0 ]; then
   _total=$((_total + 1))
