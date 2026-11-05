@@ -466,6 +466,18 @@ project_preprocess() {
   ' "$1"
 }
 
+# project_effective_roots <registry> <shell> <roots> <excludes>
+# Print the qualified roots that remain for the shell once the variant's
+# exclusions apply: the seeds the compiler starts from.
+project_effective_roots() {
+  _per_prelude=$(project_prelude_functions) || exit 1
+  _per_stream=$(project_preprocess "$1" "$2" "$3" "$4" "$_per_prelude") ||
+    die "cannot resolve the $2 module graph"
+  _per_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+  printf '%s\n' "$_per_stream" | "$_per_awk" '/^SEED:/ { print substr($0, 6); exit }'
+  unset _per_prelude _per_stream _per_awk
+}
+
 # project_compile <registry> <shell> <seeds> <excludes> <output> [plan|closure]
 # Compile one plan (or print its ordered closure) into output.
 project_compile() {
@@ -823,9 +835,26 @@ cmd_new() {
     '# Shared project initialization. Add shell functions or exports here.' \
     'profile_main_loaded() { :; }' \
     >"$_new_target/modules/profile_main.sh"
+  "$_new_mkdir" -p "$_new_target/modules/fish" ||
+    die "cannot create project directories: $_new_target"
+  printf '%s\n' \
+    'name=profile_main_fish' \
+    'version=' \
+    'side_effect=read-only' \
+    'requires=' \
+    'optional=' \
+    'shells=fish' \
+    'platforms=any' \
+    'exports=profile_main_loaded' \
+    'load=modules/fish/profile_main.fish' \
+    >"$_new_target/module.d/profile_main_fish.meta"
+  printf '%s\n' \
+    '# Fish project initialization. Add Fish functions here.' \
+    'function profile_main_loaded; end' \
+    >"$_new_target/modules/fish/profile_main.fish"
   printf 'variant\tdescription\texcluded\ndefault\tAll project modules\t\n' \
     >"$_new_target/variants.tsv"
-  printf 'bundle\tshell\troots\ndefault\tsh\tprofile_main\ndefault\tbash\tprofile_main\ndefault\tzsh\tprofile_main\ndefault\tksh\tprofile_main\n' \
+  printf 'bundle\tshell\troots\ndefault\tsh\tprofile_main\ndefault\tbash\tprofile_main\ndefault\tzsh\tprofile_main\ndefault\tksh\tprofile_main\ndefault\tfish\tprofile_main_fish\n' \
     >"$_new_target/bundles.tsv"
   printf '%s\n' '/build/' >"$_new_target/.gitignore"
   printf '%s\n' \
@@ -839,11 +868,12 @@ cmd_new() {
 
 # project_default_wire_targets <project-root> <bundle>
 # Print the module a new module is wired into: the single distinct root of the
-# bundle across its shells. Fail, listing the candidates, when there is not
-# exactly one.
+# bundle across its POSIX shells. A new module is a POSIX module, so the Fish
+# row never takes it. Fail, listing the candidates, when there is not exactly
+# one.
 project_default_wire_targets() {
   _pdw_all=
-  for _pdw_shell in $VALISE_PROJECT_SHELLS fish; do
+  for _pdw_shell in $VALISE_PROJECT_SHELLS; do
     _pdw_roots=$(project_bundle_roots "$1" "$_pdw_shell" "$2") || return 1
     for _pdw_root in $_pdw_roots; do
       case " $_pdw_all " in
@@ -1149,6 +1179,8 @@ cmd_build() {
 #   manifest.tsv                        release manifest
 #   plans/<shell>.sh                    static plans for sh bash zsh ksh
 #   runtime/capabilities.sh             the capability prelude
+#   runtime/fish/{metadata,loader,profile}.fish  the Fish runtime, when the
+#                                       bundle has Fish roots
 #   module.d/, modules/...              primary modules in the closure
 #   layers/<p>/module.d, layers/<p>/... layer modules in the closure
 #   valise/module.d, valise/modules/... engine modules in the closure
@@ -1184,23 +1216,43 @@ project_build() {
   : >"$_pb_scratch/closure"
   _pb_conf_roots=
   _pb_any=0
+  _pb_fish=0
   for _pb_shell in $VALISE_PROJECT_SHELLS fish; do
     _pb_roots=$(project_bundle_roots "$_project_root" "$_pb_shell" "$_pb_bundle") ||
       die "cannot read bundle $_pb_bundle"
+    if [ -z "$_pb_roots" ]; then
+      _pb_conf_roots="$_pb_conf_roots${_pb_conf_roots:+
+}roots_$_pb_shell="
+      continue
+    fi
+    # The release records the roots that survive the variant, qualified, so
+    # the Fish adapter seeds exactly what the closure contains.
+    _pb_effective=$(project_effective_roots "$_pb_registry" "$_pb_shell" "$_pb_roots" "$_pb_excludes") || exit 1
     _pb_conf_roots="$_pb_conf_roots${_pb_conf_roots:+
-}roots_$_pb_shell=$_pb_roots"
-    [ -n "$_pb_roots" ] || continue
+}roots_$_pb_shell=$_pb_effective"
     _pb_any=1
     project_compile "$_pb_registry" "$_pb_shell" "$_pb_roots" "$_pb_excludes" "$_pb_scratch/closure.$_pb_shell" closure
     "$_pb_awk" '{ print }' "$_pb_scratch/closure.$_pb_shell" >>"$_pb_scratch/closure" ||
       die "cannot record the $_pb_shell closure"
-    if [ "$_pb_shell" != fish ]; then
+    if [ "$_pb_shell" = fish ]; then
+      _pb_fish=1
+    else
       project_compile "$_pb_registry" "$_pb_shell" "$_pb_roots" "$_pb_excludes" "$_stage/plans/$_pb_shell.sh"
       info "compiled plan for $_pb_shell"
     fi
   done
   [ "$_pb_any" -eq 1 ] || die "bundle $_pb_bundle has no roots for any shell"
   "$_pb_cp" "$_pb_engine/lib/capabilities.sh" "$_stage/runtime/capabilities.sh" || die "cannot copy the capability prelude"
+  # A bundle with Fish roots gets the native Fish runtime: the metadata
+  # reader, the loader, and the release adapter the Fish hook sources. The
+  # loader resolves the closure copied below at Fish startup.
+  if [ "$_pb_fish" -eq 1 ]; then
+    "$_pb_mkdir" -p "$_stage/runtime/fish" || die "cannot create the Fish runtime directory"
+    for _pb_fish_file in metadata loader profile; do
+      "$_pb_cp" "$_pb_engine/lib/fish/$_pb_fish_file.fish" "$_stage/runtime/fish/$_pb_fish_file.fish" ||
+        die "cannot copy the Fish runtime: lib/fish/$_pb_fish_file.fish"
+    done
+  fi
 
   # Copy every module in the union closure: its metadata and its body, under
   # the release prefix of its source.
@@ -1247,7 +1299,7 @@ project_build() {
   _stage=""
   info "built release: $_pb_out (bundle $_pb_bundle, variant $_pb_variant)"
   unset _pb_variant _pb_bundle _pb_out _pb_excludes _pb_engine _pb_parent _pb_scratch _pb_registry \
-    _pb_conf_roots _pb_any _pb_shell _pb_roots _pb_modules _pb_id _pb_name _pb_source _pb_load \
+    _pb_conf_roots _pb_effective _pb_any _pb_fish _pb_fish_file _pb_shell _pb_roots _pb_modules _pb_id _pb_name _pb_source _pb_load \
     _pb_dir _pb_prefix _pb_pairs _pb_pair _pb_from _pb_to
 }
 

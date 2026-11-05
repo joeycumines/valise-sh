@@ -87,16 +87,33 @@ Zsh does not read `~/.profile` on its own: zsh login shells read
 `.zprofile`, not `~/.profile`. Install writes the same managed block to
 `~/.zprofile`, so zsh needs no separate pointer.
 
-A built project release has no Fish surface: no Fish entrypoint, generated
-Fish plan, or native Fish loader. The Fish hook verifies the active release,
-then loads nothing and prints nothing. Only an engine release with
-`entrypoints/fish/profile.fish` uses the native Fish loader.
+When the bundle has `fish` rows, the release carries `runtime/fish/`: the
+native Fish metadata reader and loader and `runtime/fish/profile.fish`, which
+loads the bundle's Fish roots recorded in `valise-release.conf`. A release
+whose bundle has no Fish rows has no `runtime/fish/`; the Fish hook then loads
+nothing and prints nothing.
 
 The Fish hook verifies the active release before loading it. The check
 validates the active pointer, the release manifest, and every listed file.
-If verification fails, the hook loads no release code. Fish continues
-starting even if a `conf.d` hook fails, so this does not abort the
-interactive shell.
+If verification fails, the hook loads no release code and reports
+`active release authentication failed`. Fish continues starting even if a
+`conf.d` hook fails, so this does not abort the interactive shell.
+
+The Fish hook is several hundred lines while the POSIX block is about twenty.
+The difference is deliberate. The POSIX block sources a plan and trusts the
+release on disk, as any startup file does. The Fish hook does more because
+it must not trust release code before that code is verified, and Fish gives a
+sourced file the caller's global functions and variables. The hook therefore
+carries its own verification and cleanup, written before any release file
+runs: it authenticates the release through `valise release verify`, saves the
+caller's `SHELL_PROJECT_ROOT` and `VALISE_MODULE_ROOT` in every scope, records
+every caller function so a release cannot silently replace one, sources
+`runtime/fish/profile.fish` inside that transaction, and on any failure
+removes what the release defined and restores the saved state. None of this
+can live in the release, because a tampered release would carry tampered
+checks. `valise apply` compares the generated hook with the installed one
+byte for byte and reports `Fish hook current` without rewriting an identical
+hook.
 
 To write integration by hand, print it once and paste or save it:
 

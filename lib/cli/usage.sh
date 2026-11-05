@@ -111,8 +111,8 @@ usage_new() {
     "Scaffold a new valise project in dir (default: the current directory)." \
     "" \
     "The directory must be empty or absent. The scaffold contains valise.conf," \
-    "bundles.tsv with sh, bash, zsh and ksh rows, variants.tsv, and a seed module" \
-    "profile_main in module.d/ and modules/."
+    "bundles.tsv with sh, bash, zsh, ksh and fish rows, variants.tsv, the POSIX" \
+    "seed module profile_main and the Fish seed module profile_main_fish."
 }
 
 usage_module() {
@@ -120,9 +120,9 @@ usage_module() {
     "usage: valise module <new|list|remove> [options]" \
     "" \
     "  new <name> [--exports=<list>] [--into=<module>[,...] | --no-wire]" \
-    "                                  Create a module in module.d/ and add it to the" \
-    "                                  requires= of the bundle's single root, of the" \
-    "                                  named modules, or of none." \
+    "                                  Create a POSIX module in module.d/ and add it" \
+    "                                  to the requires= of the bundle's single POSIX" \
+    "                                  root, of the named modules, or of none." \
     "  list                            List the project's and its layers' modules." \
     "  remove <name>                   Remove a module and its references in metadata," \
     "                                  bundle roots, and variant exclusions. Refuses" \

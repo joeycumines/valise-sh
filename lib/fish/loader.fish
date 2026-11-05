@@ -157,6 +157,12 @@ function _sp_fish_loader_function_copy_matches --no-scope-shadowing --descriptio
     end
     set -l original_declaration (string replace -r '^function [^[:space:]]+' 'function __source_backed_copy__' -- "$original_lines[2]")
     set -l copy_declaration (string replace -r '^function [^[:space:]]+' 'function __source_backed_copy__' -- "$copy_lines[2]")
+    # `functions --copy` drops --wraps, which every `alias` sets. The option
+    # only links completions; the body and every other option must still
+    # agree. A restore re-checks full provenance and fails closed.
+    set -l wraps_option ' --wraps=(\'[^\']*\'|"[^"]*"|[^[:space:]]+)'
+    set original_declaration (string replace -r -a -- $wraps_option '' "$original_declaration")
+    set copy_declaration (string replace -r -a -- $wraps_option '' "$copy_declaration")
     test "$original_declaration" = "$copy_declaration"; or return 1
     set -l copy_index 3
     while test $copy_index -le (builtin count $copy_lines)
@@ -2235,13 +2241,28 @@ function _sp_fish_loader_init --description 'Initialize the Fish loader with sta
     # providers, followed by engine generic metadata and project generic
     # metadata. Duplicate names are accepted only when metadata and native
     # Fish bodies are byte-identical; conflicting providers fail closed.
+    # A built release (valise-release.conf beside runtime/) ships its loader at
+    # runtime/fish/loader.fish, so ../.. is the release root. Its providers are
+    # the primary modules, each layers/<provider>, then the engine modules
+    # under valise/, in the order valise build resolves them.
+    if test -n "$engine_root"; and test -f "$engine_root/valise-release.conf"
+        if test -d "$engine_root/module.d"
+            sp_fish_loader_add_root "$engine_root"; or return 1
+        end
+        for layer_root in "$engine_root"/layers/*
+            if test -d "$layer_root/module.d"
+                sp_fish_loader_add_root "$layer_root"; or return 1
+            end
+        end
+        if test -d "$engine_root/valise/module.d"
+            sp_fish_loader_add_root "$engine_root/valise"; or return 1
+        end
+        return 0
+    end
+
     set -l project_root ''
     if set -q SHELL_PROJECT_ROOT
-        if test -d "$SHELL_PROJECT_ROOT/shell/module.d"; and test -d "$SHELL_PROJECT_ROOT/shell/modules"
-            set project_root "$SHELL_PROJECT_ROOT/shell"
-        else
-            set project_root "$SHELL_PROJECT_ROOT"
-        end
+        set project_root "$SHELL_PROJECT_ROOT"
     end
     if test -n "$project_root"; and test -d "$project_root/modules/fish"
         sp_fish_loader_add_root "$project_root/modules/fish"; or return 1

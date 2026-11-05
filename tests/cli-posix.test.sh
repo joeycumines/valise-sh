@@ -343,7 +343,7 @@ if command -v npm >/dev/null 2>&1; then
   else
     fail "packed tarball extracts"
   fi
-  for _tar_member in package/bin/valise package/lib/cli/usage.sh package/lib/cli/common.sh package/lib/cli/store.sh package/lib/cli/fish-hook.sh package/lib/cli/integration.sh package/lib/cli/project.sh package/entrypoints/profile.sh package/entrypoints/fish/profile.fish package/lib/loader.sh package/lib/metadata.sh package/lib/capabilities.sh package/lib/fish/loader.fish package/lib/fish/metadata.fish package/manifests/parser-support.tsv package/module.d/valise_path.meta package/modules/system/valise_path.sh package/docs/installation.md package/docs/release-policy.md package/examples/local/modules/hello_valise.sh package/LICENSE package/CHANGELOG.md; do
+  for _tar_member in package/bin/valise package/lib/cli/usage.sh package/lib/cli/common.sh package/lib/cli/store.sh package/lib/cli/fish-hook.sh package/lib/cli/integration.sh package/lib/cli/project.sh package/entrypoints/profile.sh package/lib/fish/profile.fish package/lib/loader.sh package/lib/metadata.sh package/lib/capabilities.sh package/lib/fish/loader.fish package/lib/fish/metadata.fish package/manifests/parser-support.tsv package/module.d/valise_path.meta package/modules/system/valise_path.sh package/docs/installation.md package/docs/release-policy.md package/examples/local/modules/hello_valise.sh package/LICENSE package/CHANGELOG.md; do
     if [ -f "$_tar_root/$_tar_member" ]; then
       pass "tarball contains $_tar_member"
     else
@@ -410,10 +410,20 @@ else
   printf '%s\n' 'FAIL: no SHA-256 utility (need sha256sum or shasum)' >&2
   exit 1
 fi
+# install accepts only a release that declares format=2.
+_release_conf_source="$_test_home/repo/valise-release.conf"
+printf 'format=2\n' >"$_release_conf_source"
+chmod 0644 "$_release_conf_source"
+if command -v sha256sum >/dev/null 2>&1; then
+  _release_conf_digest=$(sha256sum "$_release_conf_source" | cut -d' ' -f1)
+else
+  _release_conf_digest=$(shasum -a 256 "$_release_conf_source" | cut -d' ' -f1)
+fi
 printf '%s\n' \
   'valise-manifest-v2' \
   'destination	source	source_mode	install_mode	bytes	sha256' \
-  "fixture.sh	fixture.sh	0644	0444	10	$_fixture_digest" > "$_manifest_dir/manifest.tsv"
+  "fixture.sh	fixture.sh	0644	0444	10	$_fixture_digest" \
+  "valise-release.conf	valise-release.conf	0644	0444	9	$_release_conf_digest" > "$_manifest_dir/manifest.tsv"
 
 # Test install from repo root context
 (cd "$_test_home/repo" && "$_valise" install 2>&1)
@@ -569,9 +579,10 @@ _rel1="$XDG_DATA_HOME/valise/releases/release_a"
 _rel2="$XDG_DATA_HOME/valise/releases/release_b"
 _installed_active=$(readlink "$XDG_CONFIG_HOME/valise/active")
 mkdir -p "$_rel1" "$_rel2"
-cp -p "$_installed_active/fixture.sh" "$_rel1/fixture.sh"
-cp -p "$_installed_active/fixture.sh" "$_rel2/fixture.sh"
-chmod 0444 "$_rel1/fixture.sh" "$_rel2/fixture.sh"
+for _rel in "$_rel1" "$_rel2"; do
+  cp -p "$_installed_active/fixture.sh" "$_installed_active/valise-release.conf" "$_rel/"
+  chmod 0444 "$_rel/fixture.sh" "$_rel/valise-release.conf"
+done
 chmod 0555 "$_rel1" "$_rel2"
 
 # Set initial active

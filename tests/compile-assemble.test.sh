@@ -437,79 +437,56 @@ else
 fi
 unset _doctor_out
 
-# An engine-shaped release carries entrypoints/profile.sh and the loader
-# behind it, but no compiled plans. The integration snippet must fall back
-# to the loader entrypoint so installing it never leaves a startup file that
-# loads nothing.
+# 0.3 has one installable shape: the tree valise build writes. An
+# engine-shaped tree (entrypoints/profile.sh and the loader, no plans and no
+# valise-release.conf) is manifestable, but install must refuse it rather than
+# wire startup files to a release the integration cannot load.
 _engine_release="$_test_root/engine-release"
-mkdir -p "$_engine_release/entrypoints" "$_engine_release/lib" \
-  "$_engine_release/module.d" "$_engine_release/modules"
+mkdir -p "$_engine_release/entrypoints" "$_engine_release/lib"
 cp "$_repo/entrypoints/profile.sh" "$_engine_release/entrypoints/profile.sh"
-cp "$_repo/lib/metadata.sh" "$_repo/lib/capabilities.sh" "$_repo/lib/loader.sh" \
-  "$_engine_release/lib/"
-cat >"$_engine_release/module.d/engine_root.meta" <<'EOF'
-name=engine_root
-version=1.0.0
-side_effect=read-only
-requires=
-optional=
-shells=bash zsh ksh
-platforms=any
-exports=engine_root_ready
-load=modules/engine_root.sh
-EOF
-cat >"$_engine_release/modules/engine_root.sh" <<'EOF'
-engine_root_ready() { :; }
-EOF
-chmod 0644 "$_engine_release/entrypoints/profile.sh" "$_engine_release/lib/"*.sh \
-  "$_engine_release/module.d/engine_root.meta" "$_engine_release/modules/engine_root.sh"
+cp "$_repo/lib/metadata.sh" "$_repo/lib/loader.sh" "$_engine_release/lib/"
+chmod 0644 "$_engine_release/entrypoints/profile.sh" "$_engine_release/lib/"*.sh
 if (cd "$_engine_release" && "$_link" make-manifest .) >"$_test_root/engine-manifest.out" 2>&1; then
-  pass "engine-shaped release tree is manifestable"
+  pass "engine-shaped tree is manifestable"
 else
-  fail "engine-shaped release tree is manifestable"
+  fail "engine-shaped tree is manifestable"
   cat "$_test_root/engine-manifest.out" >&2
 fi
-
 _engine_home="$_test_root/home-engine-release"
 mkdir -p "$_engine_home"
 if (cd "$_engine_release" && HOME="$_engine_home" XDG_DATA_HOME="$_engine_home/.local/share" \
   XDG_CONFIG_HOME="$_engine_home/.config" XDG_STATE_HOME="$_engine_home/.local/state" \
   "$_link" install) >"$_test_root/install-engine.out" 2>&1; then
-  pass "install succeeds for an engine-shaped release"
+  fail "install refuses an engine-shaped tree"
+elif grep -F 'only a release tree built by valise build can be installed' "$_test_root/install-engine.out" >/dev/null &&
+  [ ! -e "$_engine_home/.config/valise/active" ] && [ ! -e "$_engine_home/.profile" ] &&
+  [ ! -d "$_engine_home/.local/share/valise/releases" ]; then
+  pass "install refuses an engine-shaped tree and writes nothing"
 else
-  fail "install succeeds for an engine-shaped release"
+  fail "install refuses an engine-shaped tree and writes nothing"
   cat "$_test_root/install-engine.out" >&2
 fi
-if HOME="$_engine_home" XDG_CONFIG_HOME="$_engine_home/.config" \
-  VALISE_MODULES=engine_root /bin/bash -c '. "$HOME/.profile"; command -v engine_root_ready' \
-  >"$_test_root/engine-profile-bash.out" 2>"$_test_root/engine-profile-bash.err"; then
-  pass "profile integration falls back to the loader entrypoint for an engine-shaped release"
-else
-  fail "profile integration falls back to the loader entrypoint for an engine-shaped release"
-  cat "$_test_root/engine-profile-bash.err" >&2
-fi
 
-# The same fallback must work in the shell-specific startup file that the
-# default (auto) integration writes.
-_engine_auto_home="$_test_root/home-engine-auto"
-mkdir -p "$_engine_auto_home"
-if (cd "$_engine_release" && HOME="$_engine_auto_home" XDG_DATA_HOME="$_engine_auto_home/.local/share" \
-  XDG_CONFIG_HOME="$_engine_auto_home/.config" XDG_STATE_HOME="$_engine_auto_home/.local/state" \
-  SHELL=/bin/bash "$_link" install) >"$_test_root/install-engine-auto.out" 2>&1; then
-  pass "install succeeds for an engine-shaped release"
+# A tree that lists valise-release.conf but declares another format is a
+# release from an incompatible valise and is refused the same way.
+_format_release="$_test_root/format-release"
+mkdir -p "$_format_release/plans"
+printf '%s\n' '# valise-plan-v2' >"$_format_release/plans/sh.sh"
+printf 'format=1\n' >"$_format_release/valise-release.conf"
+chmod 0644 "$_format_release/plans/sh.sh" "$_format_release/valise-release.conf"
+(cd "$_format_release" && "$_link" make-manifest .) >/dev/null 2>&1
+_format_home="$_test_root/home-format-release"
+mkdir -p "$_format_home"
+if (cd "$_format_release" && HOME="$_format_home" XDG_DATA_HOME="$_format_home/.local/share" \
+  XDG_CONFIG_HOME="$_format_home/.config" XDG_STATE_HOME="$_format_home/.local/state" \
+  "$_link" install) >"$_test_root/install-format.out" 2>&1; then
+  fail "install refuses a release of another format"
+elif grep -F 'does not declare format=2' "$_test_root/install-format.out" >/dev/null &&
+  [ ! -e "$_format_home/.config/valise/active" ]; then
+  pass "install refuses a release of another format"
 else
-  fail "install succeeds for an engine-shaped release"
-  cat "$_test_root/install-engine-auto.out" >&2
-fi
-_engine_auto_profile="$_engine_auto_home/.bashrc"
-if [ -f "$_engine_auto_profile" ] &&
-  HOME="$_engine_auto_home" XDG_CONFIG_HOME="$_engine_auto_home/.config" \
-  VALISE_MODULES=engine_root /bin/bash -c '. "$1"; command -v engine_root_ready' \
-  sh "$_engine_auto_profile" >"$_test_root/engine-auto-bash.out" 2>"$_test_root/engine-auto-bash.err"; then
-  pass "auto integration loads an engine-shaped release through the loader entrypoint"
-else
-  fail "auto integration loads an engine-shaped release through the loader entrypoint"
-  cat "$_test_root/engine-auto-bash.err" >&2
+  fail "install refuses a release of another format"
+  cat "$_test_root/install-format.out" >&2
 fi
 
 # The profile target is shared by several shells. It must select the plan for

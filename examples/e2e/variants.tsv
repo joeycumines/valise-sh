@@ -1,0 +1,3 @@
+variant	description	excluded
+default	Every e2e module	
+no-network	Without the network probe	e2e_optional_network

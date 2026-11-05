@@ -23,20 +23,15 @@ check: syntax test test-fish-syntax test-docs test-detection-contract-busybox te
 
 FISH ?= $(shell PATH="$(TEST_ENV_PATH)" command -v fish 2>/dev/null)
 
-test-fish-syntax: lib/fish/loader.fish lib/fish/metadata.fish
+test-fish-syntax: lib/fish/loader.fish lib/fish/metadata.fish lib/fish/profile.fish
 	@if test -z "$(FISH)"; then \
 		if test "$(VALISE_REQUIRE_TOOLING)" = 1; then \
 			echo "FAIL: fish is required for the native Fish syntax check (VALISE_REQUIRE_TOOLING=1)" >&2; exit 1; \
 		else echo "SKIP: fish syntax (install fish or set VALISE_REQUIRE_TOOLING=1 to require it)"; exit 0; fi; \
 	fi; \
-	"$(FISH)" -n lib/fish/loader.fish && \
-	"$(FISH)" -n lib/fish/metadata.fish && \
-	if test -f entrypoints/fish/profile.fish; then \
-		"$(FISH)" -n entrypoints/fish/profile.fish; \
-	fi && \
-	if test -f ../../shell/entrypoints/fish/profile.fish; then \
-		"$(FISH)" -n ../../shell/entrypoints/fish/profile.fish; \
-	fi
+	for f in lib/fish/loader.fish lib/fish/metadata.fish lib/fish/profile.fish; do \
+		"$(FISH)" -n "$$f" || exit 1; \
+	done
 
 syntax: test-parser-support
 
@@ -232,7 +227,7 @@ benchmark-timing: tools/compiler-benchmark-timing.sh lib/compiler.awk
 	@echo "=== manual compiler timing diagnosis (non-gating) ==="
 	@PATH="$(TEST_ENV_PATH)"; export PATH; sh tools/compiler-benchmark-timing.sh $(MODULES)
 
-test-fish-runtime: tests/fish-runtime.test.sh lib/fish/loader.fish lib/fish/metadata.fish
+test-fish-runtime: tests/fish-runtime.test.sh lib/fish/loader.fish lib/fish/metadata.fish lib/fish/profile.fish lib/cli/fish-hook.sh
 	@if test -z "$(FISH)"; then \
 		if test "$(VALISE_REQUIRE_TOOLING)" = 1; then \
 			echo "FAIL: fish is required for the native Fish runtime check (VALISE_REQUIRE_TOOLING=1)" >&2; exit 1; \
@@ -251,7 +246,7 @@ test-doc-links: tests/docs/doc-links.test.sh README.md AGENTS.md $(wildcard docs
 	@echo "=== shell-profile doc-link case-sensitivity ==="
 	@$(TEST_RUNNER)
 
-test-e2e: tests/e2e.test.sh bin/valise $(VALISE_CLI_LIBS) examples/e2e/build-manifest.sh
+test-e2e: tests/e2e.test.sh bin/valise $(VALISE_CLI_LIBS) examples/e2e/valise.conf examples/e2e/bundles.tsv
 	@echo "=== valise end-to-end test ==="
 	@VALISE_REQUIRE_TOOLING="$(VALISE_REQUIRE_TOOLING)" /bin/bash tests/e2e.test.sh
 

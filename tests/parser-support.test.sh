@@ -265,7 +265,6 @@ unset _parser
 printf '\n=== Shell-profile parser support manifest shape ===\n'
 assert_file "$MANIFEST" "parser support manifest exists"
 assert_manifest_row 'entrypoints/profile.sh' 'posix' 'sh,dash,ksh,busybox-ash,bash' 'required'
-assert_manifest_row 'entrypoints/fish/*.fish' 'fish' 'fish' 'required'
 assert_manifest_row 'lib/*.sh' 'posix' 'sh,dash,ksh,busybox-ash,bash' 'required'
 assert_manifest_row 'lib/*.awk' 'non-shell' 'none' 'required'
 assert_manifest_row 'lib/fish/*.fish' 'fish' 'fish' 'required'

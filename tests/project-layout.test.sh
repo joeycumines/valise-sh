@@ -205,7 +205,7 @@ else
 fi
 _full_conf=$(cat "$_rel/valise-release.conf")
 case "$_full_conf" in
-  *"variant=full"*"roots_sh=profile_main contrib_work_tool"*"modules=contrib_work_tool@layers/work/module.d greet@module.d profile_main@module.d valise_path@valise"*)
+  *"variant=full"*"roots_sh=profile_main@module.d contrib_work_tool@layers/work/module.d"*"modules=contrib_work_tool@layers/work/module.d greet@module.d profile_main@module.d valise_path@valise"*)
     pass "valise-release.conf records the selection, roots, and closure" ;;
   *)
     fail "valise-release.conf records the selection, roots, and closure"
@@ -221,6 +221,12 @@ if _v "$_proj" build --variant=personal "$_tmp/personal" >/dev/null 2>"$_tmp/bui
 else
   fail "an excluded module ships neither metadata nor body"
   cat "$_tmp/build-personal.err" >&2
+fi
+if grep -qx 'roots_bash=profile_main@module.d' "$_tmp/personal/valise-release.conf"; then
+  pass "valise-release.conf records the roots left after the variant's exclusions"
+else
+  fail "valise-release.conf records the roots left after the variant's exclusions"
+  cat "$_tmp/personal/valise-release.conf" >&2
 fi
 
 # A failed build leaves the previous default output in place.

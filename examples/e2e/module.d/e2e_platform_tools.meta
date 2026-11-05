@@ -1,0 +1,8 @@
+name=e2e_platform_tools
+requires=e2e_env_setup
+optional=e2e_platform_tools_darwin e2e_platform_tools_linux e2e_platform_tools_bsd
+shells=posix
+platforms=any
+side_effect=read-only
+exports=
+load=

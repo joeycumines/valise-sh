@@ -373,9 +373,9 @@ if ! grep -F 'unsupported platform for nested_platform' "$_test_root/nested-plat
   exit 1
 fi
 
-# A built release has no Fish entrypoint, no generated Fish plan and no native
-# Fish loader, so its hook can load nothing. Installing it must still write the
-# hook and a Fish session must start without output or an error.
+# A built release whose bundle has no Fish roots ships no runtime/fish, so its
+# hook can load nothing. Installing it must still write the hook, and a Fish
+# session must start without output or an error.
 _built_root="$_test_root/built-release"
 mkdir -p "$_built_root/home"
 cp -R "$_engine/examples/profile-project" "$_built_root/project"
@@ -419,37 +419,49 @@ if [ "$_built_hook_status" -ne 0 ] || [ "$(cat "$_built_root/hook.stdout")" != '
   exit 1
 fi
 
-_project_adapter=$(CDPATH= cd "$_engine/../.." && pwd -P)/shell/entrypoints/fish/profile.fish
-_have_public_adapter=1
+# The release adapter that valise build ships as runtime/fish/profile.fish.
+_project_adapter="$_engine/lib/fish/profile.fish"
 if [ ! -f "$_project_adapter" ]; then
-  printf 'NOTE: consuming-project Fish adapter not found at %s; skipping public-adapter coverage\n' "$_project_adapter"
-  _have_public_adapter=0
+  printf 'FAIL: release Fish adapter missing: %s\n' "$_project_adapter" >&2
+  exit 1
 fi
-if [ "$_have_public_adapter" -eq 1 ]; then
+# _runtime_release <root>
+# Give a fixture root the shape valise build produces for a Fish bundle: the
+# release adapter at runtime/fish/profile.fish (unless the fixture supplies
+# its own) and a valise-release.conf whose Fish roots are the public modules.
+_runtime_release() {
+  mkdir -p "$1/runtime/fish"
+  [ -e "$1/runtime/fish/profile.fish" ] || cp "$_project_adapter" "$1/runtime/fish/profile.fish"
+  [ -e "$1/valise-release.conf" ] ||
+    printf 'format=2\nroots_fish=fish_path fish_environment fish_secure_local_bin\n' >"$1/valise-release.conf"
+}
 _public_root="$_test_root/public"
-_public_engine_lib="$_public_root/vendor/shell-profile/lib/fish"
+_public_engine_lib="$_public_root/runtime/fish"
 _missing_root="$_test_root/missing-public"
-mkdir -p "$_public_engine_lib" "$_public_root/module.d" "$_public_root/modules/fish/public" "$_public_root/generated" "$_missing_root/entrypoints/fish"
+mkdir -p "$_public_engine_lib" "$_public_root/module.d" "$_public_root/modules/fish/public" "$_public_root/generated" "$_missing_root/runtime/fish"
 cp "$_engine/lib/fish/metadata.fish" "$_public_engine_lib/metadata.fish"
 cp "$_engine/lib/fish/loader.fish" "$_public_engine_lib/loader.fish"
-cp "$_project_adapter" "$_missing_root/entrypoints/fish/profile.fish"
+_runtime_release "$_public_root"
+cp "$_project_adapter" "$_missing_root/runtime/fish/profile.fish"
 _bad_root="$_test_root/bad-public"
-mkdir -p "$_bad_root/vendor/shell-profile/lib/fish" "$_bad_root/entrypoints/fish"
-cp "$_project_adapter" "$_bad_root/entrypoints/fish/profile.fish"
-cp "$_engine/lib/fish/loader.fish" "$_bad_root/vendor/shell-profile/lib/fish/loader.fish"
+mkdir -p "$_bad_root/runtime/fish" "$_bad_root/runtime/fish"
+cp "$_project_adapter" "$_bad_root/runtime/fish/profile.fish"
+cp "$_engine/lib/fish/loader.fish" "$_bad_root/runtime/fish/loader.fish"
+_runtime_release "$_bad_root"
 # Deliberately failing metadata may forge state before returning.
-printf '%s\n' 'function caller_owned_public_metadata; echo replaced-public-metadata; end; function caller_owned_generated_metadata; echo replaced-generated-metadata; end; set -gx VALISE_FISH_READY 1; set -g _sp_fish_loader_bootstrap_status 0; false' > "$_bad_root/vendor/shell-profile/lib/fish/metadata.fish"
+printf '%s\n' 'function caller_owned_public_metadata; echo replaced-public-metadata; end; function caller_owned_generated_metadata; echo replaced-generated-metadata; end; set -gx VALISE_FISH_READY 1; set -g _sp_fish_loader_bootstrap_status 0; false' > "$_bad_root/runtime/fish/metadata.fish"
 _bad_generated_root="$_test_root/bad-generated"
-mkdir -p "$_bad_generated_root/vendor/shell-profile/lib/fish"
-cp "$_engine/lib/fish/loader.fish" "$_bad_generated_root/vendor/shell-profile/lib/fish/loader.fish"
-cp "$_bad_root/vendor/shell-profile/lib/fish/metadata.fish" "$_bad_generated_root/vendor/shell-profile/lib/fish/metadata.fish"
+mkdir -p "$_bad_generated_root/runtime/fish"
+cp "$_engine/lib/fish/loader.fish" "$_bad_generated_root/runtime/fish/loader.fish"
+_runtime_release "$_bad_generated_root"
+cp "$_bad_root/runtime/fish/metadata.fish" "$_bad_generated_root/runtime/fish/metadata.fish"
 # The public adapter must ignore this untrusted generated plan and use the
 # source-driven loader instead.
 printf '%s\n' 'set -g public_plan_sourced 1' >"$_public_root/generated/installed-modules.fish"
 # This same-user attacker path deliberately ends in the historical loader
 # suffix. It copies the trusted implementation body onto that path so the
 # provenance check must reject the exact mismatch without sourcing it again.
-_loader_suffix_attack_dir="$_test_root/loader-suffix-attack/vendor/shell-profile/lib/fish"
+_loader_suffix_attack_dir="$_test_root/loader-suffix-attack/runtime/fish"
 mkdir -p "$_loader_suffix_attack_dir"
 cat >"$_loader_suffix_attack_dir/loader.fish" <<'EOF'
 if builtin set -q _loader_suffix_source_count
@@ -498,8 +510,8 @@ fi
 # mode above; they must not silently weaken the installed authentication path.
 _unauthenticated_root="$_test_root/unauthenticated-active"
 _unauthenticated_marker="$_test_root/unauthenticated-active.marker"
-mkdir -p "$_unauthenticated_root/entrypoints/fish"
-printf '%s\n' 'builtin printf "%s\\n" unverified > "$UNAUTHENTICATED_MARKER"; return 0' >"$_unauthenticated_root/entrypoints/fish/profile.fish"
+mkdir -p "$_unauthenticated_root/runtime/fish"
+printf '%s\n' 'builtin printf "%s\\n" unverified > "$UNAUTHENTICATED_MARKER"; return 0' >"$_unauthenticated_root/runtime/fish/profile.fish"
 _unauthenticated_home="$_test_root/unauthenticated-home"
 mkdir -p "$_unauthenticated_home/.config/valise"
 ln -s "$_unauthenticated_root" "$_unauthenticated_home/.config/valise/active"
@@ -528,10 +540,11 @@ test ! -e "$_unauthenticated_marker" || {
 _installed_payload="$_test_root/installed-payload"
 _installed_releases="$_test_root/installed-releases"
 _installed_home="$_test_root/installed-home"
-mkdir -p "$_installed_payload/entrypoints/fish" "$_installed_payload/vendor/shell-profile/lib/fish" "$_installed_payload/module.d" "$_installed_payload/modules/fish/public" "$_installed_payload/generated" "$_installed_releases" "$_installed_home/.config/valise"
-cp "$_project_adapter" "$_installed_payload/entrypoints/fish/profile.fish"
-cp "$_engine/lib/fish/loader.fish" "$_installed_payload/vendor/shell-profile/lib/fish/loader.fish"
-cp "$_engine/lib/fish/metadata.fish" "$_installed_payload/vendor/shell-profile/lib/fish/metadata.fish"
+mkdir -p "$_installed_payload/runtime/fish" "$_installed_payload/runtime/fish" "$_installed_payload/module.d" "$_installed_payload/modules/fish/public" "$_installed_payload/generated" "$_installed_releases" "$_installed_home/.config/valise"
+cp "$_project_adapter" "$_installed_payload/runtime/fish/profile.fish"
+cp "$_engine/lib/fish/loader.fish" "$_installed_payload/runtime/fish/loader.fish"
+_runtime_release "$_installed_payload"
+cp "$_engine/lib/fish/metadata.fish" "$_installed_payload/runtime/fish/metadata.fish"
 cp "$_public_root/module.d/"* "$_installed_payload/module.d/"
 cp "$_public_root/modules/fish/public/"* "$_installed_payload/modules/fish/public/"
 printf '%s\n' 'return 0' >"$_installed_payload/generated/installed-modules.fish"
@@ -556,11 +569,11 @@ find "$_installed_root" -type f -exec chmod 0444 {} +
 ln -s "$_installed_root" "$_installed_home/.config/valise/active"
 HOME="$_installed_home" XDG_CONFIG_HOME="$_installed_home/.config" XDG_DATA_HOME="$_test_root/installed-data" XDG_STATE_HOME="$_test_root/installed-state" "$_engine/bin/valise" init fish >"$_test_root/valise-init-fish-installed.fish"
 _installed_suffix_attacker="$_test_root/installed-suffix-attacker"
-mkdir -p "$_installed_suffix_attacker/entrypoints/fish"
-printf '%s\n' 'function installed_suffix_caller_owned; echo installed-suffix-caller; end' >"$_installed_suffix_attacker/entrypoints/fish/profile.fish"
+mkdir -p "$_installed_suffix_attacker/runtime/fish"
+printf '%s\n' 'function installed_suffix_caller_owned; echo installed-suffix-caller; end' >"$_installed_suffix_attacker/runtime/fish/profile.fish"
 _installed_suffix_program="$_test_root/installed-suffix.fish"
 cat >"$_installed_suffix_program" <<EOF
-builtin source '$_installed_suffix_attacker/entrypoints/fish/profile.fish'
+builtin source '$_installed_suffix_attacker/runtime/fish/profile.fish'
 builtin set -g _sp_fish_entrypoint_owned_exports installed_suffix_caller_owned
 builtin set -g _sp_fish_entrypoint_owned_sources (builtin functions --details installed_suffix_caller_owned)
 builtin source '$_test_root/valise-init-fish-installed.fish'
@@ -582,13 +595,14 @@ fi
 # must be rejected transactionally even when it returns success. This guards
 # the generated public adapter's metadata phase before native loader startup.
 _metadata_poison_root="$_test_root/metadata-poison"
-mkdir -p "$_metadata_poison_root/vendor/shell-profile/lib/fish" "$_metadata_poison_root/module.d" "$_metadata_poison_root/modules/fish/public" "$_metadata_poison_root/generated"
-cp "$_engine/lib/fish/loader.fish" "$_metadata_poison_root/vendor/shell-profile/lib/fish/loader.fish"
-cp "$_engine/lib/fish/metadata.fish" "$_metadata_poison_root/vendor/shell-profile/lib/fish/metadata.fish"
+mkdir -p "$_metadata_poison_root/runtime/fish" "$_metadata_poison_root/module.d" "$_metadata_poison_root/modules/fish/public" "$_metadata_poison_root/generated"
+cp "$_engine/lib/fish/loader.fish" "$_metadata_poison_root/runtime/fish/loader.fish"
+_runtime_release "$_metadata_poison_root"
+cp "$_engine/lib/fish/metadata.fish" "$_metadata_poison_root/runtime/fish/metadata.fish"
 cp "$_engine/lib/fish/metadata.fish" "$_test_root/metadata-poison-clean.fish"
 cp "$_public_root/module.d/"* "$_metadata_poison_root/module.d/"
 cp "$_public_root/modules/fish/public/"* "$_metadata_poison_root/modules/fish/public/"
-printf '%s\n' 'set -gx SHELL_PROJECT_ROOT metadata-poisoned-root; set -U SHELL_PROJECT_ROOT metadata-poisoned-universal; set -gx _sp_fish_loader_expected_source forged-loader-anchor; set -Ux _sp_fish_metadata_expected_source forged-metadata-anchor; set -g _sp_fish_loader_bootstrap_mode metadata-poisoned; return 0' >>"$_metadata_poison_root/vendor/shell-profile/lib/fish/metadata.fish"
+printf '%s\n' 'set -gx SHELL_PROJECT_ROOT metadata-poisoned-root; set -U SHELL_PROJECT_ROOT metadata-poisoned-universal; set -gx _sp_fish_loader_expected_source forged-loader-anchor; set -Ux _sp_fish_metadata_expected_source forged-metadata-anchor; set -g _sp_fish_loader_bootstrap_mode metadata-poisoned; return 0' >>"$_metadata_poison_root/runtime/fish/metadata.fish"
 _metadata_poison_home="$_test_root/metadata-poison-home"
 mkdir -p "$_metadata_poison_home/.config/valise"
 ln -s "$_metadata_poison_root" "$_metadata_poison_home/.config/valise/active"
@@ -607,15 +621,15 @@ builtin set -e -g SHELL_PROJECT_ROOT
 builtin test "\$SHELL_PROJECT_ROOT" = metadata-caller-universal; or exit 1
 builtin set -gx SHELL_PROJECT_ROOT metadata-caller-root
 set -l _metadata_poison_canonical_root (builtin path resolve -- '$_metadata_poison_root')
-builtin test "\$_sp_fish_loader_expected_source" = "\$_metadata_poison_canonical_root/vendor/shell-profile/lib/fish/loader.fish"; or exit 1
-builtin test "\$_sp_fish_metadata_expected_source" = "\$_metadata_poison_canonical_root/vendor/shell-profile/lib/fish/metadata.fish"; or exit 1
+builtin test "\$_sp_fish_loader_expected_source" = "\$_metadata_poison_canonical_root/runtime/fish/loader.fish"; or exit 1
+builtin test "\$_sp_fish_metadata_expected_source" = "\$_metadata_poison_canonical_root/runtime/fish/metadata.fish"; or exit 1
 builtin set -q -U _sp_fish_loader_expected_source; and exit 1
 builtin set -q -U _sp_fish_metadata_expected_source; and exit 1
 builtin set -q _sp_fish_loader_bootstrap_mode; and exit 1
 for _metadata_alias in (builtin functions --all --names | string match -r '^__valise_fish_metadata_(capture|restore|snapshot|source)_')
     exit 1
 end
-command cp "\$METADATA_POISON_CLEAN" '$_metadata_poison_root/vendor/shell-profile/lib/fish/metadata.fish'; or exit 1
+command cp "\$METADATA_POISON_CLEAN" '$_metadata_poison_root/runtime/fish/metadata.fish'; or exit 1
 builtin set -gx SHELL_PROJECT_ROOT metadata-caller-root-second
 builtin source '$_test_root/valise-init-fish-metadata-poison.fish'
 or exit 1
@@ -635,9 +649,10 @@ fi
 # and erase option dynamically so lexical preflight cannot identify them; the
 # post-source indexed provenance check must terminate the child with 125.
 _metadata_dynamic_root="$_test_root/metadata-dynamic"
-mkdir -p "$_metadata_dynamic_root/vendor/shell-profile/lib/fish"
-cp "$_engine/lib/fish/loader.fish" "$_metadata_dynamic_root/vendor/shell-profile/lib/fish/loader.fish"
-cat >"$_metadata_dynamic_root/vendor/shell-profile/lib/fish/metadata.fish" <<'EOF'
+mkdir -p "$_metadata_dynamic_root/runtime/fish"
+cp "$_engine/lib/fish/loader.fish" "$_metadata_dynamic_root/runtime/fish/loader.fish"
+_runtime_release "$_metadata_dynamic_root"
+cat >"$_metadata_dynamic_root/runtime/fish/metadata.fish" <<'EOF'
 function metadata_cd_replacer
     set -l _function_command (string join "" func tions)
     set -l _erase_word (string join "" era se)
@@ -683,7 +698,7 @@ fi
 # a fresh Fish process rather than relying on a pre-seeded root.
 _derived_missing_program="$_test_root/derived-missing-runtime.fish"
 cat >"$_derived_missing_program" <<EOF
-builtin source '$_missing_root/entrypoints/fish/profile.fish'
+builtin source '$_missing_root/runtime/fish/profile.fish'
 set -l _derived_missing_status \$status
 builtin test \$_derived_missing_status -ne 0; or exit 1
 builtin set -q SHELL_PROJECT_ROOT; and exit 1
@@ -827,11 +842,12 @@ done
 # directory permissions after a deliberate status-125 exit.
 _generated_persistence_root="$_test_root/generated-persistence"
 _generated_persistence_home="$_test_root/generated-persistence-home"
-mkdir -p "$_generated_persistence_root/vendor/shell-profile/lib/fish" "$_generated_persistence_home/.config/valise" "$_generated_persistence_home/.config/fish"
-cp "$_engine/lib/fish/loader.fish" "$_generated_persistence_root/vendor/shell-profile/lib/fish/loader.fish"
-cp "$_engine/lib/fish/metadata.fish" "$_generated_persistence_root/vendor/shell-profile/lib/fish/metadata.fish"
+mkdir -p "$_generated_persistence_root/runtime/fish" "$_generated_persistence_home/.config/valise" "$_generated_persistence_home/.config/fish"
+cp "$_engine/lib/fish/loader.fish" "$_generated_persistence_root/runtime/fish/loader.fish"
+_runtime_release "$_generated_persistence_root"
+cp "$_engine/lib/fish/metadata.fish" "$_generated_persistence_root/runtime/fish/metadata.fish"
 ln -s "$_generated_persistence_root" "$_generated_persistence_home/.config/valise/active"
-printf '%s\n' 'builtin set -U SHELL_PROJECT_ROOT generated-durable-poison; builtin set -gx XDG_CONFIG_HOME "$HOME/alternate-config"; command chmod u-w "$HOME/.config/fish"; return 7' >"$_generated_persistence_root/vendor/shell-profile/lib/fish/metadata.fish"
+printf '%s\n' 'builtin set -U SHELL_PROJECT_ROOT generated-durable-poison; builtin set -gx XDG_CONFIG_HOME "$HOME/alternate-config"; command chmod u-w "$HOME/.config/fish"; return 7' >"$_generated_persistence_root/runtime/fish/metadata.fish"
 HOME="$_generated_persistence_home" XDG_CONFIG_HOME="$_generated_persistence_home/.config" XDG_DATA_HOME="$_generated_persistence_home/.local/share" XDG_STATE_HOME="$_generated_persistence_home/.local/state" \
   "$_engine/bin/valise" init fish --source-tree >"$_test_root/valise-init-fish-generated-persistence.fish"
 _generated_persistence_program="$_test_root/generated-persistence-rollback-failure.fish"
@@ -891,11 +907,12 @@ fi
 # same durable rollback guarantee.
 _generated_module_persistence_root="$_test_root/generated-module-persistence"
 _generated_module_persistence_home="$_test_root/generated-module-persistence-home"
-mkdir -p "$_generated_module_persistence_root/vendor/shell-profile/lib/fish" "$_generated_module_persistence_home/.config/valise" "$_generated_module_persistence_home/.config/fish"
-cp "$_engine/lib/fish/loader.fish" "$_generated_module_persistence_root/vendor/shell-profile/lib/fish/loader.fish"
-cp "$_engine/lib/fish/metadata.fish" "$_generated_module_persistence_root/vendor/shell-profile/lib/fish/metadata.fish"
+mkdir -p "$_generated_module_persistence_root/runtime/fish" "$_generated_module_persistence_home/.config/valise" "$_generated_module_persistence_home/.config/fish"
+cp "$_engine/lib/fish/loader.fish" "$_generated_module_persistence_root/runtime/fish/loader.fish"
+_runtime_release "$_generated_module_persistence_root"
+cp "$_engine/lib/fish/metadata.fish" "$_generated_module_persistence_root/runtime/fish/metadata.fish"
 ln -s "$_generated_module_persistence_root" "$_generated_module_persistence_home/.config/valise/active"
-printf '%s\n' 'builtin set -U VALISE_MODULE_ROOT generated-module-poison; command chmod u-w "$HOME/.config/fish"; return 7' >"$_generated_module_persistence_root/vendor/shell-profile/lib/fish/metadata.fish"
+printf '%s\n' 'builtin set -U VALISE_MODULE_ROOT generated-module-poison; command chmod u-w "$HOME/.config/fish"; return 7' >"$_generated_module_persistence_root/runtime/fish/metadata.fish"
 HOME="$_generated_module_persistence_home" XDG_CONFIG_HOME="$_generated_module_persistence_home/.config" XDG_DATA_HOME="$_generated_module_persistence_home/.local/share" XDG_STATE_HOME="$_generated_module_persistence_home/.local/state" \
   "$_engine/bin/valise" init fish --source-tree >"$_test_root/valise-init-fish-generated-module-persistence.fish"
 _generated_module_persistence_program="$_test_root/generated-module-persistence-rollback-failure.fish"
@@ -924,8 +941,8 @@ fi
 # A valid project entrypoint publishes the exact readiness contract and is
 # accepted by the emitted integration.
 _good_entry_root="$_test_root/good-entrypoint"
-mkdir -p "$_good_entry_root/entrypoints/fish"
-printf '%s\n' 'set -gx VALISE_FISH_READY 1; return 0' > "$_good_entry_root/entrypoints/fish/profile.fish"
+mkdir -p "$_good_entry_root/runtime/fish"
+printf '%s\n' 'set -gx VALISE_FISH_READY 1; return 0' > "$_good_entry_root/runtime/fish/profile.fish"
 _good_entry_home="$_test_root/good-entry-home"
 mkdir -p "$_good_entry_home/.config/valise"
 ln -s "$_good_entry_root" "$_good_entry_home/.config/valise/active"
@@ -959,9 +976,9 @@ fi
 # fixture below.
 _entrypoint_switch_a="$_test_root/entrypoint-switch-a"
 _entrypoint_switch_b="$_test_root/entrypoint-switch-b"
-mkdir -p "$_entrypoint_switch_a/entrypoints/fish" "$_entrypoint_switch_b/entrypoints/fish"
-printf '%s\n' 'function entrypoint_release_a_only; echo release-a; end; set -gx VALISE_FISH_READY 1; return 0' >"$_entrypoint_switch_a/entrypoints/fish/profile.fish"
-printf '%s\n' 'function entrypoint_release_b_only; echo release-b; end; set -gx VALISE_FISH_READY 1; return 0' >"$_entrypoint_switch_b/entrypoints/fish/profile.fish"
+mkdir -p "$_entrypoint_switch_a/runtime/fish" "$_entrypoint_switch_b/runtime/fish"
+printf '%s\n' 'function entrypoint_release_a_only; echo release-a; end; set -gx VALISE_FISH_READY 1; return 0' >"$_entrypoint_switch_a/runtime/fish/profile.fish"
+printf '%s\n' 'function entrypoint_release_b_only; echo release-b; end; set -gx VALISE_FISH_READY 1; return 0' >"$_entrypoint_switch_b/runtime/fish/profile.fish"
 _entrypoint_switch_home="$_test_root/entrypoint-switch-home"
 mkdir -p "$_entrypoint_switch_home/.config/valise"
 ln -s "$_entrypoint_switch_a" "$_entrypoint_switch_home/.config/valise/active"
@@ -1029,8 +1046,8 @@ fi
 # rollback names is not a valid success. The integration must fail closed
 # before attempting any in-process restoration of compromised critical helpers.
 _hostile_good_entry_root="$_test_root/hostile-good-entrypoint"
-mkdir -p "$_hostile_good_entry_root/entrypoints/fish"
-cat >"$_hostile_good_entry_root/entrypoints/fish/profile.fish" <<'EOF'
+mkdir -p "$_hostile_good_entry_root/runtime/fish"
+cat >"$_hostile_good_entry_root/runtime/fish/profile.fish" <<'EOF'
 for _visible_scratch_name in (set --names | string match -r '^__valise_fish_scratch_state_.*$')
     set -gx "$_visible_scratch_name" forged-visible-scratch
 end
@@ -1071,8 +1088,8 @@ fi
 # transaction rejects the replacement, removes its helper, and the outer
 # rollback restores the caller-owned root.
 _forged_root_entry_root="$_test_root/forged-root-entrypoint"
-mkdir -p "$_forged_root_entry_root/entrypoints/fish"
-printf '%s\n' 'function forged_root_entrypoint_helper; end; set -gx SHELL_PROJECT_ROOT forged-entrypoint-root; set -gx VALISE_FISH_READY 1; return 0' >"$_forged_root_entry_root/entrypoints/fish/profile.fish"
+mkdir -p "$_forged_root_entry_root/runtime/fish"
+printf '%s\n' 'function forged_root_entrypoint_helper; end; set -gx SHELL_PROJECT_ROOT forged-entrypoint-root; set -gx VALISE_FISH_READY 1; return 0' >"$_forged_root_entry_root/runtime/fish/profile.fish"
 _forged_root_entry_home="$_test_root/forged-root-entrypoint-home"
 mkdir -p "$_forged_root_entry_home/.config/valise"
 ln -s "$_forged_root_entry_root" "$_forged_root_entry_home/.config/valise/active"
@@ -1097,8 +1114,8 @@ fi
 # A successful project entrypoint cannot forge the loader handshake, module
 # ledgers, or metadata-provider state to smuggle a false activation through.
 _forged_state_entry_root="$_test_root/forged-state-entrypoint"
-mkdir -p "$_forged_state_entry_root/entrypoints/fish"
-printf '%s\n' 'function forged_state_entrypoint_helper; end; set -gx _sp_fish_loader_bootstrap_mode forged-mode; set -Ux _sp_fish_loader_bootstrap_seeds forged-seeds; set -gx _sp_fish_loader_bootstrap_status 0; set -gx _sp_fish_loaded_modules forged-modules; set -Ux _sp_fish_module_roots forged-roots; set -gx _sp_fish_metadata_provider forged-provider; set -gx _sp_fish_loader_owned_exports forged-loader-exports; set -Ux _sp_fish_loader_owned_sources forged-loader-sources; set -gx _sp_fish_legacy_owned_exports forged-legacy-exports; set -Ux _sp_fish_legacy_owned_sources forged-legacy-sources; set -gx VALISE_FISH_READY 1; return 0' >"$_forged_state_entry_root/entrypoints/fish/profile.fish"
+mkdir -p "$_forged_state_entry_root/runtime/fish"
+printf '%s\n' 'function forged_state_entrypoint_helper; end; set -gx _sp_fish_loader_bootstrap_mode forged-mode; set -Ux _sp_fish_loader_bootstrap_seeds forged-seeds; set -gx _sp_fish_loader_bootstrap_status 0; set -gx _sp_fish_loaded_modules forged-modules; set -Ux _sp_fish_module_roots forged-roots; set -gx _sp_fish_metadata_provider forged-provider; set -gx _sp_fish_loader_owned_exports forged-loader-exports; set -Ux _sp_fish_loader_owned_sources forged-loader-sources; set -gx _sp_fish_legacy_owned_exports forged-legacy-exports; set -Ux _sp_fish_legacy_owned_sources forged-legacy-sources; set -gx VALISE_FISH_READY 1; return 0' >"$_forged_state_entry_root/runtime/fish/profile.fish"
 _forged_state_entry_home="$_test_root/forged-state-entrypoint-home"
 mkdir -p "$_forged_state_entry_home/.config/valise"
 ln -s "$_forged_state_entry_root" "$_forged_state_entry_home/.config/valise/active"
@@ -1127,8 +1144,8 @@ fi
 # without losing exact Fish provenance, so the integration fails closed before
 # returning control to the caller.
 _entrypoint_replace_root="$_test_root/entrypoint-replace"
-mkdir -p "$_entrypoint_replace_root/entrypoints/fish"
-printf '%s\n' 'function caller_owned_entrypoint; echo replaced-entrypoint; end; function leaked_entrypoint_helper; end; set -gx VALISE_FISH_READY 1; return 0' >"$_entrypoint_replace_root/entrypoints/fish/profile.fish"
+mkdir -p "$_entrypoint_replace_root/runtime/fish"
+printf '%s\n' 'function caller_owned_entrypoint; echo replaced-entrypoint; end; function leaked_entrypoint_helper; end; set -gx VALISE_FISH_READY 1; return 0' >"$_entrypoint_replace_root/runtime/fish/profile.fish"
 _entrypoint_replace_home="$_test_root/entrypoint-replace-home"
 mkdir -p "$_entrypoint_replace_home/.config/valise"
 ln -s "$_entrypoint_replace_root" "$_entrypoint_replace_home/.config/valise/active"
@@ -1154,8 +1171,8 @@ fi
 # embedded `cd`, is rejected before sourcing. The embedded original remains
 # intact and neither critical shadow nor helper leaks into the caller.
 _entrypoint_critical_root="$_test_root/entrypoint-critical"
-mkdir -p "$_entrypoint_critical_root/entrypoints/fish"
-printf '%s\n' 'function contains; set -g entrypoint_contains_leaked 1; end; function cd; set -g entrypoint_cd_leaked 1; end; function entrypoint_critical_helper; end; set -g VALISE_FISH_READY 1; return 0' >"$_entrypoint_critical_root/entrypoints/fish/profile.fish"
+mkdir -p "$_entrypoint_critical_root/runtime/fish"
+printf '%s\n' 'function contains; set -g entrypoint_contains_leaked 1; end; function cd; set -g entrypoint_cd_leaked 1; end; function entrypoint_critical_helper; end; set -g VALISE_FISH_READY 1; return 0' >"$_entrypoint_critical_root/runtime/fish/profile.fish"
 _entrypoint_critical_home="$_test_root/entrypoint-critical-home"
 mkdir -p "$_entrypoint_critical_home/.config/valise"
 ln -s "$_entrypoint_critical_root" "$_entrypoint_critical_home/.config/valise/active"
@@ -1177,8 +1194,8 @@ fi
 # entrypoint. The post-source integrity check must kill the child rather than
 # attempting to restore embedded Fish provenance in-process.
 _entrypoint_indirect_root="$_test_root/entrypoint-indirect-critical"
-mkdir -p "$_entrypoint_indirect_root/entrypoints/fish"
-cat >"$_entrypoint_indirect_root/entrypoints/fish/profile.fish" <<'EOF'
+mkdir -p "$_entrypoint_indirect_root/runtime/fish"
+cat >"$_entrypoint_indirect_root/runtime/fish/profile.fish" <<'EOF'
 function indirect_cd_replacer
     set -l _function_command (string join "" func tions)
     set -l _erase_word (string join "" era se)
@@ -1223,8 +1240,8 @@ fi
 # A failing project entrypoint must remove new functions even when it does not
 # collide with a caller function, and must restore the caller-owned root.
 _entrypoint_fail_root="$_test_root/entrypoint-fail"
-mkdir -p "$_entrypoint_fail_root/entrypoints/fish"
-printf '%s\n' 'function failed_entrypoint_helper; end; return 23' >"$_entrypoint_fail_root/entrypoints/fish/profile.fish"
+mkdir -p "$_entrypoint_fail_root/runtime/fish"
+printf '%s\n' 'function failed_entrypoint_helper; end; return 23' >"$_entrypoint_fail_root/runtime/fish/profile.fish"
 _entrypoint_fail_home="$_test_root/entrypoint-fail-home"
 mkdir -p "$_entrypoint_fail_home/.config/valise"
 ln -s "$_entrypoint_fail_root" "$_entrypoint_fail_home/.config/valise/active"
@@ -1251,8 +1268,8 @@ fi
 # An existing project entrypoint is accepted only when it publishes the same
 # readiness contract; a zero-status no-op entrypoint must fail closed.
 _bad_entry_root="$_test_root/bad-entrypoint"
-mkdir -p "$_bad_entry_root/entrypoints/fish"
-printf '%s\n' 'function invalid_readiness_helper; end; set -gx VALISE_FISH_READY 0; return 0' > "$_bad_entry_root/entrypoints/fish/profile.fish"
+mkdir -p "$_bad_entry_root/runtime/fish"
+printf '%s\n' 'function invalid_readiness_helper; end; set -gx VALISE_FISH_READY 0; return 0' > "$_bad_entry_root/runtime/fish/profile.fish"
 _bad_entry_home="$_test_root/bad-entry-home"
 mkdir -p "$_bad_entry_home/.config/valise"
 ln -s "$_bad_entry_root" "$_bad_entry_home/.config/valise/active"
@@ -1277,16 +1294,17 @@ fi
 _switch_a="$_test_root/metadata-switch-a"
 _switch_b="$_test_root/metadata-switch-b"
 for _switch_root in "$_switch_a" "$_switch_b"; do
-  mkdir -p "$_switch_root/vendor/shell-profile/lib/fish" "$_switch_root/module.d" "$_switch_root/modules/fish/public"
-  cp "$_engine/lib/fish/loader.fish" "$_switch_root/vendor/shell-profile/lib/fish/loader.fish"
+  mkdir -p "$_switch_root/runtime/fish" "$_switch_root/module.d" "$_switch_root/modules/fish/public"
+  cp "$_engine/lib/fish/loader.fish" "$_switch_root/runtime/fish/loader.fish"
+  _runtime_release "$_switch_root"
   cp "$_public_root/module.d/"* "$_switch_root/module.d/"
   cp "$_public_root/modules/fish/public/"* "$_switch_root/modules/fish/public/"
 done
-sed 's/metadata: /metadata-a: /' "$_engine/lib/fish/metadata.fish" >"$_switch_a/vendor/shell-profile/lib/fish/metadata.fish"
-sed 's/metadata: /metadata-b: /' "$_engine/lib/fish/metadata.fish" >"$_switch_b/vendor/shell-profile/lib/fish/metadata.fish"
-printf '%s\n' 'function metadata_release_a_only; end' >>"$_switch_a/vendor/shell-profile/lib/fish/metadata.fish"
-printf '%s\n' 'function metadata_release_b_only; end' >>"$_switch_b/vendor/shell-profile/lib/fish/metadata.fish"
-printf '%s\n' "for _metadata_backup_helper in (builtin functions --all --names | builtin string match -r '^__valise_fish_(entrypoint|metadata)_backup_'); function \$_metadata_backup_helper; return 0; end; end; true" >>"$_switch_b/vendor/shell-profile/lib/fish/metadata.fish"
+sed 's/metadata: /metadata-a: /' "$_engine/lib/fish/metadata.fish" >"$_switch_a/runtime/fish/metadata.fish"
+sed 's/metadata: /metadata-b: /' "$_engine/lib/fish/metadata.fish" >"$_switch_b/runtime/fish/metadata.fish"
+printf '%s\n' 'function metadata_release_a_only; end' >>"$_switch_a/runtime/fish/metadata.fish"
+printf '%s\n' 'function metadata_release_b_only; end' >>"$_switch_b/runtime/fish/metadata.fish"
+printf '%s\n' "for _metadata_backup_helper in (builtin functions --all --names | builtin string match -r '^__valise_fish_(entrypoint|metadata)_backup_'); function \$_metadata_backup_helper; return 0; end; end; true" >>"$_switch_b/runtime/fish/metadata.fish"
 _switch_home="$_test_root/metadata-switch-a-home"
 mkdir -p "$_switch_home/.config/valise"
 ln -s "$_switch_a" "$_switch_home/.config/valise/active"
@@ -1311,7 +1329,7 @@ functions -q metadata_release_b_only; or exit 1
 for _metadata_backup_helper in (builtin functions --all --names | builtin string match -r '^__valise_fish_(entrypoint|metadata)_backup_')
   exit 1
 end
-builtin string match -q "*$_switch_b/vendor/shell-profile/lib/fish/metadata.fish" -- (builtin functions --details sp_fish_metadata_error)
+builtin string match -q "*$_switch_b/runtime/fish/metadata.fish" -- (builtin functions --details sp_fish_metadata_error)
 exit 0
 EOF
 if ! /usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_switch_program" >"$_test_root/metadata-switch.stdout" 2>"$_test_root/metadata-switch.stderr"; then
@@ -1324,12 +1342,13 @@ fi
 # helper claimed by metadata must be removed when the downstream body fails,
 # while an unrelated caller-owned function remains untouched.
 _metadata_downstream_root="$_test_root/metadata-downstream-failure"
-mkdir -p "$_metadata_downstream_root/vendor/shell-profile/lib/fish" "$_metadata_downstream_root/module.d" "$_metadata_downstream_root/modules/fish/public"
-cp "$_engine/lib/fish/loader.fish" "$_metadata_downstream_root/vendor/shell-profile/lib/fish/loader.fish"
-cp "$_engine/lib/fish/metadata.fish" "$_metadata_downstream_root/vendor/shell-profile/lib/fish/metadata.fish"
+mkdir -p "$_metadata_downstream_root/runtime/fish" "$_metadata_downstream_root/module.d" "$_metadata_downstream_root/modules/fish/public"
+cp "$_engine/lib/fish/loader.fish" "$_metadata_downstream_root/runtime/fish/loader.fish"
+_runtime_release "$_metadata_downstream_root"
+cp "$_engine/lib/fish/metadata.fish" "$_metadata_downstream_root/runtime/fish/metadata.fish"
 cp "$_public_root/module.d/"* "$_metadata_downstream_root/module.d/"
 cp "$_public_root/modules/fish/public/"* "$_metadata_downstream_root/modules/fish/public/"
-printf '%s\n' 'function metadata_downstream_owned; end' >>"$_metadata_downstream_root/vendor/shell-profile/lib/fish/metadata.fish"
+printf '%s\n' 'function metadata_downstream_owned; end' >>"$_metadata_downstream_root/runtime/fish/metadata.fish"
 printf '%s\n' 'function downstream_created_before_failure; end; return 29' >"$_metadata_downstream_root/modules/fish/public/fish_path.fish"
 _metadata_downstream_home="$_test_root/metadata-downstream-failure-home"
 mkdir -p "$_metadata_downstream_home/.config/valise"
@@ -1361,13 +1380,14 @@ fi
 _metadata_cd_bad_root="$_test_root/metadata-cd-bad"
 _metadata_cd_clean_root="$_test_root/metadata-cd-clean"
 for _metadata_cd_root in "$_metadata_cd_bad_root" "$_metadata_cd_clean_root"; do
-  mkdir -p "$_metadata_cd_root/vendor/shell-profile/lib/fish" "$_metadata_cd_root/module.d" "$_metadata_cd_root/modules/fish/public"
-  cp "$_engine/lib/fish/loader.fish" "$_metadata_cd_root/vendor/shell-profile/lib/fish/loader.fish"
-  cp "$_engine/lib/fish/metadata.fish" "$_metadata_cd_root/vendor/shell-profile/lib/fish/metadata.fish"
+  mkdir -p "$_metadata_cd_root/runtime/fish" "$_metadata_cd_root/module.d" "$_metadata_cd_root/modules/fish/public"
+  cp "$_engine/lib/fish/loader.fish" "$_metadata_cd_root/runtime/fish/loader.fish"
+  _runtime_release "$_metadata_cd_root"
+  cp "$_engine/lib/fish/metadata.fish" "$_metadata_cd_root/runtime/fish/metadata.fish"
   cp "$_public_root/module.d/"* "$_metadata_cd_root/module.d/"
   cp "$_public_root/modules/fish/public/"* "$_metadata_cd_root/modules/fish/public/"
 done
-printf '%s\n' 'function cd; set -g metadata_cd_shadow_leaked 1; end' >>"$_metadata_cd_bad_root/vendor/shell-profile/lib/fish/metadata.fish"
+printf '%s\n' 'function cd; set -g metadata_cd_shadow_leaked 1; end' >>"$_metadata_cd_bad_root/runtime/fish/metadata.fish"
 _metadata_cd_home="$_test_root/metadata-cd-bad-home"
 mkdir -p "$_metadata_cd_home/.config/valise"
 ln -s "$_metadata_cd_bad_root" "$_metadata_cd_home/.config/valise/active"
@@ -1406,12 +1426,13 @@ fi
 # replaced embedded critical function. Namespace mutation is rejected before
 # source, and the historical backup namespace is absent.
 _metadata_indirect_root="$_test_root/metadata-indirect-critical"
-mkdir -p "$_metadata_indirect_root/vendor/shell-profile/lib/fish" "$_metadata_indirect_root/module.d" "$_metadata_indirect_root/modules/fish/public"
-cp "$_engine/lib/fish/loader.fish" "$_metadata_indirect_root/vendor/shell-profile/lib/fish/loader.fish"
+mkdir -p "$_metadata_indirect_root/runtime/fish" "$_metadata_indirect_root/module.d" "$_metadata_indirect_root/modules/fish/public"
+cp "$_engine/lib/fish/loader.fish" "$_metadata_indirect_root/runtime/fish/loader.fish"
+_runtime_release "$_metadata_indirect_root"
 cp "$_public_root/module.d/"* "$_metadata_indirect_root/module.d/"
 cp "$_public_root/modules/fish/public/"* "$_metadata_indirect_root/modules/fish/public/"
-cp "$_engine/lib/fish/metadata.fish" "$_metadata_indirect_root/vendor/shell-profile/lib/fish/metadata.fish"
-printf '%s\n' 'function indirect_metadata_cd_replacer; set -l _critical_name cd; builtin functions --erase $_critical_name; function $_critical_name; set -g indirect_metadata_cd_leaked 1; end; end; indirect_metadata_cd_replacer' >>"$_metadata_indirect_root/vendor/shell-profile/lib/fish/metadata.fish"
+cp "$_engine/lib/fish/metadata.fish" "$_metadata_indirect_root/runtime/fish/metadata.fish"
+printf '%s\n' 'function indirect_metadata_cd_replacer; set -l _critical_name cd; builtin functions --erase $_critical_name; function $_critical_name; set -g indirect_metadata_cd_leaked 1; end; end; indirect_metadata_cd_replacer' >>"$_metadata_indirect_root/runtime/fish/metadata.fish"
 _metadata_indirect_home="$_test_root/metadata-indirect-critical-home"
 mkdir -p "$_metadata_indirect_home/.config/valise"
 ln -s "$_metadata_indirect_root" "$_metadata_indirect_home/.config/valise/active"
@@ -1433,14 +1454,14 @@ fi
 # metadata suffix is still caller-owned. The generated metadata transaction
 # must reject the active metadata replacement without trusting the suffix or
 # attempting provenance-losing restoration.
-_metadata_suffix_attack_dir="$_test_root/metadata-suffix-attack/vendor/shell-profile/lib/fish"
+_metadata_suffix_attack_dir="$_test_root/metadata-suffix-attack/runtime/fish"
 mkdir -p "$_metadata_suffix_attack_dir"
 _metadata_suffix_attack_file="$_metadata_suffix_attack_dir/metadata.fish"
 printf '%s\n' 'function sp_fish_metadata_error; echo attacker-metadata-error; end' >"$_metadata_suffix_attack_file"
 _metadata_suffix_attack_program="$_test_root/metadata-suffix-attack.fish"
 cat >"$_metadata_suffix_attack_program" <<EOF
 builtin source '$_metadata_suffix_attack_file'
-builtin string match -q "*vendor/shell-profile/lib/fish/metadata.fish" -- (builtin functions --details sp_fish_metadata_error); or exit 1
+builtin string match -q "*runtime/fish/metadata.fish" -- (builtin functions --details sp_fish_metadata_error); or exit 1
 builtin source '$_test_root/valise-init-fish.fish'
 EOF
 _metadata_suffix_attack_status=0
@@ -1494,9 +1515,10 @@ _body "$_public_root/modules/fish/public/fish_path.fish" 'set -gx VALISE_FISH_RE
 # Prepare a second installed-style root with a disjoint export. Re-sourcing the
 # adapter after switching roots must remove exports owned by the old root.
 _public_second_root="$_test_root/public-second"
-mkdir -p "$_public_second_root/vendor/shell-profile/lib/fish" "$_public_second_root/module.d" "$_public_second_root/modules/fish/public"
-cp "$_engine/lib/fish/metadata.fish" "$_public_second_root/vendor/shell-profile/lib/fish/metadata.fish"
-cp "$_engine/lib/fish/loader.fish" "$_public_second_root/vendor/shell-profile/lib/fish/loader.fish"
+mkdir -p "$_public_second_root/runtime/fish" "$_public_second_root/module.d" "$_public_second_root/modules/fish/public"
+cp "$_engine/lib/fish/metadata.fish" "$_public_second_root/runtime/fish/metadata.fish"
+cp "$_engine/lib/fish/loader.fish" "$_public_second_root/runtime/fish/loader.fish"
+_runtime_release "$_public_second_root"
 _meta "$_public_second_root/module.d/fish_path.meta" fish_path fish any read-only second_fish_path_loaded modules/fish/public/fish_path.fish
 _body "$_public_second_root/modules/fish/public/fish_path.fish" 'set -g second_fish_path_loaded 1; function second_fish_path_loaded; end'
 _meta "$_public_second_root/module.d/fish_environment.meta" fish_environment fish any read-only second_fish_environment_loaded modules/fish/public/fish_environment.fish fish_path
@@ -1526,157 +1548,61 @@ if [ "$_public_caller_status" -ne 125 ]; then
 fi
 _body "$_public_root/modules/fish/public/fish_path.fish" 'set -gx VALISE_FISH_READY 1; set -U VALISE_FISH_READY 1; set -U SHELL_PROJECT_ROOT poisoned-universal; function contains; return 0; end; set -g public_fish_path_loaded 1; function public_fish_path_loaded; end'
 
-# A prior installed release has the old loader ABI and a generated plan but no
-# source-driven handshake. The compatibility branch must activate that sealed
-# plan only for the legacy loader identity.
-_legacy_root="$_test_root/legacy"
-mkdir -p "$_legacy_root/vendor/shell-profile/lib/fish" "$_legacy_root/generated"
-cp "$_engine/lib/fish/metadata.fish" "$_legacy_root/vendor/shell-profile/lib/fish/metadata.fish"
-printf '%s\n' 'function sp_fish_loader_load_ordered; end' > "$_legacy_root/vendor/shell-profile/lib/fish/loader.fish"
-printf '%s\n' 'if test -z "$VALISE_MODULE_ROOT"; return 7; end; set -U _sp_fish_loader_bootstrap_status 77; set -U _sp_fish_loader_bootstrap_mode poisoned; set -U _sp_fish_loader_bootstrap_seeds poisoned; set -U SHELL_PROJECT_ROOT poisoned-universal; set -U VALISE_FISH_READY 99; set -g _sp_fish_loader_bootstrap_status 77; set -g _sp_fish_loader_bootstrap_mode poisoned; set -g _sp_fish_loader_bootstrap_seeds poisoned; set -gx SHELL_PROJECT_ROOT poisoned; set -g legacy_plan_sourced 1; function legacy_plan_loaded; end' > "$_legacy_root/generated/installed-modules.fish"
-_legacy_home="$_test_root/legacy-home"
-mkdir -p "$_legacy_home/.config/valise"
-ln -s "$_legacy_root" "$_legacy_home/.config/valise/active"
-HOME="$_legacy_home" XDG_CONFIG_HOME="$_legacy_home/.config" XDG_DATA_HOME="$_legacy_home/.local/share" XDG_STATE_HOME="$_legacy_home/.local/state" "$_engine/bin/valise" init fish --source-tree >"$_test_root/valise-init-fish-legacy.fish"
-_legacy_program="$_test_root/init-legacy.fish"
-cat >"$_legacy_program" <<EOF
+# 0.3 removed the generated-plan compatibility route. A release that carries
+# only a historical generated/installed-modules.fish plan, with or without the
+# old native loader files, has no runtime/fish/profile.fish: the hook must
+# source nothing, publish no readiness, and leave caller state as it was.
+for _legacy_shape in old-abi generated-only; do
+  _legacy_root="$_test_root/legacy-$_legacy_shape"
+  mkdir -p "$_legacy_root/generated"
+  if [ "$_legacy_shape" = old-abi ]; then
+    mkdir -p "$_legacy_root/runtime/fish"
+    cp "$_engine/lib/fish/metadata.fish" "$_legacy_root/runtime/fish/metadata.fish"
+    printf '%s\n' 'set -g legacy_loader_sourced 1; function sp_fish_loader_load_ordered; end' >"$_legacy_root/runtime/fish/loader.fish"
+  fi
+  printf '%s\n' 'set -U SHELL_PROJECT_ROOT poisoned-universal; set -U VALISE_FISH_READY 99; set -gx SHELL_PROJECT_ROOT poisoned; set -g legacy_plan_sourced 1; function legacy_plan_loaded; end' >"$_legacy_root/generated/installed-modules.fish"
+  _legacy_home="$_test_root/legacy-$_legacy_shape-home"
+  mkdir -p "$_legacy_home/.config/valise"
+  ln -s "$_legacy_root" "$_legacy_home/.config/valise/active"
+  HOME="$_legacy_home" XDG_CONFIG_HOME="$_legacy_home/.config" XDG_DATA_HOME="$_legacy_home/.local/share" XDG_STATE_HOME="$_legacy_home/.local/state" "$_engine/bin/valise" init fish --source-tree >"$_test_root/valise-init-fish-legacy-$_legacy_shape.fish"
+  _legacy_program="$_test_root/init-legacy-$_legacy_shape.fish"
+  cat >"$_legacy_program" <<EOF
+builtin set -gx SHELL_PROJECT_ROOT caller-legacy-root
 builtin set -gx VALISE_MODULE_ROOT caller-module-global
 builtin set -Ux VALISE_MODULE_ROOT caller-module-universal
-builtin source '$_test_root/valise-init-fish-legacy.fish'
-set -l _legacy_status \$status
-builtin test \$_legacy_status -eq 0; or exit 1
-for _legacy_helper in (builtin functions --all --names | builtin string match -r '^__valise_fish_legacy_(run|source)_')
+builtin source '$_test_root/valise-init-fish-legacy-$_legacy_shape.fish'
+builtin test \$status -eq 0; or exit 1
+builtin set -q legacy_plan_sourced; and exit 1
+builtin set -q legacy_loader_sourced; and exit 1
+functions -q legacy_plan_loaded; and exit 1
+functions -q sp_fish_loader_load_ordered; and exit 1
+builtin set -q VALISE_FISH_READY; and exit 1
+builtin test "\$SHELL_PROJECT_ROOT" = caller-legacy-root; or exit 1
+builtin set -q -U SHELL_PROJECT_ROOT; and exit 1
+for _legacy_state in _sp_fish_loader_bootstrap_status _sp_fish_loader_bootstrap_mode _sp_fish_loader_bootstrap_seeds _sp_fish_loaded_modules _sp_fish_loader_owned_exports _sp_fish_entrypoint_owned_exports
+    builtin set -q \$_legacy_state; and exit 1
+end
+for _legacy_helper in (builtin functions --all --names | builtin string match -r '^__valise_fish_')
     exit 1
 end
-builtin set -q legacy_plan_sourced; or exit 1
-builtin set -q VALISE_FISH_READY; or exit 1
-builtin test \$VALISE_FISH_READY = 1; or exit 1
-builtin set -q _sp_fish_loader_bootstrap_status; and exit 1
-builtin set -q _sp_fish_loader_bootstrap_mode; and exit 1
-builtin set -q _sp_fish_loader_bootstrap_seeds; and exit 1
-set -l _legacy_expected_root (builtin path resolve -- '$_legacy_root')
-builtin test "\$SHELL_PROJECT_ROOT" = "\$_legacy_expected_root"; or exit 1
-for _legacy_state in _sp_fish_loader_bootstrap_status _sp_fish_loader_bootstrap_mode _sp_fish_loader_bootstrap_seeds VALISE_FISH_READY SHELL_PROJECT_ROOT
-    builtin set -q -U \$_legacy_state; and exit 1
-end
-builtin set -q -g VALISE_MODULE_ROOT; or exit 1
 builtin test "\$VALISE_MODULE_ROOT" = caller-module-global; or exit 1
 builtin set -q -gx VALISE_MODULE_ROOT; or exit 1
-builtin set -q -U VALISE_MODULE_ROOT; or exit 1
 builtin set -q -Ux VALISE_MODULE_ROOT; or exit 1
-builtin set -e -g VALISE_MODULE_ROOT
 builtin set -e -U VALISE_MODULE_ROOT
 exit 0
 EOF
-if ! /usr/bin/env -i TERM=xterm HOME="$_legacy_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_legacy_program" >"$_test_root/init-legacy.stdout" 2>"$_test_root/init-legacy.stderr"; then
-  cat "$_test_root/init-legacy.stdout" >&2
-  cat "$_test_root/init-legacy.stderr" >&2
-  exit 1
-fi
-
-# A release containing only the historical generated plan (no native Fish
-# infrastructure) must remain activatable through the compatibility branch.
-_legacy_minimal_root="$_test_root/legacy-minimal"
-mkdir -p "$_legacy_minimal_root/generated" "$_legacy_minimal_root/modules/fish"
-printf '%s\n' 'if test -z "$VALISE_MODULE_ROOT"; return 7; end; set -U _sp_fish_loader_bootstrap_status 77; set -U _sp_fish_loader_bootstrap_mode poisoned; set -U _sp_fish_loader_bootstrap_seeds poisoned; set -U SHELL_PROJECT_ROOT poisoned-universal; set -U VALISE_FISH_READY 99; set -g _sp_fish_loader_bootstrap_status 77; set -g _sp_fish_loader_bootstrap_mode poisoned; set -g _sp_fish_loader_bootstrap_seeds poisoned; set -gx SHELL_PROJECT_ROOT poisoned; set -g legacy_minimal_plan_sourced 1; function legacy_minimal_plan_loaded; end' >"$_legacy_minimal_root/generated/installed-modules.fish"
-_legacy_minimal_home="$_test_root/legacy-minimal-home"
-mkdir -p "$_legacy_minimal_home/.config/valise"
-ln -s "$_legacy_minimal_root" "$_legacy_minimal_home/.config/valise/active"
-HOME="$_legacy_minimal_home" XDG_CONFIG_HOME="$_legacy_minimal_home/.config" XDG_DATA_HOME="$_legacy_minimal_home/.local/share" XDG_STATE_HOME="$_legacy_minimal_home/.local/state" "$_engine/bin/valise" init fish --source-tree >"$_test_root/valise-init-fish-legacy-minimal.fish"
-_legacy_minimal_program="$_test_root/init-legacy-minimal.fish"
-cat >"$_legacy_minimal_program" <<EOF
-builtin set -gx VALISE_MODULE_ROOT minimal-module-global
-builtin set -Ux VALISE_MODULE_ROOT minimal-module-universal
-builtin source '$_test_root/valise-init-fish-legacy-minimal.fish'
-set -l _legacy_minimal_status \$status
-builtin test \$_legacy_minimal_status -eq 0; or exit 1
-for _legacy_helper in (builtin functions --all --names | builtin string match -r '^__valise_fish_legacy_(run|source)_')
+  if ! /usr/bin/env -i TERM=xterm HOME="$_legacy_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_legacy_program" >"$_test_root/init-legacy-$_legacy_shape.stdout" 2>"$_test_root/init-legacy-$_legacy_shape.stderr"; then
+    cat "$_test_root/init-legacy-$_legacy_shape.stdout" >&2
+    cat "$_test_root/init-legacy-$_legacy_shape.stderr" >&2
+    printf 'FAIL: a %s generated-plan release did not load silently as nothing\n' "$_legacy_shape" >&2
     exit 1
-end
-builtin set -q legacy_minimal_plan_sourced; or exit 1
-builtin set -q VALISE_FISH_READY; or exit 1
-builtin test \$VALISE_FISH_READY = 1; or exit 1
-builtin set -q _sp_fish_loader_bootstrap_status; and exit 1
-builtin set -q _sp_fish_loader_bootstrap_mode; and exit 1
-builtin set -q _sp_fish_loader_bootstrap_seeds; and exit 1
-set -l _legacy_minimal_expected_root (builtin path resolve -- '$_legacy_minimal_root')
-builtin test "\$SHELL_PROJECT_ROOT" = "\$_legacy_minimal_expected_root"; or exit 1
-for _legacy_state in _sp_fish_loader_bootstrap_status _sp_fish_loader_bootstrap_mode _sp_fish_loader_bootstrap_seeds VALISE_FISH_READY SHELL_PROJECT_ROOT
-    builtin set -q -U \$_legacy_state; and exit 1
-end
-builtin set -q -g VALISE_MODULE_ROOT; or exit 1
-builtin test "\$VALISE_MODULE_ROOT" = minimal-module-global; or exit 1
-builtin set -q -gx VALISE_MODULE_ROOT; or exit 1
-builtin set -q -U VALISE_MODULE_ROOT; or exit 1
-builtin set -q -Ux VALISE_MODULE_ROOT; or exit 1
-builtin set -e -g VALISE_MODULE_ROOT
-builtin set -e -U VALISE_MODULE_ROOT
-exit 0
-EOF
-if ! /usr/bin/env -i TERM=xterm HOME="$_legacy_minimal_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_legacy_minimal_program" >"$_test_root/init-legacy-minimal.stdout" 2>"$_test_root/init-legacy-minimal.stderr"; then
-  cat "$_test_root/init-legacy-minimal.stdout" >&2
-  cat "$_test_root/init-legacy-minimal.stderr" >&2
-  exit 1
-fi
-
-# A failed legacy activation must remove functions created by the plan and
-# must not publish the failed root or readiness marker. The plan also attempts
-# to replace the runner's snapshot list and source an attacker-controlled
-# function; the plan is sourced in an isolated helper scope, so this must have
-# no effect on trusted rollback metadata.
-_legacy_failed_root="$_test_root/legacy-failed"
-mkdir -p "$_legacy_failed_root/generated"
-_legacy_failed_tmp="$_test_root/legacy-failed-tmp"
-mkdir -p "$_legacy_failed_tmp"
-_legacy_snapshot_attack="$_test_root/legacy-snapshot-attack.fish"
-printf '%s\n' 'function legacy_snapshot_attack_loaded; end' >"$_legacy_snapshot_attack"
-printf 'function legacy_failed_helper; end; function legacy_indirect_cd_attack; set -l _function_command (string join "" func tions); set -l _erase_word (string join "" era se); set -l _erase_option --$_erase_word; set -l _critical_name (string join "" c d); $_function_command $_erase_option $_critical_name; function $_critical_name; set -g legacy_cd_leaked 1; end; end; legacy_indirect_cd_attack; for _former_snapshot_dir in "$TMPDIR"/valise-fish-*; if test -d "$_former_snapshot_dir"; for _former_snapshot_file in "$_former_snapshot_dir"/*; test -f "$_former_snapshot_file"; and printf "poisoned\n" >"$_former_snapshot_file"; end; end; end; set -U SHELL_PROJECT_ROOT poisoned-universal; set -U VALISE_FISH_READY 99; set -g _valise_fish_root_global_set 1; set -g _valise_fish_root_global_exported 1; set -g _valise_fish_root_global_values forged-global-root; set -g _valise_fish_root_universal_set 1; set -g _valise_fish_root_universal_exported 0; set -g _valise_fish_root_universal_values forged-universal-root; set _legacy_snapshot_pairs %s; return 11\n' "$_legacy_snapshot_attack" >"$_legacy_failed_root/generated/installed-modules.fish"
-_legacy_failed_home="$_test_root/legacy-failed-home"
-mkdir -p "$_legacy_failed_home/.config/valise"
-ln -s "$_legacy_failed_root" "$_legacy_failed_home/.config/valise/active"
-HOME="$_legacy_failed_home" XDG_CONFIG_HOME="$_legacy_failed_home/.config" XDG_DATA_HOME="$_legacy_failed_home/.local/share" XDG_STATE_HOME="$_legacy_failed_home/.local/state" "$_engine/bin/valise" init fish --source-tree >"$_test_root/valise-init-fish-legacy-failed.fish"
-_legacy_failed_program="$_test_root/init-legacy-failed.fish"
-cat >"$_legacy_failed_program" <<EOF
-builtin set -gx VALISE_FISH_READY 1
-builtin set -gx VALISE_MODULE_ROOT failed-module-global
-builtin set -Ux VALISE_MODULE_ROOT failed-module-universal
-builtin source '$_test_root/valise-init-fish-legacy-failed.fish'
-set -l _legacy_failed_status \$status
-builtin test \$_legacy_failed_status -ne 0; or exit 1
-for _legacy_helper in (builtin functions --all --names | builtin string match -r '^__valise_fish_legacy_(run|source)_')
+  fi
+  if [ -s "$_test_root/init-legacy-$_legacy_shape.stderr" ]; then
+    cat "$_test_root/init-legacy-$_legacy_shape.stderr" >&2
+    printf 'FAIL: a %s generated-plan release wrote to stderr\n' "$_legacy_shape" >&2
     exit 1
-end
-functions -q legacy_failed_helper; and exit 1
-functions -q legacy_indirect_cd_attack; and exit 1
-functions -q legacy_snapshot_attack_loaded; and exit 1
-builtin set -q legacy_cd_leaked; and exit 1
-functions -q cd; or exit 1
-cd "$_legacy_failed_home"; or exit 1
-builtin test (builtin pwd) = "$_legacy_failed_home"; or exit 1
-builtin set -q VALISE_FISH_READY; and exit 1
-builtin set -q SHELL_PROJECT_ROOT; and exit 1
-builtin set -q -U VALISE_FISH_READY; and exit 1
-builtin set -q -U SHELL_PROJECT_ROOT; and exit 1
-for _former_snapshot_dir in "\$TMPDIR"/valise-fish-*
-    test -d "\$_former_snapshot_dir"; and exit 1
-end
-builtin set -q -g VALISE_MODULE_ROOT; or exit 1
-builtin test "\$VALISE_MODULE_ROOT" = failed-module-global; or exit 1
-builtin set -q -gx VALISE_MODULE_ROOT; or exit 1
-builtin set -q -U VALISE_MODULE_ROOT; or exit 1
-builtin set -q -Ux VALISE_MODULE_ROOT; or exit 1
-builtin set -e -g VALISE_MODULE_ROOT
-builtin set -e -U VALISE_MODULE_ROOT
-exit 0
-EOF
-_legacy_failed_status=0
-/usr/bin/env -i TERM=xterm HOME="$_legacy_failed_home" TMPDIR="$_legacy_failed_tmp" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_legacy_failed_program" >"$_test_root/init-legacy-failed.stdout" 2>"$_test_root/init-legacy-failed.stderr" || _legacy_failed_status=$?
-if [ "$_legacy_failed_status" -eq 0 ]; then
-  cat "$_test_root/init-legacy-failed.stdout" >&2
-  cat "$_test_root/init-legacy-failed.stderr" >&2
-  printf '%s\n' 'FAIL: legacy embedded critical mutation returned success' >&2
-  exit 1
-fi
+  fi
+done
 
 # Dynamic namespace mutation in the native loader cannot restore an embedded
 # Fish function with provenance. The child must terminate with the fail-closed
@@ -1784,14 +1710,6 @@ if [ "$(cat "$_loader_suffix_marker")" != 1:1 ]; then
   exit 1
 fi
 
-fi
-if [ "$_have_public_adapter" -eq 0 ]; then
-  # The adapter-dependent part of the program below is guarded off; bind its
-  # path variables so the unquoted heredoc can still expand.
-  _missing_root="$_test_root/absent-public/missing"
-  _public_root="$_test_root/absent-public/public"
-  _public_second_root="$_test_root/absent-public/second"
-fi
 
 cat >"$_program" <<EOF
 builtin source '$_engine/lib/fish/metadata.fish'
@@ -1815,6 +1733,14 @@ or exit 1
 functions -q sp_fish_loader_load_ordered; and exit 1
 functions -q sp_fish_loader_dispatch; and exit 1
 functions -q clean_loaded; or exit 1
+
+# A caller alias carries --wraps, which Fish's copy primitive drops. The
+# loader's caller-function custody must still accept it and leave it intact.
+alias caller_alias_probe 'echo alias-ok'
+bootstrap strict clean
+or exit 1
+test (caller_alias_probe) = alias-ok; or exit 1
+functions -e caller_alias_probe
 
 # Native provider precedence and generic-only discovery.
 bootstrap strict precedence
@@ -1996,12 +1922,12 @@ functions -q private_failed_loaded; and exit 1
 
 # A caller-defined rollback helper from an arbitrary source must never run.
 function _sp_fish_loader_rollback_activation; set -g fake_rollback_called 1; end
-if test $_have_public_adapter -eq 1
+begin
 # Public adapter must fail closed when the engine is missing, even with a
 # stale success handshake, and must not leave readiness behind.
 set -gx SHELL_PROJECT_ROOT '$_missing_root'
 set -g _sp_fish_loader_bootstrap_status 0
-builtin source '$_missing_root/entrypoints/fish/profile.fish'
+builtin source '$_missing_root/runtime/fish/profile.fish'
 set -l _missing_public_status \$status
 test \$_missing_public_status -ne 0; or exit 1
 set -q VALISE_FISH_READY; and exit 1
@@ -2012,7 +1938,7 @@ set -q fake_rollback_called; and exit 1
 # manufacturing a global binding.
 builtin set -e -g SHELL_PROJECT_ROOT
 builtin set -U SHELL_PROJECT_ROOT prior-universal-root
-builtin source '$_missing_root/entrypoints/fish/profile.fish'
+builtin source '$_missing_root/runtime/fish/profile.fish'
 set -l _universal_root_status \$status
 test \$_universal_root_status -ne 0; or exit 1
 builtin set -q -g SHELL_PROJECT_ROOT; and exit 1
@@ -2026,7 +1952,7 @@ function _adapter_local_scope_probe
     builtin set -e -g SHELL_PROJECT_ROOT
     builtin set -U SHELL_PROJECT_ROOT prior-universal-local-probe
     set -l SHELL_PROJECT_ROOT local-shadow-root
-    builtin source '$_missing_root/entrypoints/fish/profile.fish'
+    builtin source '$_missing_root/runtime/fish/profile.fish'
 end
 _adapter_local_scope_probe; and exit 1
 builtin set -q -g SHELL_PROJECT_ROOT; and exit 1
@@ -2056,20 +1982,11 @@ set -q public_fish_path_loaded; or exit 1
 set -q public_fish_environment_loaded; or exit 1
 set -q public_fish_secure_local_bin_loaded; or exit 1
 set -q VALISE_FISH_READY; or exit 1
-# Switching from a historical generated-plan activation to the native adapter
-# removes the legacy plan's newly-created functions via its separate ledger.
-builtin source '$_test_root/valise-init-fish-legacy.fish'
-or exit 1
-functions -q legacy_plan_loaded; or exit 1
-builtin set -gx SHELL_PROJECT_ROOT '$_public_root'
-builtin source '$_project_adapter'
-or exit 1
-functions -q legacy_plan_loaded; and exit 1
 
 # Early adapter failures roll back the previous loader-owned exports before
 # returning, rather than leaving the old activation callable without readiness.
 set -gx SHELL_PROJECT_ROOT '$_missing_root'
-builtin source '$_missing_root/entrypoints/fish/profile.fish'
+builtin source '$_missing_root/runtime/fish/profile.fish'
 set -l _missing_after_success_status \$status
 test \$_missing_after_success_status -ne 0; or exit 1
 functions -q public_fish_path_loaded; and exit 1
@@ -2153,6 +2070,7 @@ or exit 1
 functions -q helper_success_private; or exit 1
 test (helper_success_private) = caller-helper-replacement; or exit 1
 
+
 printf '%s\n' 'Fish runtime: all hostile and integration checks passed'
 EOF
 
@@ -2188,3 +2106,71 @@ for _skew_needle in 'conflicting versions are forbidden' 'version 1.0.0' 'versio
   fi
 done
 unset _skew_program _skew_status _skew_needle
+
+# A built release for a bundle with Fish roots, applied end to end in a
+# quarantined home: valise apply writes the hook and a Fish login loads the
+# project's and a provider layer's Fish modules; a second apply leaves the
+# identical hook in place; re-sourcing the hook in a loaded session works; a
+# variant that excludes a Fish root drops exactly that module silently; and a
+# tampered active release is refused before any of its code runs.
+_fr_root="$_test_root/fish-release"
+_fr_project="$_fr_root/project"
+_fr_home="$_fr_root/home"
+mkdir -p "$_fr_home"
+_fr_path="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$_fish")"
+_fr_env() {
+  /usr/bin/env -i TERM=xterm HOME="$_fr_home" TMPDIR="${TMPDIR:-/tmp}" PATH="$_fr_path" SHELL=/bin/sh \
+    XDG_CONFIG_HOME="$_fr_home/.config" XDG_DATA_HOME="$_fr_home/.local/share" XDG_STATE_HOME="$_fr_home/.local/state" "$@"
+}
+_fr_fail() {
+  for _fr_out in "$_fr_root"/*.out "$_fr_root"/*.err; do
+    [ -s "$_fr_out" ] && { printf '== %s\n' "$_fr_out" >&2; cat "$_fr_out" >&2; }
+  done
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+"$_engine/bin/valise" new "$_fr_project" >"$_fr_root/new.out" 2>"$_fr_root/new.err" || _fr_fail 'valise new did not scaffold the Fish project'
+mkdir -p "$_fr_project/layers/acme/module.d" "$_fr_project/layers/acme/modules/fish"
+_meta "$_fr_project/layers/acme/module.d/contrib_acme_tool.meta" contrib_acme_tool fish any read-only contrib_acme_tool modules/fish/contrib_acme_tool.fish
+printf '%s\n' 'function contrib_acme_tool; echo acme; end' >"$_fr_project/layers/acme/modules/fish/contrib_acme_tool.fish"
+printf 'bundle\tshell\troots\ndefault\tsh\tprofile_main\ndefault\tbash\tprofile_main\ndefault\tzsh\tprofile_main\ndefault\tksh\tprofile_main\ndefault\tfish\tprofile_main_fish contrib_acme_tool\n' >"$_fr_project/bundles.tsv"
+printf 'variant\tdescription\texcluded\ndefault\tEverything\t\nlean\tNo provider tools\tcontrib_acme_tool\n' >"$_fr_project/variants.tsv"
+
+(cd "$_fr_project" && _fr_env "$_engine/bin/valise" apply) >"$_fr_root/apply.out" 2>"$_fr_root/apply.err" || _fr_fail 'valise apply failed for a Fish bundle'
+_fr_hook="$_fr_home/.config/fish/conf.d/valise.fish"
+[ -f "$_fr_hook" ] || _fr_fail 'valise apply wrote no Fish hook'
+_fr_active=$(cd "$_fr_home/.config/valise/active" && pwd -P) || _fr_fail 'valise apply left no active release'
+for _fr_file in runtime/fish/profile.fish runtime/fish/loader.fish runtime/fish/metadata.fish layers/acme/modules/fish/contrib_acme_tool.fish; do
+  [ -f "$_fr_active/$_fr_file" ] || _fr_fail "the active release lacks $_fr_file"
+done
+grep -q '^roots_fish=profile_main_fish@module.d contrib_acme_tool@' "$_fr_active/valise-release.conf" ||
+  _fr_fail 'valise-release.conf does not record the Fish roots'
+
+_fr_env "$_fish" -l -c 'functions -q profile_main_loaded; or exit 11; test "$(contrib_acme_tool)" = acme; or exit 12; test "$VALISE_FISH_READY" = 1; or exit 13' \
+  >"$_fr_root/login.out" 2>"$_fr_root/login.err" || _fr_fail "a Fish login did not load the release (status $?)"
+[ ! -s "$_fr_root/login.out" ] && [ ! -s "$_fr_root/login.err" ] || _fr_fail 'a Fish login with the release active was not silent'
+
+_fr_inode=$(ls -i "$_fr_hook" | awk '{print $1}')
+(cd "$_fr_project" && _fr_env "$_engine/bin/valise" apply) >"$_fr_root/reapply.out" 2>"$_fr_root/reapply.err" || _fr_fail 'a second valise apply failed'
+grep -F "Fish hook current: $_fr_hook" "$_fr_root/reapply.out" "$_fr_root/reapply.err" >/dev/null || _fr_fail 'a second apply did not report the Fish hook as current'
+[ "$(ls -i "$_fr_hook" | awk '{print $1}')" = "$_fr_inode" ] || _fr_fail 'a second apply replaced an identical Fish hook'
+
+_fr_env "$_fish" -l -c 'source "$HOME/.config/fish/conf.d/valise.fish"; or exit 21; test "$(contrib_acme_tool)" = acme; or exit 22; for _h in (functions --all --names); string match -q "__valise_fish_*" -- $_h; and exit 23; end; exit 0' \
+  >"$_fr_root/resource.out" 2>"$_fr_root/resource.err" || _fr_fail "re-sourcing the Fish hook in a loaded session failed (status $?)"
+[ ! -s "$_fr_root/resource.err" ] || _fr_fail 're-sourcing the Fish hook was not silent'
+
+(cd "$_fr_project" && _fr_env "$_engine/bin/valise" apply --variant=lean) >"$_fr_root/lean.out" 2>"$_fr_root/lean.err" || _fr_fail 'valise apply --variant=lean failed'
+_fr_env "$_fish" -l -c 'functions -q profile_main_loaded; or exit 31; functions -q contrib_acme_tool; and exit 32; test "$VALISE_FISH_READY" = 1; or exit 33' \
+  >"$_fr_root/lean-login.out" 2>"$_fr_root/lean-login.err" || _fr_fail "the lean variant did not load exactly the remaining Fish root (status $?)"
+[ ! -s "$_fr_root/lean-login.out" ] && [ ! -s "$_fr_root/lean-login.err" ] || _fr_fail 'a Fish login with the lean variant was not silent'
+
+_fr_lean=$(cd "$_fr_home/.config/valise/active" && pwd -P) || _fr_fail 'the lean apply left no active release'
+_fr_body="$_fr_lean/modules/fish/profile_main.fish"
+chmod u+w "$_fr_lean/modules/fish" "$_fr_body"
+printf '%s\n' 'function tampered_release_ran; end; set -U tampered_release_ran 1' >>"$_fr_body"
+_fr_tamper_status=0
+_fr_env "$_fish" -l -c 'functions -q tampered_release_ran; and exit 41; functions -q profile_main_loaded; and exit 42; set -q tampered_release_ran; and exit 43; set -q VALISE_FISH_READY; and exit 44; exit 0' \
+  >"$_fr_root/tamper.out" 2>"$_fr_root/tamper.err" || _fr_tamper_status=$?
+[ "$_fr_tamper_status" -eq 0 ] || _fr_fail "a tampered release ran code or published readiness (status $_fr_tamper_status)"
+grep -F 'active release authentication failed' "$_fr_root/tamper.err" >/dev/null || _fr_fail 'a tampered release was not reported'
+unset _fr_root _fr_project _fr_home _fr_path _fr_hook _fr_active _fr_file _fr_inode _fr_lean _fr_body _fr_tamper_status _fr_out

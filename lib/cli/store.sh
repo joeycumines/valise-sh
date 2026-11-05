@@ -696,6 +696,15 @@ cmd_install() {
   _manifest="$_manifest_rows"
   validate_manifest "$_manifest" || die "invalid manifest.tsv schema or row"
 
+  # Only a tree built by valise build is installable. The integration loads
+  # plans/<shell>.sh and runtime/fish/profile.fish, which only that shape
+  # carries; installing anything else would wire startup files to nothing.
+  _install_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+  "$_install_awk" -F '\t' '$1 == "valise-release.conf" { found = 1 } END { exit found ? 0 : 1 }' "$_manifest" ||
+    die "manifest.tsv does not list valise-release.conf: only a release tree built by valise build can be installed"
+  [ "$(release_conf_value "$_manifest_root" format 2>/dev/null)" = 2 ] ||
+    die "valise-release.conf does not declare format=2: rebuild the release with this valise"
+
   # Release identity is content-derived; the schema header is not an ID.
   _release_id=$(file_sha256 "$_manifest") || die "no trusted SHA-256 utility available"
   case "$_release_id" in
@@ -857,19 +866,30 @@ cmd_install() {
     "$_chmod_path" 0644 "$_hook_tmp" || die "cannot set Fish hook mode"
     _cat_path=$(trusted_utility_path cat) || die "no trusted cat utility available"
     _hook_expected=$("$_cat_path" "$_hook_tmp") || die "cannot read Fish hook staging file"
-    _mv_path=$(trusted_utility_path mv) || die "no trusted mv utility available"
-    # mv -f uses rename(2) which atomically replaces a regular file
-    # destination on both BSD and GNU systems. The hook path was verified
-    # non-symlink above, so no explicit removal is needed — mv -f alone
-    # preserves atomicity.
-    "$_mv_path" -f "$_hook_tmp" "$_fish_hook" || die "cannot publish Fish hook"
-    _hook_tmp=""
-    [ -f "$_fish_hook" ] || die "Fish hook was not published"
-    [ "$(file_mode "$_fish_hook")" = 0644 ] || die "Fish hook mode mismatch"
-    _hook_actual=$("$_cat_path" "$_fish_hook") || die "cannot read published Fish hook"
-    [ "$_hook_actual" = "$_hook_expected" ] || die "published Fish hook contents mismatch"
-    info "Fish hook deployed: $_fish_hook"
-    info "remove this file to uninstall the Fish integration"
+    _hook_cmp=$(trusted_utility_path cmp) || die "no trusted cmp utility available"
+    if [ -f "$_fish_hook" ] && [ "$(file_mode "$_fish_hook")" = 0644 ] &&
+      "$_hook_cmp" -s "$_hook_tmp" "$_fish_hook"; then
+      # An identical hook stays in place, so its inode and mtime change only
+      # when its content does.
+      _rm_path=$(trusted_utility_path rm) || die "no trusted rm utility available"
+      "$_rm_path" -f "$_hook_tmp" || die "cannot remove Fish hook staging file"
+      _hook_tmp=""
+      info "Fish hook current: $_fish_hook"
+    else
+      _mv_path=$(trusted_utility_path mv) || die "no trusted mv utility available"
+      # mv -f uses rename(2) which atomically replaces a regular file
+      # destination on both BSD and GNU systems. The hook path was verified
+      # non-symlink above, so no explicit removal is needed — mv -f alone
+      # preserves atomicity.
+      "$_mv_path" -f "$_hook_tmp" "$_fish_hook" || die "cannot publish Fish hook"
+      _hook_tmp=""
+      [ -f "$_fish_hook" ] || die "Fish hook was not published"
+      [ "$(file_mode "$_fish_hook")" = 0644 ] || die "Fish hook mode mismatch"
+      _hook_actual=$("$_cat_path" "$_fish_hook") || die "cannot read published Fish hook"
+      [ "$_hook_actual" = "$_hook_expected" ] || die "published Fish hook contents mismatch"
+      info "Fish hook deployed: $_fish_hook"
+      info "remove this file to uninstall the Fish integration"
+    fi
   fi
 
   if [ "$_install_integration" -eq 1 ]; then

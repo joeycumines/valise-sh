@@ -49,13 +49,16 @@ _env() {
 }
 mkdir -p "$_test_root/home"
 
-# Build a release tree with one regular file and install it.
+# Build a minimal installable release tree: the format=2 release
+# configuration install requires, plus one regular file.
 _make_release() {
   _mr_tree=$1
   _mr_body=$2
   mkdir -p "$_mr_tree/bin"
   printf '%s\n' "$_mr_body" >"$_mr_tree/bin/tool.sh"
   chmod 0755 "$_mr_tree/bin/tool.sh"
+  printf 'format=2\n' >"$_mr_tree/valise-release.conf"
+  chmod 0644 "$_mr_tree/valise-release.conf"
   (cd "$_mr_tree" && "$_valise" make-manifest . >/dev/null 2>&1)
 }
 

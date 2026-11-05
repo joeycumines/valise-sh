@@ -5,11 +5,10 @@
 
 # Emit the POSIX integration block for the active release.
 #
-# It works in every POSIX shell and with both release shapes. A built release
-# carries plans/<shell>.sh for the shell classes its bundle covers; an engine
-# release carries entrypoints/profile.sh and the loader. The guard makes several
-# startup files safe: a login shell that reads more than one of them loads the
-# profile once. It is set only after a plan was sourced, so a shell started
+# It works in every POSIX shell. A release carries plans/<shell>.sh for the
+# shell classes its bundle covers; a shell class with no plan loads nothing.
+# The guard makes several startup files safe: a login shell that reads more
+# than one of them loads the profile once. It is set only after a plan was sourced, so a shell started
 # before the first install, or while the release was missing, tries again from
 # the next startup file. A plan that failed is not re-run in the same shell;
 # VALISE_RELOAD=1 forces another attempt. The shell is named by the first of
@@ -29,10 +28,6 @@ print_posix_integration() {
     '      VALISE_MODULE_ROOT="$_valise_active"' \
     '      . "$_valise_active/plans/$_valise_plan.sh"' \
     '      unset VALISE_MODULE_ROOT' \
-    '    elif [ -f "$_valise_active/entrypoints/profile.sh" ]; then' \
-    '      _valise_profile_loaded=1' \
-    '      VALISE_ROOT="$_valise_active"' \
-    '      . "$_valise_active/entrypoints/profile.sh"' \
     '    fi' \
     '  fi' \
     '  unset _valise_active _valise_plan' \
