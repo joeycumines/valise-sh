@@ -118,8 +118,8 @@ devtool_runner() {
   return "$_dr_status"
 }
 
-# devtool_env_args <scratch> <interpreter>
-# Set _dev_env to the quarantined environment for a test or run.
+# devtool_quarantine <scratch> <interpreter>
+# Create the test home and XDG tree; set _dev_path to the test PATH.
 devtool_quarantine() {
   _dq_scratch=$1
   _dq_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
