@@ -50,7 +50,6 @@ optional=
 shells=bash
 platforms=any
 exports=$_meta_exports
-updates=
 load=$_meta_load
 EOF
   unset _meta_path _meta_name _meta_requires _meta_exports _meta_load
@@ -225,7 +224,6 @@ optional=
 shells=bash
 platforms=any
 exports=
-updates=
 load=modules/root.sh
 EOF
 if (cd "$_project" && "$_valise" registry) \
@@ -252,7 +250,6 @@ optional=
 shells=bash
 platforms=any
 exports=
-updates=
 load=modules/does-not-exist.sh
 EOF
 if (cd "$_project" && "$_valise" registry) \
@@ -311,7 +308,6 @@ optional=
 shells=bash
 platforms=any
 exports=
-updates=
 load=modules/contrib_vendor_tool.sh
 EOF
 if (cd "$_project" && "$_valise" registry) \
@@ -338,7 +334,6 @@ optional=
 shells=bash
 platforms=any
 exports=
-updates=
 load_hook=_shell_module_load_hook_mod
 EOF
 if (cd "$_project" && "$_valise" registry "$_test_home/hook-registry.tsv") \

@@ -8,15 +8,15 @@ dependencies, and composition with the shared provider in `examples/shared/`.
 
 | Module | Shells | Platforms | Depends on | Export |
 |---|---|---|---|---|
-| `e2e_env_setup` | sh bash zsh ksh | any | `platform_posix` | `e2e_env_ready` |
+| `e2e_env_setup` | sh bash zsh ksh | any | `valise_platform_posix` | `e2e_env_ready` |
 | `e2e_aliases` | sh bash zsh ksh | any | `e2e_env_setup` | `e2e_show_aliases` |
 | `e2e_completions_bash` | bash | any | `e2e_aliases` | `e2e_bash_completions_loaded` |
 | `e2e_completions_zsh` | zsh | any | `e2e_aliases` | `e2e_zsh_completions_loaded` |
 | `e2e_ksh_features` | ksh | any | `e2e_env_setup` | `e2e_ksh_loaded` |
 | `e2e_fish_features` | fish | any | optional `e2e_env_setup` | `e2e_fish_loaded` |
-| `e2e_platform_tools_darwin` | sh bash zsh ksh | darwin | `platform_macos` | `e2e_darwin_tools_ready` |
-| `e2e_platform_tools_linux` | sh bash zsh ksh | linux | `platform_linux` | `e2e_linux_tools_ready` |
-| `e2e_platform_tools_bsd` | sh bash zsh ksh | bsd | `platform_bsd` | `e2e_bsd_tools_ready` |
+| `e2e_platform_tools_darwin` | sh bash zsh ksh | darwin | `valise_platform_macos` | `e2e_darwin_tools_ready` |
+| `e2e_platform_tools_linux` | sh bash zsh ksh | linux | `valise_platform_linux` | `e2e_linux_tools_ready` |
+| `e2e_platform_tools_bsd` | sh bash zsh ksh | bsd | `valise_platform_bsd` | `e2e_bsd_tools_ready` |
 | `e2e_optional_network` | sh bash zsh ksh | any | optional `e2e_env_setup` | `e2e_net_available` |
 | `e2e_generated_config` | sh bash zsh ksh | any | `e2e_env_setup` | `e2e_config_loaded` |
 | `e2e_layer_probe` | sh bash zsh ksh | any | `e2e_env_setup`, optional `contrib_shared_paths` | `e2e_layer_probe_ok` |

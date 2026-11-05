@@ -9,12 +9,12 @@ be pinned to a reviewed commit in the consuming project.
 
 | Module | Version | Export | Behavior |
 |---|---|---|---|
-| `contrib_shared_paths` | 1.0.0 | `contrib_shared_paths_setup` | Adds `$HOME/.local/bin` and `$HOME/.go/bin` using `contrib_path_prepend`. |
+| `contrib_shared_paths` | 1.0.0 | `contrib_shared_paths_setup` | Adds `$HOME/.local/bin` and `$HOME/.go/bin` using `valise_path_prepend`. |
 | `contrib_shared_umask` | 1.0.0 | `contrib_shared_umask_secure` | Sets `umask 077` when explicitly called. |
 
 The modules and their metadata are under `modules/shared/` and
 `module.d/`. Layer-only modules use the `contrib_` prefix. The paths module
-requires the engine's `contrib_path` module; this exercises dependency
+requires the engine's `valise_path` module; this exercises dependency
 resolution from a layer into the primary module root.
 
 ## Use in the sample profile

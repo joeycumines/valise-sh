@@ -1,9 +1,8 @@
 name=platform_edge_root_darwin
 requires=platform_edge_bridge_darwin
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=platform_edge_root_darwin_loaded
-updates=
 load=modules/platform_edge_root_darwin.sh

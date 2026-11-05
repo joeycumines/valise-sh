@@ -1,9 +1,8 @@
 name=clobber_private
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 requires=
 optional=
 load=modules/clobber_private.sh
 exports=clobber_private_loaded
-updates=

@@ -1,9 +1,8 @@
 name=platform_edge_blocked_linux
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=linux
 side_effect=read-only
 exports=platform_edge_blocked_linux_loaded
-updates=
 load=modules/platform_edge_blocked_linux.sh

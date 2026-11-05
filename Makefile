@@ -16,7 +16,7 @@ VALISE_CLI_LIBS := $(wildcard lib/cli/*.sh)
 .NOTPARALLEL: check test
 
 TEST_ENV_PATH = /usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
-TEST_RUNNER = PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_REQUIRED_PARSERS="$(VALISE_REQUIRED_PARSERS)" MACOS_PROFILE_PARSER_SEARCH_PATH="$${MACOS_PROFILE_PARSER_SEARCH_PATH:-}" T07_TEST_CHILD_SHELL="$${T07_TEST_CHILD_SHELL:-/bin/bash}" T07_TEST_CHILD_SHELL_ARGS="$${T07_TEST_CHILD_SHELL_ARGS:-}" T07_TEST_CHILD_PATH="$${T07_TEST_CHILD_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
+TEST_RUNNER = PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_CONSUMER_PROFILE="$${VALISE_CONSUMER_PROFILE:-}" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_REQUIRED_PARSERS="$(VALISE_REQUIRED_PARSERS)" MACOS_PROFILE_PARSER_SEARCH_PATH="$${MACOS_PROFILE_PARSER_SEARCH_PATH:-}" T07_TEST_CHILD_SHELL="$${T07_TEST_CHILD_SHELL:-/bin/bash}" T07_TEST_CHILD_SHELL_ARGS="$${T07_TEST_CHILD_SHELL_ARGS:-}" T07_TEST_CHILD_PATH="$${T07_TEST_CHILD_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
 RUNTIME_TEST_RUNNER = PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_LINUX_IMAGE="$${VALISE_LINUX_IMAGE:-}" VALISE_BSD_IMAGE="$${VALISE_BSD_IMAGE:-}" VALISE_RUNTIME_SEARCH_PATH="$${VALISE_RUNTIME_SEARCH_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
 
 check: syntax test test-fish-syntax test-docs test-detection-contract-busybox test-loader-multi-root-lanes test-e2e
@@ -194,10 +194,10 @@ test-entrypoint-runtime: tests/entrypoint-runtime.test.sh entrypoints/profile.sh
 test-capabilities: tests/capabilities.test.sh lib/capabilities.sh entrypoints/profile.sh
 	@$(TEST_RUNNER)
 
-test-contrib-modules: tests/contrib-modules.test.sh entrypoints/profile.sh lib/metadata.sh lib/capabilities.sh lib/loader.sh module.d/contrib_path.meta module.d/contrib_editor.meta module.d/contrib_pager.meta module.d/contrib_xdg.meta module.d/contrib_history.meta modules/system/contrib_path.sh modules/system/contrib_editor.sh modules/system/contrib_pager.sh modules/system/contrib_xdg.sh modules/system/contrib_history.sh
+test-contrib-modules: tests/contrib-modules.test.sh entrypoints/profile.sh lib/metadata.sh lib/capabilities.sh lib/loader.sh module.d/valise_path.meta module.d/valise_editor.meta module.d/valise_pager.meta module.d/valise_xdg.meta module.d/valise_history.meta modules/system/valise_path.sh modules/system/valise_editor.sh modules/system/valise_pager.sh modules/system/valise_xdg.sh modules/system/valise_history.sh
 	@$(TEST_RUNNER)
 
-test-non-macos-runtime: tests/non-macos-runtime.test.sh manifests/parser-support.tsv entrypoints/profile.sh lib/capabilities.sh lib/metadata.sh lib/loader.sh module.d/platform_posix.meta module.d/platform_linux.meta module.d/platform_bsd.meta modules/platform/posix.sh modules/platform/linux/capabilities.sh modules/platform/bsd/capabilities.sh
+test-non-macos-runtime: tests/non-macos-runtime.test.sh manifests/parser-support.tsv entrypoints/profile.sh lib/capabilities.sh lib/metadata.sh lib/loader.sh module.d/valise_platform_posix.meta module.d/valise_platform_linux.meta module.d/valise_platform_bsd.meta modules/platform/posix.sh modules/platform/linux/capabilities.sh modules/platform/bsd/capabilities.sh
 	@$(RUNTIME_TEST_RUNNER)
 
 test-cli-posix: tests/cli-posix.test.sh bin/valise $(VALISE_CLI_LIBS)
@@ -251,14 +251,14 @@ test-e2e: tests/e2e.test.sh bin/valise $(VALISE_CLI_LIBS) examples/e2e/build-man
 	@echo "=== valise end-to-end test ==="
 	@VALISE_REQUIRE_TOOLING="$(VALISE_REQUIRE_TOOLING)" /bin/bash tests/e2e.test.sh
 
-# The reference consumer profile lives in scratch/shell-profile and is not
-# tracked by the repository. The suite copies it to a temporary directory
-# and works only on the copy, so the original tree and the live profile
-# are never touched. It skips with a visible message when the tree is
-# absent, which is the case in CI and in a package install.
+# VALISE_CONSUMER_PROFILE names a real consumer project (a directory with
+# valise.conf). The suite copies it to a temporary directory and works only
+# on the copy, so the original tree and the live profile are never touched.
+# It skips with a visible message when the variable is unset.
+VALISE_CONSUMER_PROFILE ?=
 test-consumer-profile: tests/consumer-profile.test.sh bin/valise $(VALISE_CLI_LIBS) lib/compiler.awk lib/capabilities.sh
 	@echo "=== valise consumer-profile end-to-end test ==="
-	@$(TEST_RUNNER)
+	@VALISE_CONSUMER_PROFILE="$(VALISE_CONSUMER_PROFILE)" $(TEST_RUNNER)
 
 clean: ## Delete build products, temporary release trees, and pack tarballs.
 	@rm -rf examples/e2e/build examples/profile-project/build *.tgz .valise-* scratch/.valise-* scratch/valise-*

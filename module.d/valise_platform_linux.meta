@@ -1,9 +1,8 @@
-name=platform_linux
-requires=platform_posix
+name=valise_platform_linux
+requires=valise_platform_posix
 optional=
-shells=sh bash zsh ksh
+shells=posix
 platforms=linux
 side_effect=read-only
 exports=sp_platform_linux_available sp_platform_linux_cpu_count sp_platform_linux_file_mtime
-updates=
 load=modules/platform/linux/capabilities.sh

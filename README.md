@@ -105,7 +105,7 @@ explains what the generated release contains.
   [docs/contrib-modules.md](docs/contrib-modules.md)). No command requires
   Python 3.
 - `module.d/` and `modules/platform/` — generic platform modules
-  (`platform_posix`, `platform_macos`, `platform_linux`, `platform_bsd`).
+  (`valise_platform_posix`, `valise_platform_macos`, `valise_platform_linux`, `valise_platform_bsd`).
 - `manifests/parser-support.tsv` — declares the shell parsers used to check
   each source-file class.
 - `tests/` — the test suite. Every test runs in a quarantined environment:

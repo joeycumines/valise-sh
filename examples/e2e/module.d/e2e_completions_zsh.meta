@@ -5,5 +5,4 @@ shells=zsh
 platforms=any
 side_effect=read-only
 exports=e2e_zsh_completions_loaded
-updates=
 load=modules/e2e/completions_zsh.sh

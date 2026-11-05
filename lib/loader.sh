@@ -94,7 +94,6 @@ _sp_loader_read_record() {
   _splrr_platforms=
   _splrr_side_effect=
   _splrr_exports=
-  _splrr_updates=
   _splrr_version=
   _splrr_load=
   while IFS= read -r _splrr_line || [ -n "$_splrr_line" ]; do
@@ -112,7 +111,6 @@ _sp_loader_read_record() {
     platforms) _splrr_platforms=$_splrr_value ;;
     side_effect) _splrr_side_effect=$_splrr_value ;;
     exports) _splrr_exports=$_splrr_value ;;
-    updates) _splrr_updates=$_splrr_value ;;
     version) _splrr_version=$_splrr_value ;;
     load) _splrr_load=$_splrr_value ;;
     esac
@@ -124,12 +122,11 @@ _sp_loader_read_record() {
   _spl_record_platforms=$_splrr_platforms
   _spl_record_side_effect=$_splrr_side_effect
   _spl_record_exports=$_splrr_exports
-  _spl_record_updates=$_splrr_updates
   _spl_record_version=$_splrr_version
   _spl_record_load=$_splrr_load
   unset _splrr_file _splrr_line _splrr_key _splrr_value _splrr_name _splrr_requires \
     _splrr_optional _splrr_shells _splrr_platforms _splrr_side_effect _splrr_exports \
-    _splrr_updates _splrr_version _splrr_load
+    _splrr_version _splrr_load
 }
 
 _sp_loader_reserved_scan() {
@@ -639,7 +636,8 @@ sp_loader_load_modules() {
       fi
       IFS=' '
       for _spl_value in $_spl_record_shells; do
-        [ "$_spl_value" = sh ] && _spl_shell_match=1
+        # posix names every POSIX shell; sh names only the generic class.
+        [ "$_spl_value" = posix ] && _spl_shell_match=1
         [ "$_spl_value" = "$_spl_current_shell" ] && _spl_shell_match=1
       done
       for _spl_value in $_spl_record_platforms; do
@@ -742,7 +740,7 @@ sp_loader_load_modules() {
         fi
       done
       unset _spl_record_name _spl_record_requires _spl_record_optional _spl_record_shells \
-        _spl_record_platforms _spl_record_side_effect _spl_record_exports _spl_record_updates \
+        _spl_record_platforms _spl_record_side_effect _spl_record_exports \
         _spl_record_version _spl_record_load
       if [ "$_spl_dep_ifs_was_set" -eq 1 ]; then
         IFS=$_spl_dep_old_ifs
@@ -1613,7 +1611,7 @@ sp_loader_load_modules() {
       _spl_order_words _spl_failed_words _spl_guard_seen_words _spl_guard_strict_required_words \
       _spl_guard_blocked_words _spl_guard_modules_words _spl_guard_order_words _spl_guard_failed_words \
       _spl_record_name _spl_record_requires _spl_record_optional _spl_record_shells \
-      _spl_record_platforms _spl_record_side_effect _spl_record_exports _spl_record_updates \
+      _spl_record_platforms _spl_record_side_effect _spl_record_exports \
       _spl_record_version _spl_record_load _spl_run_line _spl_module_root
     unset -f _sp_loader_path_is_physical _sp_loader_read_record _sp_loader_reserved_scan 2>/dev/null || :
     return 0
@@ -1663,7 +1661,7 @@ sp_loader_load_modules() {
     _spl_order_words _spl_failed_words _spl_guard_seen_words _spl_guard_strict_required_words \
     _spl_guard_blocked_words _spl_guard_modules_words _spl_guard_order_words _spl_guard_failed_words \
     _spl_record_name _spl_record_requires _spl_record_optional _spl_record_shells \
-    _spl_record_platforms _spl_record_side_effect _spl_record_exports _spl_record_updates \
+    _spl_record_platforms _spl_record_side_effect _spl_record_exports \
     _spl_record_version _spl_record_load _spl_run_line _spl_module_root
   unset -f _sp_loader_path_is_physical _sp_loader_read_record _sp_loader_reserved_scan 2>/dev/null || :
   return 1

@@ -1,14 +1,14 @@
 # Copyright (c) 2026 Joseph Cumines
 # SPDX-License-Identifier: MIT
 
-# contrib_editor: predictable EDITOR/VISUAL defaults.
+# valise_editor: predictable EDITOR/VISUAL defaults.
 #
 # Respects values the user already set; otherwise uses the first available
 # of nvim, vim, vi. vi is POSIX-mandated and present on conforming systems,
 # so a default is always found there. Prints nothing and succeeds in every
 # case, including when nothing is available.
 
-contrib_editor_defaults() {
+valise_editor_defaults() {
   if [ -n "${EDITOR-}" ] && [ -n "${VISUAL-}" ]; then
     return 0
   fi

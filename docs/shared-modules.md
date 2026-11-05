@@ -144,11 +144,11 @@ See [contrib-modules.md](contrib-modules.md) for the list.
 
 | Module | Version | Exports | Source | Status |
 |---|---|---|---|---|
-| `contrib_path` | 1.0.0 | `contrib_path_prepend`, `contrib_path_append` | `modules/system/contrib_path.sh` | active |
-| `contrib_editor` | 1.0.0 | `contrib_editor_defaults` | `modules/system/contrib_editor.sh` | active |
-| `contrib_pager` | 1.0.0 | `contrib_pager_defaults` | `modules/system/contrib_pager.sh` | active |
-| `contrib_xdg` | 1.0.0 | `contrib_xdg_defaults` | `modules/system/contrib_xdg.sh` | active |
-| `contrib_history` | 1.0.0 | `contrib_history_defaults` | `modules/system/contrib_history.sh` | active |
+| `valise_path` | 1.0.0 | `valise_path_prepend`, `valise_path_append` | `modules/system/valise_path.sh` | active |
+| `valise_editor` | 1.0.0 | `valise_editor_defaults` | `modules/system/valise_editor.sh` | active |
+| `valise_pager` | 1.0.0 | `valise_pager_defaults` | `modules/system/valise_pager.sh` | active |
+| `valise_xdg` | 1.0.0 | `valise_xdg_defaults` | `modules/system/valise_xdg.sh` | active |
+| `valise_history` | 1.0.0 | `valise_history_defaults` | `modules/system/valise_history.sh` | active |
 
 The example provider tree in this repository
 (`examples/shared/`) additionally ships:

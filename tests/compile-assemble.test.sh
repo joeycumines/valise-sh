@@ -63,7 +63,6 @@ optional=
 shells=bash zsh ksh
 platforms=any
 exports=root_ready
-updates=
 load=modules/root.sh
 EOF
 cat >"$_project/shell/modules/root.sh" <<'EOF'
@@ -78,7 +77,6 @@ optional=
 shells=bash zsh ksh
 platforms=any
 exports=vendor_tool_ready
-updates=
 load=modules/contrib_vendor_tool.sh
 EOF
 cat >"$_project/shell/layers/vendor/modules/contrib_vendor_tool.sh" <<'EOF'
@@ -94,7 +92,6 @@ optional=
 shells=$_shell
 platforms=any
 exports=${_shell}_plan_ready
-updates=
 load=modules/${_shell}_only.sh
 EOF
   cat >"$_project/shell/modules/${_shell}_only.sh" <<EOF
@@ -290,7 +287,6 @@ optional=
 shells=bash
 platforms=any
 exports=
-updates=
 load=modules/root.sh
 EOF
 if (cd "$_project" && "$_link" build --bundle=default build/escape) \
@@ -319,7 +315,6 @@ optional=
 shells=bash
 platforms=any
 exports=
-updates=
 load=modules/../evil.sh
 EOF
 cat >"$_project/shell/modules/evil.sh" <<'EOF'
@@ -471,7 +466,6 @@ optional=
 shells=bash zsh ksh
 platforms=any
 exports=engine_root_ready
-updates=
 load=modules/engine_root.sh
 EOF
 cat >"$_engine_release/modules/engine_root.sh" <<'EOF'
@@ -663,7 +657,6 @@ optional=
 shells=bash zsh ksh
 platforms=any
 exports=root_ready
-updates=
 load=modules/root.sh
 EOF
 printf 'root_ready() { :; }\n' >"$_exclude_project/shell/modules/root.sh"
@@ -676,7 +669,6 @@ optional=
 shells=bash zsh ksh
 platforms=any
 exports=vendor_ready
-updates=
 load=modules/shared/contrib_shared_name.sh
 EOF
 printf 'vendor_ready() { :; }\n' >"$_exclude_project/shell/layers/vendor/modules/shared/contrib_shared_name.sh"
@@ -721,7 +713,6 @@ optional=
 shells=bash zsh ksh
 platforms=any
 exports=needs_layer_ready
-updates=
 load=modules/needs_layer.sh
 EOF
 printf 'needs_layer_ready() { :; }\n' >"$_exclude_project/shell/modules/needs_layer.sh"
@@ -775,7 +766,6 @@ optional=
 shells=bash zsh ksh
 platforms=any
 exports=needs_vendor_ready
-updates=
 load=modules/needs_vendor.sh
 EOF
 printf 'needs_vendor_ready() { :; }\n' >"$_exclude_project/shell/modules/needs_vendor.sh"

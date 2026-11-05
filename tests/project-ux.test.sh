@@ -405,10 +405,9 @@ version=
 side_effect=read-only
 requires=only_root
 optional=
-shells=sh
+shells=posix
 platforms=any
 exports=
-updates=
 load=
 EOF
 printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\nminimal\tMinimal\tgone\nsmall\tSmall\tgone keeper\n' \
@@ -489,10 +488,9 @@ version=
 side_effect=read-only
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 exports=
-updates=
 load=modules/shared_one.sh
 EOF
 (cd "$_share_project" && _env build) >/dev/null 2>&1 || :

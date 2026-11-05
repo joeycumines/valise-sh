@@ -76,7 +76,7 @@ function sp_fish_metadata_validate_shell_list --description 'Validate shell list
         end
         set seen 1
         switch "$sh"
-            case sh bash zsh ksh fish
+            case posix sh bash zsh ksh fish
                 # valid
             case '*'
                 sp_fish_metadata_error "invalid shell: $sh"
@@ -190,7 +190,10 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
     set -l m_platforms ''
     set -l m_side_effect ''
     set -l m_exports ''
-    set -l m_updates ''
+    set -l m_commands ''
+    set -l m_executables ''
+    set -l m_tests ''
+    set -l m_seen
     set -l m_version ''
     set -l m_load ''
 
@@ -206,6 +209,11 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
         end
         set -l key (string split -m1 '=' -- "$line")[1]
         set -l val (string split -m1 '=' -- "$line")[2]
+        if contains -- "$key" $m_seen
+            sp_fish_metadata_error "duplicate metadata field: $key"
+            return 1
+        end
+        set -a m_seen "$key"
         switch "$key"
             case name; set m_name $val
             case requires; set m_requires $val
@@ -214,7 +222,12 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
             case platforms; set m_platforms $val
             case side_effect; set m_side_effect $val
             case exports; set m_exports $val
-            case updates; set m_updates $val
+            case commands; set m_commands $val
+            case executables; set m_executables $val
+            case tests; set m_tests $val
+            case updates
+                sp_fish_metadata_error 'metadata field updates is not supported since valise 0.3.0; publish commands with commands= or executables='
+                return 1
             case version; set m_version $val
             case load; set m_load $val
             case load_hook
@@ -275,8 +288,37 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
     if not sp_fish_metadata_validate_identifier_list "$m_exports" export
         return 1
     end
-    if not sp_fish_metadata_validate_identifier_list "$m_updates" update_registration
+    if not sp_fish_metadata_validate_identifier_list "$m_commands" command
         return 1
+    end
+    for cmd in (string split ' ' -- $m_commands)
+        test -n "$cmd"; or continue
+        if not contains -- "$cmd" (string split ' ' -- $m_exports)
+            sp_fish_metadata_error "command is not a declared export: $cmd"
+            return 1
+        end
+    end
+    for kind in executable test
+        set -l paths $m_executables
+        test "$kind" = test; and set paths $m_tests
+        if string match -qr '[*?\[\]\\\\]' -- "$paths"
+            sp_fish_metadata_error "invalid $kind: contains glob metacharacter"
+            return 1
+        end
+        for p in (string split ' ' -- $paths)
+            test -n "$p"; or continue
+            if string match -qr '(^|/)\.(/|$)|//|/$' -- "$p"
+                sp_fish_metadata_error "invalid $kind path: $p"
+                return 1
+            end
+            if not sp_fish_metadata_validate_relative_path "$p"
+                return 1
+            end
+            if test "$kind" = executable; and not string match -qr '^[A-Za-z0-9_]' -- (string split -r -m1 / -- "$p")[-1]
+                sp_fish_metadata_error "invalid executable name: "(string split -r -m1 / -- "$p")[-1]
+                return 1
+            end
+        end
     end
     if not sp_fish_metadata_validate_version "$m_version"
         return 1
@@ -292,7 +334,9 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
     echo "platforms=$m_platforms"
     echo "side_effect=$m_side_effect"
     echo "exports=$m_exports"
-    echo "updates=$m_updates"
+    echo "commands=$m_commands"
+    echo "executables=$m_executables"
+    echo "tests=$m_tests"
     echo "version=$m_version"
     echo "load=$m_load"
     return 0

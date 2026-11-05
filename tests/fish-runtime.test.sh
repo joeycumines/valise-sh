@@ -41,7 +41,7 @@ _meta() {
     printf 'platforms=%s\n' "$_meta_platforms"
     printf 'side_effect=%s\n' "$_meta_effect"
     printf 'exports=%s\n' "$_meta_exports"
-    printf 'updates=\nload=%s\n' "$_meta_load"
+    printf 'load=%s\n' "$_meta_load"
   } >"$_meta_path"
 }
 
@@ -65,12 +65,12 @@ _body "$_fixture/modules/fish/generic_conflict.fish" 'set -g conflict_sourced ge
 # version support, so these records are written directly.
 {
   printf 'name=%s\n' version_skew
-  printf 'requires=\noptional=\nshells=fish\nplatforms=any\nside_effect=read-only\nexports=version_skew_loaded\nupdates=\nversion=1.0.0\nload=native_version_skew.fish\n'
+  printf 'requires=\noptional=\nshells=fish\nplatforms=any\nside_effect=read-only\nexports=version_skew_loaded\nversion=1.0.0\nload=native_version_skew.fish\n'
 } >"$_fixture/modules/fish/module.d/version_skew.meta"
 _body "$_fixture/modules/fish/native_version_skew.fish" 'set -g version_skew_sourced native; function version_skew_loaded; end'
 {
   printf 'name=%s\n' version_skew
-  printf 'requires=\noptional=\nshells=fish\nplatforms=any\nside_effect=read-only\nexports=version_skew_loaded\nupdates=\nversion=2.0.0\nload=modules/fish/version_skew.fish\n'
+  printf 'requires=\noptional=\nshells=fish\nplatforms=any\nside_effect=read-only\nexports=version_skew_loaded\nversion=2.0.0\nload=modules/fish/version_skew.fish\n'
 } >"$_fixture/module.d/version_skew.meta"
 _body "$_fixture/modules/fish/version_skew.fish" 'set -g version_skew_sourced generic; function version_skew_loaded; end'
 

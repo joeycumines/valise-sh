@@ -1,0 +1,9 @@
+name=valise_history
+requires=
+optional=
+shells=posix
+platforms=any
+side_effect=path-env
+exports=valise_history_defaults
+version=1.0.0
+load=modules/system/valise_history.sh

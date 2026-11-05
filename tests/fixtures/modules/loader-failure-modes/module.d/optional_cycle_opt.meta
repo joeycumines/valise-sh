@@ -1,9 +1,8 @@
 name=optional_cycle_opt
 requires=optional_cycle_app
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=optional_cycle_opt_loaded
-updates=
 load=modules/optional_cycle_opt.sh

@@ -100,20 +100,24 @@ cat >"$_valid" <<'META'
 name=path_utilities
 requires=core_environment secure_local_bin
 optional=osm
-shells=sh bash zsh ksh
+shells=posix bash zsh ksh
 platforms=any darwin linux bsd
 side_effect=path-env
 exports=pathcontains pathappend pathprepend
-updates=get_toml_table_value git_file_log_extractor
+commands=pathcontains
+executables=bin/path-report tools/path_audit.sh
+tests=tests/path_utilities.sh
 load=modules/core/path_utilities.sh
 META
 run_read "$_valid"
 assert_exit 'valid metadata parses' 0 "$_status"
 assert_contains 'valid metadata emits module name' "$_out" 'name=path_utilities'
 assert_contains 'valid metadata emits dependencies' "$_out" 'requires=core_environment secure_local_bin'
-assert_contains 'valid metadata emits shells' "$_out" 'shells=sh bash zsh ksh'
+assert_contains 'valid metadata emits shells' "$_out" 'shells=posix bash zsh ksh'
 assert_contains 'valid metadata emits side effect class' "$_out" 'side_effect=path-env'
-assert_contains 'valid metadata emits update registrations' "$_out" 'updates=get_toml_table_value git_file_log_extractor'
+assert_contains 'valid metadata emits published commands' "$_out" 'commands=pathcontains'
+assert_contains 'valid metadata emits executables' "$_out" 'executables=bin/path-report tools/path_audit.sh'
+assert_contains 'valid metadata emits tests' "$_out" 'tests=tests/path_utilities.sh'
 assert_contains 'valid metadata emits load path' "$_out" 'load=modules/core/path_utilities.sh'
 assert_contains 'unversioned metadata emits empty version' "$_out" 'version='
 
@@ -123,11 +127,10 @@ cat >"$_meta_module" <<'META'
 name=meta_module
 requires=core_environment
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=
-updates=
 META
 run_read "$_meta_module"
 assert_exit 'metadata accepts a dependency-only meta module without a load target' 0 "$_status"
@@ -139,11 +142,10 @@ cat >"$_no_body_no_deps" <<'META'
 name=no_body_no_deps
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=
-updates=
 META
 run_read "$_no_body_no_deps"
 assert_exit 'metadata rejects a module with no body and no dependencies' 1 "$_status"
@@ -154,11 +156,10 @@ cat >"$_optional_only_no_load" <<'META'
 name=optional_only_no_load
 requires=
 optional=core_environment
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=
-updates=
 META
 run_read "$_optional_only_no_load"
 assert_exit 'metadata rejects an optional-only module without a load target' 1 "$_status"
@@ -170,11 +171,10 @@ cat >"$_versioned" <<'META'
 name=versioned_probe
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=versioned_probe
-updates=
 version=2.1.0-rc1
 load=modules/core/versioned_probe.sh
 META
@@ -187,11 +187,10 @@ for _bad_version in v1 '1.0 beta' '1.*' '-1' '-rc1'; do
 name=bad_version
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=bad_version
-updates=
 version=$_bad_version
 load=modules/core/bad_version.sh
 META
@@ -235,7 +234,7 @@ cat >"$_no_exec_meta" <<META
 name=no_exec_probe
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=no_exec_probe
@@ -252,7 +251,7 @@ cat >"$_bad_name" <<'META'
 name=bad/name
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=bad_name
@@ -267,7 +266,7 @@ cat >"$_bad_dep" <<'META'
 name=bad_dep
 requires=core ok/escape 'quoted'
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=bad_dep
@@ -282,7 +281,7 @@ cat >"$_bad_side" <<'META'
 name=bad_side_effect
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=network
 exports=bad_side_effect
@@ -297,16 +296,56 @@ cat >"$_bad_update" <<'META'
 name=bad_update
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=bad_update
-updates=ok_update ../escape
+updates=
 load=modules/core/bad_update.sh
 META
 run_read "$_bad_update"
-assert_exit 'metadata rejects unsafe update registration identifiers' 1 "$_status"
-assert_contains 'invalid update registration diagnostic is explicit' "$_out" 'invalid update_registration'
+assert_exit 'metadata rejects the removed updates field' 1 "$_status"
+assert_contains 'removed updates diagnostic names the release' "$_out" 'metadata field updates is not supported since valise 0.3.0'
+
+printf '\n=== Metadata duplicate fields and 0.3.0 fields ===\n'
+write_field_meta() {
+  _wf_target="$_tmp/$1.meta"
+  shift
+  {
+    printf '%s\n' 'name=field_probe' 'requires=' 'optional=' 'shells=posix' 'platforms=any' \
+      'side_effect=read-only' 'exports=field_probe field_other' 'load=modules/field_probe.sh'
+    for _wf_line do printf '%s\n' "$_wf_line"; done
+  } >"$_wf_target"
+}
+write_field_meta duplicate-key 'exports=field_probe'
+run_read "$_wf_target"
+assert_exit 'metadata rejects a duplicate field' 1 "$_status"
+assert_contains 'duplicate field diagnostic names the field' "$_out" 'duplicate metadata field: exports'
+write_field_meta command-not-export 'commands=field_probe not_exported'
+run_read "$_wf_target"
+assert_exit 'metadata rejects a command that is not an export' 1 "$_status"
+assert_contains 'command diagnostic names the command' "$_out" 'command is not a declared export: not_exported'
+write_field_meta command-ok 'commands=field_probe field_other'
+run_read "$_wf_target"
+assert_exit 'metadata accepts commands drawn from exports' 0 "$_status"
+for _wf_bad in '/abs/tool' '../tool' 'bin/../tool' './tool' 'bin//tool' 'bin/' 'bin/.' 'bin/-tool' 'bin/t*ol'; do
+  write_field_meta bad-executable "executables=$_wf_bad"
+  run_read "$_wf_target"
+  assert_exit "metadata rejects executable path $_wf_bad" 1 "$_status"
+  assert_contains "executable diagnostic for $_wf_bad is explicit" "$_out" 'invalid'
+done
+for _wf_bad in '/abs/test.sh' '../test.sh' 'tests//t.sh'; do
+  write_field_meta bad-test "tests=$_wf_bad"
+  run_read "$_wf_target"
+  assert_exit "metadata rejects test path $_wf_bad" 1 "$_status"
+done
+for _wf_shells in 'posix' 'sh' 'sh bash ksh' 'posix fish'; do
+  write_field_meta shell-class
+  sed "s/^shells=.*/shells=$_wf_shells/" "$_wf_target" >"$_wf_target.tmp" && mv "$_wf_target.tmp" "$_wf_target"
+  run_read "$_wf_target"
+  assert_exit "metadata accepts shells=$_wf_shells" 0 "$_status"
+done
+unset _wf_target _wf_line _wf_bad _wf_shells
 
 _glob_cwd="$_tmp/glob-cwd"
 mkdir -p "$_glob_cwd"
@@ -320,7 +359,7 @@ shells=[s]h
 platforms=[a]ny
 side_effect=read-only
 exports=[e]xport
-updates=[u]pd
+commands=[u]pd
 load=modules/core/bad_glob.sh
 META
 _out=$(cd "$_glob_cwd" && sp_metadata_read "$_bad_glob" 2>&1)
@@ -336,30 +375,30 @@ write_control_meta() {
     printf '%s\n' 'name=control_probe'
     if [ "$_field" = requires ]; then printf 'requires=%s\n' "$_value"; else printf '%s\n' 'requires='; fi
     if [ "$_field" = optional ]; then printf 'optional=%s\n' "$_value"; else printf '%s\n' 'optional='; fi
-    if [ "$_field" = shells ]; then printf 'shells=%s\n' "$_value"; else printf '%s\n' 'shells=sh'; fi
+    if [ "$_field" = shells ]; then printf 'shells=%s\n' "$_value"; else printf '%s\n' 'shells=posix'; fi
     if [ "$_field" = platforms ]; then printf 'platforms=%s\n' "$_value"; else printf '%s\n' 'platforms=any'; fi
     printf '%s\n' 'side_effect=read-only'
     if [ "$_field" = exports ]; then printf 'exports=%s\n' "$_value"; else printf '%s\n' 'exports=control_probe'; fi
-    if [ "$_field" = updates ]; then printf 'updates=%s\n' "$_value"; else printf '%s\n' 'updates='; fi
+    if [ "$_field" = commands ]; then printf 'commands=%s\n' "$_value"; else printf '%s\n' 'commands='; fi
     printf '%s\n' 'load=modules/core/control_probe.sh'
   } >"$_target"
 }
 
 _tab=$(printf '\t')
-for _control_field in requires optional shells platforms exports updates; do
+for _control_field in requires optional shells platforms exports commands; do
   write_control_meta "$_control_field" "ok${_tab}evil"
   run_read "$_target"
   assert_exit "metadata rejects tab control character in $_control_field" 1 "$_status"
   assert_contains "control-character diagnostic names $_control_field" "$_out" "invalid $_control_field"
 done
-for _space_field in requires optional exports updates; do
+for _space_field in requires optional exports commands; do
   write_control_meta "$_space_field" ' '
   run_read "$_target"
   case "$_space_field" in
   requires) _space_label=dependency ;;
   optional) _space_label=optional_dependency ;;
   exports) _space_label=export ;;
-  updates) _space_label=update_registration ;;
+  commands) _space_label=command ;;
   esac
   assert_exit "metadata rejects whitespace-only $_space_field list" 1 "$_status"
   assert_contains "whitespace-only $_space_field diagnostic is explicit" "$_out" "invalid $_space_label"
@@ -379,11 +418,10 @@ cat >"$_bad_ifs_dep" <<'META'
 name=bad_ifs_dep
 requires=ok/escape
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=bad_ifs_dep
-updates=
 load=modules/core/bad_ifs_dep.sh
 META
 _out=$(IFS=/; sp_metadata_read "$_bad_ifs_dep" 2>&1)
@@ -396,17 +434,17 @@ cat >"$_bad_ifs_update" <<'META'
 name=bad_ifs_update
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=bad_ifs_update
-updates=bad-update
+commands=bad-update
 load=modules/core/bad_ifs_update.sh
 META
 _out=$(IFS=-; sp_metadata_read "$_bad_ifs_update" 2>&1)
 _status=$?
-assert_exit 'metadata rejects update hyphen with hostile IFS' 1 "$_status"
-assert_contains 'hostile IFS update diagnostic is explicit' "$_out" 'invalid update_registration'
+assert_exit 'metadata rejects command hyphen with hostile IFS' 1 "$_status"
+assert_contains 'hostile IFS command diagnostic is explicit' "$_out" 'invalid command'
 
 _bad_ifs_shell="$_tmp/bad-ifs-shell.meta"
 cat >"$_bad_ifs_shell" <<'META'
@@ -417,7 +455,6 @@ shells=bash-zsh
 platforms=any
 side_effect=read-only
 exports=bad_ifs_shell
-updates=
 load=modules/core/bad_ifs_shell.sh
 META
 _out=$(IFS=-; sp_metadata_read "$_bad_ifs_shell" 2>&1)
@@ -430,7 +467,7 @@ cat >"$_missing_required" <<'META'
 name=missing_required
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 exports=missing_required
 load=modules/core/missing_required.sh
@@ -444,7 +481,7 @@ cat >"$_bad_load_hook" <<'META'
 name=bad_load_hook
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=bad_load_hook
@@ -460,7 +497,7 @@ cat >"$_ambiguous_load" <<'META'
 name=ambiguous_load
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=ambiguous_load
@@ -477,11 +514,10 @@ for _retired_field in unload failure_policy; do
     printf '%s\n' 'name=retired_field'
     printf '%s\n' 'requires='
     printf '%s\n' 'optional='
-    printf '%s\n' 'shells=sh'
+    printf '%s\n' 'shells=posix'
     printf '%s\n' 'platforms=any'
     printf '%s\n' 'side_effect=read-only'
     printf '%s\n' 'exports=retired_field'
-    printf '%s\n' 'updates='
     printf '%s\n' 'load=modules/core/retired_field.sh'
     printf '%s=%s\n' "$_retired_field" retired
   } >"$_retired_meta"

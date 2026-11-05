@@ -1,13 +1,13 @@
 # Copyright (c) 2026 Joseph Cumines
 # SPDX-License-Identifier: MIT
 
-# contrib_pager: predictable PAGER default.
+# valise_pager: predictable PAGER default.
 #
 # Respects a value the user already set; otherwise uses the first available
 # of less, more. When neither exists, PAGER is left unset. Prints nothing
 # and succeeds in every case.
 
-contrib_pager_defaults() {
+valise_pager_defaults() {
   if [ -n "${PAGER-}" ]; then
     return 0
   fi

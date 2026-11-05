@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Joseph Cumines
 # SPDX-License-Identifier: MIT
 
-# contrib_path: idempotent PATH augmentation.
+# valise_path: idempotent PATH augmentation.
 #
 # Each listed directory ends up in PATH exactly once. With no arguments the
 # functions normalize PATH in place (duplicates and empty components are
@@ -73,12 +73,12 @@ _contrib_path_rebuild() {
   unset _contrib_path_mode _contrib_path_wanted _contrib_path_item _contrib_path_kept _contrib_path_field _contrib_path_new _contrib_path_old_ifs _contrib_path_ifs_was_set _contrib_path_glob_off
 }
 
-contrib_path_prepend() {
+valise_path_prepend() {
   # Move each argument to the front of PATH, preserving argument order, so
   # the first argument ends up first.
   _contrib_path_rebuild prepend "$@"
 }
 
-contrib_path_append() {
+valise_path_append() {
   _contrib_path_rebuild append "$@"
 }

@@ -1,9 +1,8 @@
 name=unset_command
-shells=sh bash
+shells=posix bash
 platforms=any
 side_effect=read-only
 requires=
 optional=
 load=modules/unset_command.sh
 exports=unset_command_loaded
-updates=

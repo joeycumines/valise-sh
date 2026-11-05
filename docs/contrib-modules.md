@@ -120,8 +120,8 @@ regenerate `shell/release/module-registry.tsv` from the metadata.
 
 ### In the engine repository
 
-1. Write the two files. Start from an existing pair — `module.d/contrib_pager.meta`
-   plus `modules/system/contrib_pager.sh` is the smallest real example.
+1. Write the two files. Start from an existing pair — `module.d/valise_pager.meta`
+   plus `modules/system/valise_pager.sh` is the smallest real example.
 2. Validate the metadata as data:
 
    ```sh
@@ -182,7 +182,7 @@ defaults from a checkout with:
 
 ```sh
 VALISE_MODULE_ROOT="$PWD" \
-VALISE_MODULES='contrib_path contrib_editor' \
+VALISE_MODULES='valise_path valise_editor' \
 VALISE_MODE=strict \
 . ./entrypoints/profile.sh
 ```

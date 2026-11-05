@@ -49,7 +49,6 @@ optional=
 shells=bash
 platforms=$_mod_platforms
 exports=$_mod_exports
-updates=
 load=modules/$_mod_name.sh
 EOF
   printf '%s\n' "$_mod_body" >"$_project/shell/modules/$_mod_name.sh"
@@ -95,7 +94,6 @@ optional=
 shells=bash
 platforms=any
 exports=
-updates=
 load=
 EOF
 rm -f "$_project/shell/modules/meta_parent.sh"
@@ -120,7 +118,6 @@ optional=
 shells=bash
 platforms=$_other_platform
 exports=
-updates=
 load=
 EOF
 _module meta_other_user meta_other meta_other_user_loaded any read-only 'meta_other_user_loaded() { :; }'
@@ -152,7 +149,6 @@ optional=
 shells=bash
 platforms=any
 exports=meta_export_bad_loaded
-updates=
 load=
 EOF
 rm -f "$_project"/shell/module.d/*.bak
@@ -166,7 +162,6 @@ optional=
 shells=bash
 platforms=any
 exports=contrib_demo_child_loaded
-updates=
 load=modules/contrib_demo_child.sh
 EOF
 printf 'contrib_demo_child_loaded() { :; }\n' >"$_project/shell/layers/demo/modules/contrib_demo_child.sh"
@@ -179,7 +174,6 @@ optional=
 shells=bash
 platforms=any
 exports=
-updates=
 load=
 EOF
 _module capability_user '' capability_user_loaded any read-only 'capability_user_loaded() { sp_cap_os; }'
@@ -733,9 +727,9 @@ _reject_registry_row \
 _reject_registry_row \
   'bad_source		read-only			bash	any	bad_source_loaded	modules/first_fail.sh		shell/mod*' \
   'invalid registry source for module bad_source: shell/mod*'
-_reject_registry_row "$(printf 'bad_layer_name\t\tread-only\t\t\tsh\tany\t\tmodules/x.sh\t\tshell/layers/l)/module.d')" \
+_reject_registry_row "$(printf 'bad_layer_name\t\tread-only\t\t\tposix\tany\t\tmodules/x.sh\t\tshell/layers/l)/module.d')" \
   'invalid layer source in registry for module bad_layer_name: shell/layers/l)/module.d'
-_reject_registry_row "$(printf 'reserved_export\t\tread-only\t\t\tsh\tany\tif\tmodules/x.sh\t\tshell/module.d')" \
+_reject_registry_row "$(printf 'reserved_export\t\tread-only\t\t\tposix\tany\tif\tmodules/x.sh\t\tshell/module.d')" \
   'invalid export for registry module reserved_export: if'
 _reject_registry_row \
   'bad_exports		read-only			bash	any	bad_exports$(id)	modules/first_fail.sh		shell/module.d' \

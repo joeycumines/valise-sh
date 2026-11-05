@@ -1,10 +1,9 @@
 name=contrib_shared_paths
-requires=contrib_path
+requires=valise_path
 optional=
-shells=sh bash zsh ksh
+shells=posix bash zsh ksh
 platforms=any
 side_effect=path-env
 exports=contrib_shared_paths_setup
-updates=
 version=1.0.0
 load=modules/shared/contrib_shared_paths.sh

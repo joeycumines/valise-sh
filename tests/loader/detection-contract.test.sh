@@ -84,7 +84,6 @@ shells=$_wm_shells
 platforms=$_wm_platforms
 side_effect=read-only
 exports=${_wm_name}_loaded
-updates=
 load=modules/$_wm_name.sh
 META
   cat >"$_fixture_root/modules/$_wm_name.sh" <<MODULE
@@ -95,11 +94,12 @@ MODULE
 }
 
 write_module sh_module sh any
+write_module posix_module posix any
 write_module bash_module bash any
 write_module zsh_module zsh any
 write_module ksh_module ksh any
-write_module darwin_module sh darwin
-write_module any_platform_module sh any
+write_module darwin_module posix darwin
+write_module any_platform_module posix any
 
 # Runs the loader in a child shell and prints the module trace (body executions).
 DETECTION_STATUS=
@@ -134,6 +134,8 @@ if [ -n "$DASH_BIN" ]; then
   run_detection "$DASH_BIN" sh_module
   assert_eq 'sh-detected shell (dash) loads shells=sh module' 0 "$DETECTION_STATUS"
   assert_eq 'sh-detected shell (dash) executed sh module body' 'sh_module' "$DETECTION_TRACE_VALUE"
+  run_detection "$DASH_BIN" posix_module
+  assert_eq 'sh-detected shell (dash) loads shells=posix module' 0 "$DETECTION_STATUS"
   run_detection "$DASH_BIN" bash_module
   assert_eq 'sh-detected shell (dash) rejects shells=bash module' 1 "$DETECTION_STATUS"
   assert_contains 'sh-detected shell (dash) rejection names unsupported shell' "$DETECTION_OUTPUT" 'unsupported shell'
@@ -150,8 +152,11 @@ fi
 # in non-bash shells; a real bash classifies as bash.
 run_detection /bin/bash bash_module
 assert_eq 'bash classifies itself as bash and loads shells=bash module' 0 "$DETECTION_STATUS"
+run_detection /bin/bash posix_module
+assert_eq 'bash loads shells=posix module (posix means every POSIX shell)' 0 "$DETECTION_STATUS"
 run_detection /bin/bash sh_module
-assert_eq 'bash still loads shells=sh module (sh means any POSIX)' 0 "$DETECTION_STATUS"
+assert_eq 'bash rejects shells=sh module (sh means the generic sh class only)' 1 "$DETECTION_STATUS"
+assert_contains 'bash shells=sh rejection names unsupported shell' "$DETECTION_OUTPUT" 'unsupported shell'
 run_detection /bin/bash zsh_module
 assert_eq 'bash rejects shells=zsh module' 1 "$DETECTION_STATUS"
 
@@ -226,7 +231,7 @@ assert_eq 'unknown-platform any-module body executed' 'any_platform_module' "$(c
 unset _spoof_bin _unknown_out _unknown_status _unknown_any_out _unknown_any_status
 
 # Contract: BusyBox ash is a POSIX-sh-classified interpreter. It must load
-# shells=sh modules and reject shell-specific modules such as shells=bash.
+# shells=posix modules and reject shell-specific modules such as shells=bash.
 # This is deliberately a negative detection case, not only a coreutils smoke
 # test: the loader must not mistake BusyBox ash for Bash.
 if [ -n "$BUSYBOX_BIN" ]; then
@@ -235,6 +240,8 @@ if [ -n "$BUSYBOX_BIN" ]; then
   mkdir -p "$_busybox_bin" "$_busybox_layer_root/module.d" "$_busybox_layer_root/modules" || exit 1
   cp "$_fixture_root/module.d/sh_module.meta" "$_busybox_layer_root/module.d/sh_module.meta" || exit 1
   cp "$_fixture_root/modules/sh_module.sh" "$_busybox_layer_root/modules/sh_module.sh" || exit 1
+  cp "$_fixture_root/module.d/posix_module.meta" "$_busybox_layer_root/module.d/posix_module.meta" || exit 1
+  cp "$_fixture_root/modules/posix_module.sh" "$_busybox_layer_root/modules/posix_module.sh" || exit 1
   _busybox_applet_setup_failed=0
   for _busybox_applet in ash mktemp grep sort uname printf rm chmod mkdir cat sed mv cmp; do
     if ! ln -sf "$BUSYBOX_BIN" "$_busybox_bin/$_busybox_applet" 2>/dev/null ||
@@ -289,11 +296,11 @@ if [ -n "$BUSYBOX_BIN" ]; then
     /bin/bash -c '
       . "$METADATA_SH"
       . "$LOADER_SH"
-      sp_loader_load_modules "$FIXTURE_ROOT" sh_module strict ordinary
+      sp_loader_load_modules "$FIXTURE_ROOT" posix_module strict ordinary
     ' 2>&1)
   _busybox_status=$?
   assert_eq 'busybox coreutils satisfy strict loader load' 0 "$_busybox_status"
-  assert_eq 'busybox lane executed module body' 'sh_module' "$(cat "$_tmp/busybox-trace" 2>/dev/null)"
+  assert_eq 'busybox lane executed module body' 'posix_module' "$(cat "$_tmp/busybox-trace" 2>/dev/null)"
   unset _busybox_bin _busybox_layer_root _busybox_out _busybox_status _busybox_applet_setup_failed
   fi
 else

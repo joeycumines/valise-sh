@@ -5,5 +5,4 @@ shells=bash
 platforms=any
 side_effect=read-only
 exports=e2e_bash_completions_loaded
-updates=
 load=modules/e2e/completions_bash.sh

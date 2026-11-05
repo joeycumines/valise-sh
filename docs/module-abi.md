@@ -49,7 +49,7 @@ an export on a meta module is rejected.
 name=profile_main
 version=1.0.0
 side_effect=read-only
-requires=contrib_path contrib_editor
+requires=valise_path valise_editor
 optional=
 shells=bash zsh ksh
 platforms=any
@@ -344,8 +344,8 @@ Read-only/status paths may degrade only by quietly skipping unsupported details
 or by returning a clear nonzero status with a diagnostic from the caller.
 
 Platform modules under `modules/platform/` are thin wrappers around the library.
-They expose stable module dependencies (`platform_posix`, `platform_macos`,
-`platform_linux`, and `platform_bsd`) while keeping compatibility logic in one
+They expose stable module dependencies (`valise_platform_posix`, `valise_platform_macos`,
+`valise_platform_linux`, and `valise_platform_bsd`) while keeping compatibility logic in one
 library.
 
 ## Load target and loader mode

@@ -1,9 +1,8 @@
 name=tab_readonly_hijack
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=tab_readonly_hijack_loaded
-updates=
 load=modules/tab_readonly_hijack.sh

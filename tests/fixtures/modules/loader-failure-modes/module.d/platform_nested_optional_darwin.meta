@@ -1,9 +1,8 @@
 name=platform_nested_optional_darwin
 requires=
 optional=platform_nested_mid_darwin
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=platform_nested_optional_darwin_loaded
-updates=
 load=modules/platform_nested_optional_darwin.sh

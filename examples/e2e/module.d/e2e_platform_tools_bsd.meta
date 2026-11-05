@@ -1,9 +1,8 @@
 name=e2e_platform_tools_bsd
-requires=platform_bsd
+requires=valise_platform_bsd
 optional=
-shells=sh bash zsh ksh
+shells=posix bash zsh ksh
 platforms=bsd freebsd openbsd netbsd
 side_effect=read-only
 exports=e2e_bsd_tools_ready
-updates=
 load=modules/e2e/platform_tools_bsd.sh

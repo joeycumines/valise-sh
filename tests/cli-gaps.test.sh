@@ -375,10 +375,10 @@ printf '%s\n' \
   'side_effect=read-only' \
   'requires=' \
   'optional=' \
-  'shells=sh bash zsh ksh' \
+  'shells=posix bash zsh ksh' \
   'platforms=any' \
   'exports=root_mod_ready' \
-  'updates=' \
+  \
   'load=modules/root_mod.sh' \
   >"$_project/shell/module.d/root_mod.meta"
 printf 'root_mod_ready() { :; }\n' >"$_project/shell/modules/root_mod.sh"
@@ -388,10 +388,10 @@ printf '%s\n' \
   'side_effect=read-only' \
   'requires=root_mod' \
   'optional=' \
-  'shells=sh bash zsh ksh' \
+  'shells=posix bash zsh ksh' \
   'platforms=any' \
   'exports=dep_mod_ready' \
-  'updates=' \
+  \
   'load=modules/dep_mod.sh' \
   >"$_project/shell/module.d/dep_mod.meta"
 printf 'dep_mod_ready() { :; }\n' >"$_project/shell/modules/dep_mod.sh"
@@ -451,7 +451,7 @@ else
 fi
 
 # explain-bundles must report what compile builds: optional edges join the
-# closure, a qualified exclusion removes its layer module, and shells=sh does
+# closure, a qualified exclusion removes its layer module, and shells=posix does
 # not make a module available under Fish.
 _closure_project="$_test_root/closure-project"
 mkdir -p "$_closure_project/shell/module.d" "$_closure_project/shell/modules" \
@@ -460,17 +460,17 @@ mkdir -p "$_closure_project/shell/module.d" "$_closure_project/shell/modules" \
 printf '%s\n' \
   'name=base_mod' 'version=' 'side_effect=read-only' 'requires=' \
   'optional=opt_mod contrib_demo' \
-  'shells=sh' 'platforms=any' 'exports=base_mod_ready' 'updates=' \
+  'shells=posix' 'platforms=any' 'exports=base_mod_ready' \
   'load=modules/base_mod.sh' >"$_closure_project/shell/module.d/base_mod.meta"
 printf 'base_mod_ready() { :; }\n' >"$_closure_project/shell/modules/base_mod.sh"
 printf '%s\n' \
   'name=opt_mod' 'version=' 'side_effect=read-only' 'requires=' \
-  'optional=' 'shells=sh' 'platforms=any' 'exports=opt_mod_ready' 'updates=' \
+  'optional=' 'shells=posix' 'platforms=any' 'exports=opt_mod_ready' \
   'load=modules/opt_mod.sh' >"$_closure_project/shell/module.d/opt_mod.meta"
 printf 'opt_mod_ready() { :; }\n' >"$_closure_project/shell/modules/opt_mod.sh"
 printf '%s\n' \
   'name=contrib_demo' 'version=1.0.0' 'side_effect=read-only' 'requires=' \
-  'optional=' 'shells=sh' 'platforms=any' 'exports=contrib_demo_ready' 'updates=' \
+  'optional=' 'shells=posix' 'platforms=any' 'exports=contrib_demo_ready' \
   'load=modules/contrib_demo.sh' >"$_closure_project/shell/layers/demo/module.d/contrib_demo.meta"
 printf 'contrib_demo_ready() { :; }\n' >"$_closure_project/shell/layers/demo/modules/contrib_demo.sh"
 printf '# bundle\tshell\troots\ndefault\tbash\tbase_mod\ndefault\tfish\tbase_mod\n' \
@@ -503,10 +503,10 @@ printf '%s\n' \
   'side_effect=read-only' \
   'requires=' \
   'optional=' \
-  'shells=sh bash zsh ksh' \
+  'shells=posix bash zsh ksh' \
   'platforms=any' \
   'exports=contrib_vendor_tool_ready' \
-  'updates=' \
+  \
   'load=modules/shared/contrib_vendor_tool.sh' \
   >"$_layer/module.d/contrib_vendor_tool.meta"
 printf 'contrib_vendor_tool_ready() { :; }\n' \
@@ -531,10 +531,10 @@ printf '%s\n' \
   'side_effect=read-only' \
   'requires=' \
   'optional=' \
-  'shells=sh' \
+  'shells=posix' \
   'platforms=any' \
   'exports=' \
-  'updates=' \
+  \
   'load=modules/shared/no_prefix_module.sh' \
   >"$_project/shell/layers/unprefixed/module.d/no_prefix_module.meta"
 printf '# body\n' >"$_project/shell/layers/unprefixed/modules/shared/no_prefix_module.sh"
@@ -556,10 +556,10 @@ printf '%s\n' \
   'side_effect=read-only' \
   'requires=' \
   'optional=' \
-  'shells=sh' \
+  'shells=posix' \
   'platforms=any' \
   'exports=' \
-  'updates=' \
+  \
   'load=modules/shared/contrib_unversioned.sh' \
   >"$_project/shell/layers/unversioned/module.d/contrib_unversioned.meta"
 printf '# body\n' >"$_project/shell/layers/unversioned/modules/shared/contrib_unversioned.sh"
@@ -581,10 +581,10 @@ printf '%s\n' \
   'side_effect=read-only' \
   'requires=' \
   'optional=' \
-  'shells=sh' \
+  'shells=posix' \
   'platforms=any' \
   'exports=' \
-  'updates=' \
+  \
   'load=modules/shared/contrib_broken.sh' \
   >"$_project/shell/layers/broken/module.d/contrib_broken.meta"
 if (
@@ -605,10 +605,10 @@ printf '%s\n' \
   'side_effect=read-only' \
   'requires=not_in_this_layer' \
   'optional=' \
-  'shells=sh' \
+  'shells=posix' \
   'platforms=any' \
   'exports=' \
-  'updates=' \
+  \
   'load=modules/shared/contrib_outside.sh' \
   >"$_project/shell/layers/outside/module.d/contrib_outside.meta"
 printf '# body\n' >"$_project/shell/layers/outside/modules/shared/contrib_outside.sh"
@@ -763,15 +763,15 @@ mkdir -p "$_test_root/order-project/shell/module.d" \
   "$_test_root/order-project/shell/layers/ordered/module.d" \
   "$_test_root/order-project/shell/layers/ordered/modules/shared"
 printf '%s\n' \
-  'name=platform_posix' 'version=1.0.0' 'side_effect=read-only' 'requires=' \
-  'optional=' 'shells=sh' 'platforms=any' 'exports=' 'updates=' \
-  'load=modules/platform_posix.sh' \
-  >"$_test_root/order-project/shell/module.d/platform_posix.meta"
-printf '# body\n' >"$_test_root/order-project/shell/modules/platform_posix.sh"
+  'name=valise_platform_posix' 'version=1.0.0' 'side_effect=read-only' 'requires=' \
+  'optional=' 'shells=posix' 'platforms=any' 'exports=' \
+  'load=modules/valise_platform_posix.sh' \
+  >"$_test_root/order-project/shell/module.d/valise_platform_posix.meta"
+printf '# body\n' >"$_test_root/order-project/shell/modules/valise_platform_posix.sh"
 for _ord_name in contrib_aaa contrib_zzz; do
   printf '%s\n' \
     "name=$_ord_name" 'version=1.0.0' 'side_effect=read-only' 'requires=' \
-    'optional=' 'shells=sh' 'platforms=any' 'exports=' 'updates=' \
+    'optional=' 'shells=posix' 'platforms=any' 'exports=' \
     "load=modules/shared/$_ord_name.sh" \
     >"$_test_root/order-project/shell/layers/ordered/module.d/$_ord_name.meta"
   printf '# body\n' \
@@ -780,8 +780,8 @@ done
 # contrib_aaa depends on contrib_zzz, which sorts last.
 printf '%s\n' \
   'name=contrib_aaa' 'version=1.0.0' 'side_effect=read-only' \
-  'requires=contrib_zzz' 'optional=' 'shells=sh' 'platforms=any' 'exports=' \
-  'updates=' 'load=modules/shared/contrib_aaa.sh' \
+  'requires=contrib_zzz' 'optional=' 'shells=posix' 'platforms=any' 'exports=' \
+  'load=modules/shared/contrib_aaa.sh' \
   >"$_test_root/order-project/shell/layers/ordered/module.d/contrib_aaa.meta"
 if (
   cd "$_test_root/order-project" && "$_valise" layer-lint ordered
@@ -892,7 +892,7 @@ mkdir -p "$_leak_home" "$_leak_project/shell/module.d" "$_leak_project/shell/mod
   "$_leak_project/shell/release" "$_leak_tmp"
 printf '%s\n' \
   'name=leak_module' 'version=1.0.0' 'side_effect=read-only' 'requires=' \
-  'optional=' 'shells=sh' 'platforms=any' 'exports=' 'updates=' \
+  'optional=' 'shells=posix' 'platforms=any' 'exports=' \
   'load=modules/leak_module.sh' \
   >"$_leak_project/shell/module.d/leak_module.meta"
 printf '# body\n' >"$_leak_project/shell/modules/leak_module.sh"

@@ -52,10 +52,10 @@ _vendor_copy entrypoints/fish/profile.fish
 _vendor_copy entrypoints/profile.sh
 
 # Platform module metadata
-_vendor_copy module.d/platform_posix.meta
-_vendor_copy module.d/platform_macos.meta
-_vendor_copy module.d/platform_linux.meta
-_vendor_copy module.d/platform_bsd.meta
+_vendor_copy module.d/valise_platform_posix.meta
+_vendor_copy module.d/valise_platform_macos.meta
+_vendor_copy module.d/valise_platform_linux.meta
+_vendor_copy module.d/valise_platform_bsd.meta
 
 # Platform module bodies
 _vendor_copy modules/platform/posix.sh
@@ -65,12 +65,13 @@ _vendor_copy modules/platform/bsd/capabilities.sh
 
 # Shareable engine catalog (ships in every release built from this engine)
 _engine_contrib_count=0
-for _contrib_src in "$_repo_root"/module.d/contrib_*.meta; do
+for _contrib_src in "$_repo_root"/module.d/valise_*.meta; do
   [ -f "$_contrib_src" ] || continue
+  case "$_contrib_src" in */valise_platform_*) continue ;; esac
   _vendor_copy "module.d/$(basename "$_contrib_src")"
   _engine_contrib_count=$((_engine_contrib_count + 1))
 done
-for _contrib_src in "$_repo_root"/modules/system/contrib_*.sh; do
+for _contrib_src in "$_repo_root"/modules/system/valise_*.sh; do
   [ -f "$_contrib_src" ] || continue
   _vendor_copy "modules/system/$(basename "$_contrib_src")"
   _engine_contrib_count=$((_engine_contrib_count + 1))

@@ -1,9 +1,8 @@
-name=platform_macos
-requires=platform_posix
+name=valise_platform_macos
+requires=valise_platform_posix
 optional=
-shells=sh bash zsh ksh
+shells=posix
 platforms=darwin
 side_effect=read-only
 exports=sp_platform_macos_available sp_platform_macos_homebrew_prefix sp_platform_macos_homebrew_gnubin sp_platform_macos_cpu_count
-updates=
 load=modules/platform/macos/capabilities.sh

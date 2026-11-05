@@ -132,7 +132,7 @@ A build variant is an exclusion list. The file is
 ```
 variant_name	description	excluded_modules
 default	All project modules	
-workstation-lean	No editor defaults	contrib_editor
+workstation-lean	No editor defaults	valise_editor
 ```
 
 - Column 1 is the variant name.

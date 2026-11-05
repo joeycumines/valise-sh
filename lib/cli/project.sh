@@ -171,7 +171,9 @@ cmd_compile() {
           if (shells == "any") return 1
           count = split(shells, values, " ")
           for (i = 1; i <= count; i++) {
-            if (values[i] == wanted || values[i] == "sh") return 1
+            if (values[i] == wanted) return 1
+            # posix names every POSIX shell class; never Fish.
+            if (values[i] == "posix" && wanted != "fish") return 1
           }
           return 0
         }
@@ -788,7 +790,6 @@ cmd_new() {
     'shells=bash zsh ksh' \
     'platforms=any' \
     'exports=profile_main_loaded' \
-    'updates=' \
     'load=modules/profile_main.sh' \
     >"$_new_target/shell/module.d/profile_main.meta"
   printf '%s\n' \
@@ -897,10 +898,9 @@ cmd_module() {
       'side_effect=read-only' \
       'requires=' \
       'optional=' \
-      'shells=sh' \
+      'shells=posix' \
       'platforms=any' \
       "exports=$_module_export_words" \
-      'updates=' \
       "load=modules/$_module_name.sh" \
       >"$_module_meta"
     {
@@ -1439,8 +1439,8 @@ cmd_explain_bundles() {
       count = split(shells, values, " ")
       for (i = 1; i <= count; i++) {
         if (values[i] == wanted) return 1
-        # shells=sh means every POSIX shell, not Fish.
-        if (wanted != "fish" && values[i] == "sh") return 1
+        # shells=posix means every POSIX shell class, not Fish.
+        if (wanted != "fish" && values[i] == "posix") return 1
       }
       return 0
     }
