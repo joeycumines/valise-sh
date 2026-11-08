@@ -3,16 +3,6 @@
 Notable user-facing changes are recorded here. Versions before 1.0 may include
 module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 
-## [Unreleased]
-
-### Fixed
-
-- `sp_cap_secure_local_bin_check` accepts `allow-owned-symlinks`. The default
-  still rejects every symlink in `~/.local/bin`; the option accepts a symlink
-  whose link entry is owned by the current user, which is how pipx and uv
-  publish commands, while still rejecting unowned entries and group- or
-  other-writable regular files.
-
 ## [0.3.0] - 2026-11-06
 
 0.3.0 changes the project layout, the metadata, and the release format. A
@@ -137,6 +127,11 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 
 ### Fixed
 
+- `sp_cap_secure_local_bin_check` accepts `allow-owned-symlinks`. The default
+  still rejects every symlink in `~/.local/bin`; the option accepts a symlink
+  whose link entry is owned by the current user, which is how pipx and uv
+  publish commands, while still rejecting unowned entries and group- or
+  other-writable regular files.
 - A repeated metadata field was silently overwritten by the last value; the
   POSIX and Fish readers now reject it.
 - The Fish loader rejected caller aliases, because `functions --copy` drops
@@ -311,7 +306,6 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 - The editor-defaults test is independent of host-installed editors by
   supplying a temporary test `vi` executable.
 
-[Unreleased]: https://github.com/joeycumines/valise-sh/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/joeycumines/valise-sh/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/joeycumines/valise-sh/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/joeycumines/valise-sh/releases/tag/v0.1.0
