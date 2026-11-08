@@ -78,7 +78,13 @@ your functions can call them later:
 - `sp_cap_command_exists <name>`, `sp_cap_command_path <name>`
 - `sp_cap_canonical_path <path>`, `sp_cap_path_under <base> <target>`
 - `sp_cap_file_mtime <path>`
+- `sp_cap_secure_local_bin_check <home> [reject|allow-owned-symlinks]`
 - `sp_cap_mktemp_dir [prefix] [parent]`, `sp_cap_mktemp_file <parent> <prefix>`
+
+`sp_cap_secure_local_bin_check` defaults to `reject`, which refuses every
+symlink in `~/.local/bin`. `allow-owned-symlinks` accepts a symlink whose
+link entry is owned by the current user (the pipx and uv shape) while still
+rejecting unowned entries and group- or other-writable regular files.
 
 The engine also ships modules a project can require: `valise_path`
 (`valise_path_prepend` and `valise_path_append`), `valise_editor`,

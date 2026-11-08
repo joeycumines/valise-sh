@@ -722,6 +722,14 @@ chmod o-w "$_compromised"
 ln -s "$_outside" "$_home/.local/bin/symlinked-tool"
 sp_cap_secure_local_bin_check "$_home" >/dev/null 2>&1
 assert_status 'sp_cap_secure_local_bin_check rejects symlink in local bin tree' 1 "$?"
+sp_cap_secure_local_bin_check "$_home" allow-owned-symlinks >/dev/null 2>&1
+assert_status 'sp_cap_secure_local_bin_check accepts a user-owned symlink with allow-owned-symlinks' 0 "$?"
+chmod o+w "$_compromised"
+sp_cap_secure_local_bin_check "$_home" allow-owned-symlinks >/dev/null 2>&1
+assert_status 'sp_cap_secure_local_bin_check still rejects a world-writable file with allow-owned-symlinks' 1 "$?"
+chmod o-w "$_compromised"
+sp_cap_secure_local_bin_check "$_home" unknown-policy >/dev/null 2>&1
+assert_status 'sp_cap_secure_local_bin_check rejects an unknown symlink policy' 1 "$?"
 
 printf '\n=== Background process helper ===\n'
 _background_marker="$_tmp/background-marker"

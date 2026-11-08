@@ -5,6 +5,14 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- `sp_cap_secure_local_bin_check` accepts `allow-owned-symlinks`. The default
+  still rejects every symlink in `~/.local/bin`; the option accepts a symlink
+  whose link entry is owned by the current user, which is how pipx and uv
+  publish commands, while still rejecting unowned entries and group- or
+  other-writable regular files.
+
 ## [0.3.0] - 2026-11-06
 
 0.3.0 changes the project layout, the metadata, and the release format. A

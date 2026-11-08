@@ -666,6 +666,12 @@ sp_cap_write_compromise_paths() (
       tree:0)
         command -p find "$_spc_path" \( -type l -o ! -user "$_spc_uid" -o \( ! -type l -a \( -perm -020 -o -perm -002 \) \) \) -print
         ;;
+      tree-owned:1)
+        command -p find "$_spc_path" \( ! -user "$_spc_uid" -o \( ! -type l -a \( \( -perm -020 ! -group "$_spc_group" \) -o -perm -002 \) \) \) -print
+        ;;
+      tree-owned:0)
+        command -p find "$_spc_path" \( ! -user "$_spc_uid" -o \( ! -type l -a \( -perm -020 -o -perm -002 \) \) \) -print
+        ;;
       *) exit 1 ;;
       esac
     ' sh "$_spc_path" "$_spc_scope"
@@ -689,71 +695,92 @@ sp_cap_write_compromise_paths() (
     tree:0)
       command -p find "$_spc_path" \( -type l -o ! -user "$_spc_uid" -o \( ! -type l -a \( -perm -020 -o -perm -002 \) \) \) -print
       ;;
+    tree-owned:1)
+      command -p find "$_spc_path" \( ! -user "$_spc_uid" -o \( ! -type l -a \( \( -perm -020 ! -group "$_spc_group" \) -o -perm -002 \) \) \) -print
+      ;;
+    tree-owned:0)
+      command -p find "$_spc_path" \( ! -user "$_spc_uid" -o \( ! -type l -a \( -perm -020 -o -perm -002 \) \) \) -print
+      ;;
     *) exit 1 ;;
     esac
   fi
 )
 
+# sp_cap_secure_local_bin_check <home> [reject|allow-owned-symlinks]
+# The default rejects every symlink in ~/.local/bin. allow-owned-symlinks
+# accepts a symlink whose link entry is owned by the current user, which is
+# the shape pipx and uv install; unowned entries and group/other-writable
+# regular files are still rejected.
 sp_cap_secure_local_bin_check() {
-  [ "$#" -eq 1 ] && [ -n "$1" ] || return 1
+  [ "$#" -ge 1 ] && [ "$#" -le 2 ] && [ -n "$1" ] || return 1
   _spc_home=$1
+  _spc_symlink_policy=${2:-reject}
+  case "$_spc_symlink_policy" in
+  reject) _spc_bin_scope=tree ;;
+  allow-owned-symlinks) _spc_bin_scope=tree-owned ;;
+  *)
+    sp_cap_error "unknown symlink policy: $_spc_symlink_policy"
+    unset _spc_home _spc_symlink_policy
+    return 1
+    ;;
+  esac
   case "$_spc_home" in
   /*) ;;
   *)
     sp_cap_error 'HOME is not an absolute path'
-    unset _spc_home
+    unset _spc_home _spc_symlink_policy _spc_bin_scope
     return 1
     ;;
   esac
   [ -d "$_spc_home" ] && [ ! -L "$_spc_home" ] || {
     sp_cap_error "HOME is not a real directory: $_spc_home"
-    unset _spc_home
+    unset _spc_home _spc_symlink_policy _spc_bin_scope
     return 1
   }
   _spc_local_dir=$_spc_home/.local
   _spc_local_bin=$_spc_local_dir/bin
   _spc_home_bad=$(sp_cap_write_compromise_paths "$_spc_home" self) || {
     sp_cap_error "failed to inspect HOME permissions: $_spc_home"
-    unset _spc_home _spc_local_dir _spc_local_bin _spc_home_bad
+    unset _spc_home _spc_symlink_policy _spc_bin_scope _spc_local_dir _spc_local_bin _spc_home_bad
     return 1
   }
   if [ -n "$_spc_home_bad" ]; then
     sp_cap_error "HOME violates ownership, symlink, or external-write policy: $_spc_home"
-    unset _spc_home _spc_local_dir _spc_local_bin _spc_home_bad
+    unset _spc_home _spc_symlink_policy _spc_bin_scope _spc_local_dir _spc_local_bin _spc_home_bad
     return 1
   fi
   [ -d "$_spc_local_dir" ] && [ ! -L "$_spc_local_dir" ] || {
     sp_cap_error "local directory is not a real directory: $_spc_local_dir"
-    unset _spc_home _spc_local_dir _spc_local_bin _spc_home_bad
+    unset _spc_home _spc_symlink_policy _spc_bin_scope _spc_local_dir _spc_local_bin _spc_home_bad
     return 1
   }
   [ -d "$_spc_local_bin" ] && [ ! -L "$_spc_local_bin" ] || {
     sp_cap_error "local bin directory is not a real directory: $_spc_local_bin"
-    unset _spc_home _spc_local_dir _spc_local_bin _spc_home_bad
+    unset _spc_home _spc_symlink_policy _spc_bin_scope _spc_local_dir _spc_local_bin _spc_home_bad
     return 1
   }
   _spc_local_bad=$(sp_cap_write_compromise_paths "$_spc_local_dir" self) || {
     sp_cap_error "failed to inspect local directory permissions: $_spc_local_dir"
-    unset _spc_home _spc_local_dir _spc_local_bin _spc_home_bad _spc_local_bad
+    unset _spc_home _spc_symlink_policy _spc_bin_scope _spc_local_dir _spc_local_bin _spc_home_bad _spc_local_bad
     return 1
   }
   if [ -n "$_spc_local_bad" ]; then
     sp_cap_error "local directory violates ownership, symlink, or external-write policy: $_spc_local_dir"
-    unset _spc_home _spc_local_dir _spc_local_bin _spc_home_bad _spc_local_bad
+    unset _spc_home _spc_symlink_policy _spc_bin_scope _spc_local_dir _spc_local_bin _spc_home_bad _spc_local_bad
     return 1
   fi
-  _spc_bin_bad=$(sp_cap_write_compromise_paths "$_spc_local_bin" tree) || {
+  _spc_bin_bad=$(sp_cap_write_compromise_paths "$_spc_local_bin" "$_spc_bin_scope") || {
     sp_cap_error "failed to inspect local bin execution chain: $_spc_local_bin"
-    unset _spc_home _spc_local_dir _spc_local_bin _spc_home_bad _spc_local_bad _spc_bin_bad
+    unset _spc_home _spc_symlink_policy _spc_bin_scope _spc_local_dir _spc_local_bin _spc_home_bad _spc_local_bad _spc_bin_bad
     return 1
   }
   if [ -n "$_spc_bin_bad" ]; then
     sp_cap_error "Compromised execution chain. Writable/unowned files or symlinks found in '$_spc_local_bin'."
     sp_cap_print_line "$_spc_bin_bad" >&2
-    unset _spc_home _spc_local_dir _spc_local_bin _spc_home_bad _spc_local_bad _spc_bin_bad
+    unset _spc_home _spc_symlink_policy _spc_bin_scope _spc_local_dir _spc_local_bin _spc_home_bad _spc_local_bad _spc_bin_bad
     return 1
   fi
-  unset _spc_home _spc_local_dir _spc_local_bin _spc_home_bad _spc_local_bad _spc_bin_bad
+  unset _spc_home _spc_symlink_policy _spc_bin_scope _spc_local_dir _spc_local_bin _spc_home_bad _spc_local_bad _spc_bin_bad
   return 0
 }
 
