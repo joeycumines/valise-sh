@@ -779,6 +779,12 @@ print_fish_integration() {
     "      set -a _entrypoint_snapshot_definitions (builtin functions \"\$_entrypoint_function\" | string collect)" \
     "      set -a _entrypoint_snapshot_sources \"\$_entrypoint_source\"" \
     "    end" \
+    "    # Introspecting a name materializes Fish 3's autoloadable-but-undefined" \
+    "    # functions into functions --all --names, so the pre-loop snapshot is" \
+    "    # stale by the time the body runs. Re-capture the diff baseline after the" \
+    "    # snapshot loop and before sourcing; otherwise Fish's own system functions" \
+    "    # would be published as entrypoint-owned with an unauthenticatable source." \
+    "    set -l _entrypoint_before (builtin functions --all --names)" \
     "    set -l _entrypoint_source_helper __valise_fish_entrypoint_source_(builtin random)" \
     "    function \$_entrypoint_source_helper" \
     "      builtin source \"\$argv[1]\"" \
@@ -912,7 +918,13 @@ print_fish_integration() {
     "    end" \
     "    # Publish only functions created by this authenticated entrypoint. The" \
     "    # source string is read back from Fish after sourcing; callers cannot" \
-    "    # claim ownership by forging names or a parallel source ledger." \
+    "    # claim ownership by forging names or a parallel source ledger. Fish's" \
+    "    # own system functions are not entrypoint state: a release that runs" \
+    "    # completions materializes them, but their source is not an authenticated" \
+    "    # release path, so publishing them would fail the next activation's ledger" \
+    "    # check and its cleanup would erase real Fish functions. They stay in" \
+    "    # _entrypoint_created so failure cleanup still removes the residue." \
+    "    set -l _entrypoint_owned_exports" \
     "    set -l _entrypoint_owned_sources" \
     "    for _entrypoint_function in \$_entrypoint_created" \
     "      if not builtin functions -q \"\$_entrypoint_function\"" \
@@ -924,9 +936,14 @@ print_fish_integration() {
     "        builtin printf '%s\\n' 'valise Fish integration: created entrypoint function has no authenticated source' >&2" \
     "        builtin exit 125" \
     "      end" \
+    "      switch \"\$_entrypoint_source\"" \
+    "        case '/usr/share/fish/*' '/usr/local/share/fish/*' '/opt/local/share/fish/*' '/opt/homebrew/share/fish/*' 'embedded:completions/*' 'embedded:functions/*' 'autoloaded:*'" \
+    "          continue" \
+    "      end" \
+    "      set -a _entrypoint_owned_exports \"\$_entrypoint_function\"" \
     "      set -a _entrypoint_owned_sources \"\$_entrypoint_source\"" \
     "    end" \
-    "    builtin set -g _sp_fish_entrypoint_owned_exports \$_entrypoint_created; or builtin exit 125" \
+    "    builtin set -g _sp_fish_entrypoint_owned_exports \$_entrypoint_owned_exports; or builtin exit 125" \
     "    builtin set -g _sp_fish_entrypoint_owned_sources \$_entrypoint_owned_sources; or builtin exit 125" \
     "    return 0" \
     "  end" \

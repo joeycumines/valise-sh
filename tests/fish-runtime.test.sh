@@ -115,6 +115,12 @@ _meta "$_fixture/module.d/partial_helper.meta" partial_helper fish any read-only
 _body "$_fixture/modules/fish/partial_helper.fish" 'function partial_helper_loaded; end; function undeclared_partial_helper; end; return 13'
 _meta "$_fixture/module.d/helper_success.meta" helper_success fish any read-only helper_success_loaded modules/fish/helper_success.fish
 _body "$_fixture/modules/fish/helper_success.fish" 'function helper_success_loaded; end; function helper_success_private; end'
+# A body that materializes Fish's own system functions (by sourcing a
+# completion file, or by running completions on Fish 4, which embeds them)
+# must not record them as module state. The body probes several portable
+# triggers and defines one marker function of its own.
+_meta "$_fixture/module.d/fish_system_sourced.meta" fish_system_sourced fish any read-only fish_system_sourced_loaded modules/fish/fish_system_sourced.fish
+_body "$_fixture/modules/fish/fish_system_sourced.fish" 'builtin source /usr/share/fish/completions/sudo.fish 2>/dev/null; builtin source /usr/local/share/fish/completions/sudo.fish 2>/dev/null; builtin source /opt/homebrew/share/fish/completions/sudo.fish 2>/dev/null; complete -C "sudo " >/dev/null 2>&1; complete -C "git " >/dev/null 2>&1; complete -C "tar " >/dev/null 2>&1; function fish_system_sourced_loaded; end'
 
 # A body must not replace a caller-owned function that it did not declare.
 # The loader must reject the activation and restore the original definition.
@@ -977,7 +983,7 @@ fi
 _entrypoint_switch_a="$_test_root/entrypoint-switch-a"
 _entrypoint_switch_b="$_test_root/entrypoint-switch-b"
 mkdir -p "$_entrypoint_switch_a/runtime/fish" "$_entrypoint_switch_b/runtime/fish"
-printf '%s\n' 'function entrypoint_release_a_only; echo release-a; end; set -gx VALISE_FISH_READY 1; return 0' >"$_entrypoint_switch_a/runtime/fish/profile.fish"
+printf '%s\n' 'function entrypoint_release_a_only; echo release-a; end; complete -C "sudo " >/dev/null 2>&1; complete -C "git " >/dev/null 2>&1; complete -C "tar " >/dev/null 2>&1; builtin source /usr/share/fish/completions/sudo.fish 2>/dev/null; set -gx VALISE_FISH_READY 1; return 0' >"$_entrypoint_switch_a/runtime/fish/profile.fish"
 printf '%s\n' 'function entrypoint_release_b_only; echo release-b; end; set -gx VALISE_FISH_READY 1; return 0' >"$_entrypoint_switch_b/runtime/fish/profile.fish"
 _entrypoint_switch_home="$_test_root/entrypoint-switch-home"
 mkdir -p "$_entrypoint_switch_home/.config/valise"
@@ -998,6 +1004,14 @@ or exit 1
 functions -q entrypoint_release_a_only; or exit 1
 builtin set -q _sp_fish_entrypoint_owned_exports; or exit 1
 builtin contains -- entrypoint_release_a_only \$_sp_fish_entrypoint_owned_exports; or exit 1
+# Fish 3 lists autoloadable system functions in functions --all --names, so an
+# introspection-grown baseline would publish them as entrypoint-owned with an
+# unauthenticatable source. Every ledger entry must resolve inside this release.
+set -l _entrypoint_switch_root (builtin path resolve -- '$_entrypoint_switch_a')
+for _entrypoint_switch_source in \$_sp_fish_entrypoint_owned_sources
+  set -l _entrypoint_switch_resolved (builtin path resolve -- \$_entrypoint_switch_source 2>/dev/null)
+  builtin string match -q -- "\$_entrypoint_switch_root/*" "\$_entrypoint_switch_resolved"; or exit 1
+end
 test (caller_owned_entrypoint_switch) = caller-entrypoint-switch; or exit 1
 command rm "$_entrypoint_switch_home/.config/valise/active"
 command ln -s "$_entrypoint_switch_b" "$_entrypoint_switch_home/.config/valise/active"
@@ -1006,6 +1020,11 @@ or exit 1
 functions -q entrypoint_release_a_only; and exit 1
 functions -q entrypoint_release_b_only; or exit 1
 builtin contains -- entrypoint_release_b_only \$_sp_fish_entrypoint_owned_exports; or exit 1
+set -l _entrypoint_switch_root_b (builtin path resolve -- '$_entrypoint_switch_b')
+for _entrypoint_switch_source_b in \$_sp_fish_entrypoint_owned_sources
+  set -l _entrypoint_switch_resolved_b (builtin path resolve -- \$_entrypoint_switch_source_b 2>/dev/null)
+  builtin string match -q -- "\$_entrypoint_switch_root_b/*" "\$_entrypoint_switch_resolved_b"; or exit 1
+end
 test (caller_owned_entrypoint_switch) = caller-entrypoint-switch; or exit 1
 exit 0
 EOF
@@ -1413,7 +1432,10 @@ cat >"$_metadata_cd_clean_program" <<EOF
 builtin source '$_test_root/valise-init-fish-metadata-cd-clean.fish'
 or exit 1
 functions -q cd; or exit 1
-builtin test (builtin functions --details cd) = embedded:functions/cd.fish; or exit 1
+# Fish 4 embeds cd; Fish 3 loads it from the installation function path. Both
+# are the trusted definition the loader accepts, so assert that accepted set
+# rather than one version's spelling.
+builtin contains -- (builtin functions --details cd) embedded:functions/cd.fish /usr/share/fish/functions/cd.fish /usr/local/share/fish/functions/cd.fish /opt/local/share/fish/functions/cd.fish /opt/homebrew/share/fish/functions/cd.fish; or exit 1
 exit 0
 EOF
 if ! /usr/bin/env -i TERM=xterm HOME="$_metadata_cd_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_metadata_cd_clean_program" >"$_test_root/metadata-cd-clean.stdout" 2>"$_test_root/metadata-cd-clean.stderr"; then
@@ -1836,6 +1858,19 @@ functions -q undeclared_partial_helper; and exit 1
 bootstrap strict helper_success
 or exit 1
 functions -q helper_success_private; or exit 1
+# Fish system functions materialized by a body (for example by sourcing a
+# completion file) are not module state and must never enter the ledger.
+bootstrap strict fish_system_sourced
+or exit 1
+for _system_owned_source in \$_sp_fish_loader_owned_sources
+    builtin string match -q '/usr/share/fish/*' -- "\$_system_owned_source"; and exit 1
+    builtin string match -q '/usr/local/share/fish/*' -- "\$_system_owned_source"; and exit 1
+    builtin string match -q '/opt/local/share/fish/*' -- "\$_system_owned_source"; and exit 1
+    builtin string match -q '/opt/homebrew/share/fish/*' -- "\$_system_owned_source"; and exit 1
+    builtin string match -q 'embedded:completions/*' -- "\$_system_owned_source"; and exit 1
+    builtin string match -q 'embedded:functions/*' -- "\$_system_owned_source"; and exit 1
+    builtin string match -q 'autoloaded:*' -- "\$_system_owned_source"; and exit 1
+end
 bootstrap strict partial_b
 and exit 1
 if builtin set -q _sp_fish_loader_owned_exports

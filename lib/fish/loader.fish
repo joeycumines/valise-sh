@@ -1588,6 +1588,21 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
             set -a reserved_function_before (builtin functions --details "$reserved_name")
         end
 
+        # Introspecting a name materializes Fish 3's autoloadable-but-undefined
+        # functions into `functions --all --names`, so the pre-loop snapshot is
+        # stale by the time the body runs. Re-capture the diff baseline after the
+        # snapshot loop and before sourcing; otherwise Fish's own system functions
+        # would be attributed to the body and published in the ownership ledger
+        # with an unauthenticatable `/usr/share/fish` source. The snapshot copies
+        # above are already defined, but are re-added defensively so a baseline
+        # that failed to enumerate them can never classify them as body output.
+        set -l function_names_before (builtin functions --all --names)
+        for caller_function_snapshot in $caller_function_snapshot_copies
+            if not builtin contains -- "$caller_function_snapshot" $function_names_before
+                set -a function_names_before "$caller_function_snapshot"
+            end
+        end
+
         # Snapshot private loader globals before sourcing. Module bodies are
         # allowed to publish their declared functions, not to rewrite the
         # loader's discovery roots, provider cache, or loaded set.
@@ -1981,14 +1996,22 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
             builtin set loader_state_changed 1
         end
         # Classify all protected-state and function mutations before rollback.
-        # A combined handshake mutation plus embedded `cd` mutation must never
-        # enter a return path that leaves the embedded function installed.
+        # A combined handshake mutation plus `cd` mutation must never enter a
+        # return path that leaves a replacement critical function installed.
+        # Fish 4 embeds `cd`; Fish 3 loads it from the installation function
+        # path. Both are Fish-provided definitions the loader cannot restore
+        # with provenance after a body replaces them, so both fail closed.
         set -l preflight_embedded_mutation ''
         set -l preflight_embedded_index 1
         for preflight_reserved_name in $reserved_function_names
             set -l preflight_before_source "$reserved_function_before[$preflight_embedded_index]"
             set -l preflight_after_source (builtin functions --details "$preflight_reserved_name")
-            if builtin string match -q 'embedded:*' -- "$preflight_before_source"; and not builtin test "$preflight_after_source" = "$preflight_before_source"
+            set -l preflight_before_dir (builtin path dirname -- "$preflight_before_source")
+            set -l preflight_fish_provided 0
+            if builtin string match -q 'embedded:*' -- "$preflight_before_source"; or builtin test "$preflight_before_source" = builtin; or builtin contains -- "$preflight_before_dir" /usr/share/fish/functions /usr/local/share/fish/functions /opt/local/share/fish/functions /opt/homebrew/share/fish/functions
+                set preflight_fish_provided 1
+            end
+            if builtin test $preflight_fish_provided -eq 1; and not builtin test "$preflight_after_source" = "$preflight_before_source"
                 set preflight_embedded_mutation "$preflight_reserved_name"
                 break
             end
@@ -2181,8 +2204,24 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         set -g _sp_fish_loaded_modules $_sp_fish_loaded_modules $mod
         for owned_function in $new_function_names $mod_exports
             if test -n "$owned_function"; and not builtin contains -- $owned_function $_sp_fish_loader_owned_exports
+                set -l owned_source (builtin functions --details "$owned_function")
+                # Fish's own system functions are not module state. A body can
+                # materialize them by sourcing a completion or function file or
+                # by running completions, but the ledger must not claim them:
+                # their source is not an authenticated release path, so the next
+                # activation would fail closed, and its cleanup would erase real
+                # Fish functions. Fish 3 reports a file under the installation
+                # prefix; Fish 4 reports an embedded: path. A module's own
+                # functions report their body file (or "-" for an alias), so they
+                # are unaffected. Rollback still removes these from
+                # new_function_names because, for a failed body, they are this
+                # activation's residue.
+                switch "$owned_source"
+                    case '/usr/share/fish/*' '/usr/local/share/fish/*' '/opt/local/share/fish/*' '/opt/homebrew/share/fish/*' 'embedded:completions/*' 'embedded:functions/*' 'autoloaded:*'
+                        continue
+                end
                 set -a _sp_fish_loader_owned_exports $owned_function
-                set -a _sp_fish_loader_owned_sources (builtin functions --details "$owned_function")
+                set -a _sp_fish_loader_owned_sources $owned_source
             end
         end
     end

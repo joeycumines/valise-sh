@@ -136,6 +136,22 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
   POSIX and Fish readers now reject it.
 - The Fish loader rejected caller aliases, because `functions --copy` drops
   `--wraps`.
+- Fish 3 lists autoloadable but undefined functions in `functions --all
+  --names`, and that list grows as the loader introspects it. The Fish loader
+  and the generated hook now take their "created by this activation" baseline
+  after that introspection, so Fish's own system functions are no longer
+  attributed to a module or an entrypoint and published in an ownership
+  ledger whose `/usr/share/fish` source can never be authenticated.
+- A body that replaced `cd` on Fish 3, where `cd` is a file-backed system
+  function rather than an embedded one, was reported as a generic loader-state
+  mutation. It now fails closed as a mutated critical Fish function, matching
+  Fish 4.
+- A module body that sourced a Fish completion or function file, or ran
+  completions, materialized Fish's own system functions. Those entered the
+  ownership ledger, so the next activation failed closed before its cleanup
+  erased real Fish functions. Fish system functions are no longer recorded as
+  module- or entrypoint-owned, on Fish 3 (file paths) and Fish 4 (embedded
+  paths) alike.
 - `valise doctor` did not accept FreeBSD's `sha256`.
 - `valise module new` assumed the seed module was `profile_main`.
 
