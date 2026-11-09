@@ -52,11 +52,11 @@ else
   cat "$_test_home/new.err" >&2
 fi
 for _file in \
-  shell/module.d/profile_main.meta \
-  shell/modules/profile_main.sh \
-  shell/release/install-variants \
-  shell/release/bundle-roots \
-  shell/release/project.conf; do
+  module.d/profile_main.meta \
+  modules/profile_main.sh \
+  variants.tsv \
+  bundles.tsv \
+  valise.conf; do
   if [ -f "$_project/$_file" ]; then
     pass "new project contains $_file"
   else
@@ -74,18 +74,18 @@ else
 fi
 # The generated body must define the declared export, otherwise the module
 # fails its own export check when the profile loads it.
-if grep -F 'hello() {' "$_project/shell/modules/hello.sh" >/dev/null; then
+if grep -F 'hello() {' "$_project/modules/hello.sh" >/dev/null; then
   pass "module new writes a body that defines the declared export"
 else
   fail "module new writes a body that defines the declared export"
-  cat "$_project/shell/modules/hello.sh" >&2
+  cat "$_project/modules/hello.sh" >&2
 fi
-cat >"$_project/shell/modules/hello.sh" <<'EOF'
+cat >"$_project/modules/hello.sh" <<'EOF'
 hello() {
   printf '%s\n' 'project ux hello'
 }
 EOF
-if grep -F 'requires=hello' "$_project/shell/module.d/profile_main.meta" >/dev/null; then
+if grep -F 'requires=hello' "$_project/module.d/profile_main.meta" >/dev/null; then
   pass "module new wires the module into the seed aggregator"
 else
   fail "module new wires the module into the seed aggregator"
@@ -96,8 +96,8 @@ if (cd "$_project" && _env module new world --exports=hello) \
 else
   if grep -F 'export already exists in another module: hello' \
     "$_test_home/module-conflict.err" >/dev/null &&
-    [ ! -e "$_project/shell/module.d/world.meta" ] &&
-    [ ! -e "$_project/shell/modules/world.sh" ]; then
+    [ ! -e "$_project/module.d/world.meta" ] &&
+    [ ! -e "$_project/modules/world.sh" ]; then
     pass "module new rejects an export already declared by another module"
   else
     fail "module new rejects an export already declared by another module"
@@ -147,7 +147,7 @@ if [ ! -e "$_home/.bash_profile" ] &&
 else
   fail "apply creates no shadowing startup file"
 fi
-if grep -F 'installed-modules.$_valise_plan' "$_home/.zprofile" >/dev/null &&
+if grep -F 'plans/$_valise_plan.sh' "$_home/.zprofile" >/dev/null &&
   ! grep -F '.profile' "$_home/.zprofile" >/dev/null; then
   pass "apply writes the block to ~/.zprofile without sourcing ~/.profile"
 else
@@ -178,23 +178,19 @@ else
   fail "zsh login shell loads the applied module"
   cat "$_test_home/zsh.err" >&2
 fi
+# The scaffold's bundle has an sh row, so the generic sh plan serves dash.
 if [ ! -x /bin/dash ]; then
   if [ "${VALISE_REQUIRE_TOOLING:-0}" = 1 ]; then
-    fail "dash loads nothing from the applied profile (/bin/dash unavailable)"
+    fail "dash loads the applied module through the sh plan (/bin/dash unavailable)"
   else
-    skip "dash loads nothing from the applied profile (/bin/dash unavailable)"
+    skip "dash loads the applied module through the sh plan (/bin/dash unavailable)"
   fi
-elif HOME="$_home" /bin/dash -c '. "$HOME/.profile"' \
-  2>"$_test_home/dash-source.err"; then
-  if HOME="$_home" /bin/dash -c '. "$HOME/.profile"; command -v hello >/dev/null 2>&1' \
-    2>"$_test_home/dash.err"; then
-    fail "dash loads nothing from the applied profile"
-  else
-    pass "dash loads nothing from the applied profile"
-  fi
+elif HOME="$_home" /bin/dash -c '. "$HOME/.profile"; hello' 2>"$_test_home/dash.err" |
+  grep -F 'project ux hello' >/dev/null; then
+  pass "dash loads the applied module through the sh plan"
 else
-  fail "applied profile sources cleanly in dash"
-  cat "$_test_home/dash-source.err" >&2
+  fail "dash loads the applied module through the sh plan"
+  cat "$_test_home/dash.err" >&2
 fi
 
 _status=$(cd "$_project" && _env status 2>"$_test_home/status.err")
@@ -228,17 +224,17 @@ else
   fail "module remove removes the module"
   cat "$_test_home/module-remove.err" >&2
 fi
-if [ ! -e "$_project/shell/module.d/hello.meta" ] &&
-  [ ! -e "$_project/shell/modules/hello.sh" ] &&
-  ! grep -F 'hello' "$_project/shell/release/module-registry.tsv" >/dev/null &&
-  ! grep -F 'requires=hello' "$_project/shell/module.d/profile_main.meta" >/dev/null; then
+if [ ! -e "$_project/module.d/hello.meta" ] &&
+  [ ! -e "$_project/modules/hello.sh" ] &&
+  ! "$_valise" -C "$_project" registry | grep -F 'hello' >/dev/null &&
+  ! grep -F 'requires=hello' "$_project/module.d/profile_main.meta" >/dev/null; then
   pass "module remove removes files, registry row, and seed reference"
 else
   fail "module remove removes files, registry row, and seed reference"
 fi
 
 if (cd "$_project" && _env build) >"$_test_home/build-after-remove.out" 2>"$_test_home/build-after-remove.err" &&
-  [ -f "$_project/build/release/shell/install/profile-release.manifest" ]; then
+  [ -f "$_project/build/release/manifest.tsv" ]; then
   pass "build succeeds after module removal"
 else
   fail "build succeeds after module removal"
@@ -262,7 +258,7 @@ if (cd "$_slash_project" && _slash_env apply) \
   >"$_test_home/slash-apply.out" 2>"$_test_home/slash-apply.err"; then
   if [ -f "$_slash_home/.zprofile" ] &&
     grep -F '# BEGIN valise managed block' "$_slash_home/.zprofile" >/dev/null &&
-    grep -F 'installed-modules.$_valise_plan' "$_slash_home/.zprofile" >/dev/null; then
+    grep -F 'plans/$_valise_plan.sh' "$_slash_home/.zprofile" >/dev/null; then
     pass "apply writes ~/.zprofile when HOME ends in a slash"
   else
     fail "apply writes ~/.zprofile when HOME ends in a slash"
@@ -399,40 +395,39 @@ _rm_project="$_test_home/rm-project"
 (cd "$_test_home" && _env new rm-project) >/dev/null 2>&1 || :
 (cd "$_rm_project" && _env module new keeper --exports=keeper_fn && _env module new gone --exports=gone_fn &&
   _env module new only_root --exports=only_root_fn) >/dev/null 2>&1 || :
-cat >"$_rm_project/shell/module.d/only_child_meta.meta" <<'EOF'
+cat >"$_rm_project/module.d/only_child_meta.meta" <<'EOF'
 name=only_child_meta
 version=
 side_effect=read-only
 requires=only_root
 optional=
-shells=sh
+shells=posix
 platforms=any
 exports=
-updates=
 load=
 EOF
 printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\nminimal\tMinimal\tgone\nsmall\tSmall\tgone keeper\n' \
-  >"$_rm_project/shell/release/install-variants"
+  >"$_rm_project/variants.tsv"
 printf '# bundle\tshell\troots\ndefault\tbash\tprofile_main gone\ndefault\tzsh\tprofile_main\ndefault\tksh\tprofile_main\n' \
-  >"$_rm_project/shell/release/bundle-roots"
+  >"$_rm_project/bundles.tsv"
 if (cd "$_rm_project" && _env module remove only_root) \
   >"$_test_home/rm-refuse.out" 2>"$_test_home/rm-refuse.err"; then
   fail "module remove refuses to empty a meta module"
 elif grep -F 'only_child_meta requires only this module' "$_test_home/rm-refuse.err" >/dev/null &&
-  [ -f "$_rm_project/shell/modules/only_root.sh" ] &&
-  [ -f "$_rm_project/shell/module.d/only_root.meta" ] &&
-  grep -Fx 'requires=only_root' "$_rm_project/shell/module.d/only_child_meta.meta" >/dev/null; then
+  [ -f "$_rm_project/modules/only_root.sh" ] &&
+  [ -f "$_rm_project/module.d/only_root.meta" ] &&
+  grep -Fx 'requires=only_root' "$_rm_project/module.d/only_child_meta.meta" >/dev/null; then
   pass "module remove refuses to empty a meta module and changes nothing"
 else
   fail "module remove refuses to empty a meta module and changes nothing"
   cat "$_test_home/rm-refuse.err" >&2
 fi
-rm -f "$_rm_project/shell/module.d/only_child_meta.meta"
+rm -f "$_rm_project/module.d/only_child_meta.meta"
 if (cd "$_rm_project" && _env module remove profile_main) \
   >"$_test_home/rm-root.out" 2>"$_test_home/rm-root.err"; then
   fail "module remove refuses to empty a bundle"
 elif grep -F 'only root of a bundle' "$_test_home/rm-root.err" >/dev/null &&
-  [ -f "$_rm_project/shell/module.d/profile_main.meta" ]; then
+  [ -f "$_rm_project/module.d/profile_main.meta" ]; then
   pass "module remove refuses to empty a bundle and changes nothing"
 else
   fail "module remove refuses to empty a bundle and changes nothing"
@@ -442,26 +437,26 @@ if (cd "$_rm_project" && _env module remove gone && _env build) \
   >"$_test_home/rm-refs.out" 2>"$_test_home/rm-refs.err" &&
   (cd "$_rm_project" && _env build --variant=minimal "$_test_home/rm-minimal") \
   >>"$_test_home/rm-refs.out" 2>>"$_test_home/rm-refs.err" &&
-  grep -F "$(printf 'default\tbash\tprofile_main')" "$_rm_project/shell/release/bundle-roots" >/dev/null &&
-  ! grep -F 'gone' "$_rm_project/shell/release/bundle-roots" >/dev/null &&
-  grep -F "$(printf 'small\tSmall\tkeeper')" "$_rm_project/shell/release/install-variants" >/dev/null &&
-  ! grep -F 'gone' "$_rm_project/shell/release/install-variants" >/dev/null; then
+  grep -F "$(printf 'default\tbash\tprofile_main')" "$_rm_project/bundles.tsv" >/dev/null &&
+  ! grep -F 'gone' "$_rm_project/bundles.tsv" >/dev/null &&
+  grep -F "$(printf 'small\tSmall\tkeeper')" "$_rm_project/variants.tsv" >/dev/null &&
+  ! grep -F 'gone' "$_rm_project/variants.tsv" >/dev/null; then
   pass "module remove strips bundle roots and variant exclusions, and the project builds"
 else
   fail "module remove strips bundle roots and variant exclusions, and the project builds"
   cat "$_test_home/rm-refs.err" >&2
-  cat "$_rm_project/shell/release/bundle-roots" "$_rm_project/shell/release/install-variants" >&2
+  cat "$_rm_project/bundles.tsv" "$_rm_project/variants.tsv" >&2
 fi
 
 # --- module new and module remove fail before mutating ------------------------
 _guard_project="$_test_home/guard-project"
 (cd "$_test_home" && _env new guard-project) >/dev/null 2>&1 || :
-rm -f "$_guard_project/shell/module.d/profile_main.meta"
+rm -f "$_guard_project/module.d/profile_main.meta"
 if (cd "$_guard_project" && _env module new ghost --exports=ghost_fn) \
   >"$_test_home/ghost.out" 2>"$_test_home/ghost.err"; then
   fail "module new refuses a missing seed metadata file"
-elif [ ! -e "$_guard_project/shell/module.d/ghost.meta" ] &&
-  [ ! -e "$_guard_project/shell/modules/ghost.sh" ]; then
+elif [ ! -e "$_guard_project/module.d/ghost.meta" ] &&
+  [ ! -e "$_guard_project/modules/ghost.sh" ]; then
   pass "module new refuses a missing seed metadata file without writing files"
 else
   fail "module new refuses a missing seed metadata file without writing files"
@@ -473,7 +468,7 @@ if (cd "$_reserved_project" && _env module new bad --exports=if) \
   >"$_test_home/reserved.out" 2>"$_test_home/reserved.err"; then
   fail "module new rejects a reserved-word export"
 elif grep -F 'reserved word' "$_test_home/reserved.err" >/dev/null &&
-  [ ! -e "$_reserved_project/shell/module.d/bad.meta" ]; then
+  [ ! -e "$_reserved_project/module.d/bad.meta" ]; then
   pass "module new rejects a reserved-word export without writing files"
 else
   fail "module new rejects a reserved-word export without writing files"
@@ -483,23 +478,22 @@ fi
 _share_project="$_test_home/share-project"
 (cd "$_test_home" && _env new share-project) >/dev/null 2>&1 || :
 (cd "$_share_project" && _env module new shared_one --exports=shared_one_fn) >/dev/null 2>&1 || :
-cat >"$_share_project/shell/module.d/shared_two.meta" <<'EOF'
+cat >"$_share_project/module.d/shared_two.meta" <<'EOF'
 name=shared_two
 version=
 side_effect=read-only
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 exports=
-updates=
 load=modules/shared_one.sh
 EOF
 (cd "$_share_project" && _env build) >/dev/null 2>&1 || :
 if (cd "$_share_project" && _env module remove shared_two) \
   >"$_test_home/shared.out" 2>"$_test_home/shared.err" &&
-  [ -f "$_share_project/shell/modules/shared_one.sh" ] &&
-  [ ! -e "$_share_project/shell/module.d/shared_two.meta" ] &&
+  [ -f "$_share_project/modules/shared_one.sh" ] &&
+  [ ! -e "$_share_project/module.d/shared_two.meta" ] &&
   (cd "$_share_project" && _env build) >/dev/null 2>&1; then
   pass "module remove keeps a body shared by another module"
 else
@@ -510,15 +504,15 @@ fi
 _ro_project="$_test_home/ro-project"
 (cd "$_test_home" && _env new ro-project) >/dev/null 2>&1 || :
 (cd "$_ro_project" && _env module new stuck --exports=stuck_fn) >/dev/null 2>&1 || :
-chmod 0555 "$_ro_project/shell/module.d"
+chmod 0555 "$_ro_project/module.d"
 if (cd "$_ro_project" && _env module remove stuck) \
   >"$_test_home/ro.out" 2>"$_test_home/ro.err"; then
-  chmod 0755 "$_ro_project/shell/module.d"
+  chmod 0755 "$_ro_project/module.d"
   fail "module remove refuses an unwritable metadata directory"
 else
-  chmod 0755 "$_ro_project/shell/module.d"
-  if [ -f "$_ro_project/shell/module.d/stuck.meta" ] &&
-    [ -f "$_ro_project/shell/modules/stuck.sh" ] &&
+  chmod 0755 "$_ro_project/module.d"
+  if [ -f "$_ro_project/module.d/stuck.meta" ] &&
+    [ -f "$_ro_project/modules/stuck.sh" ] &&
     (cd "$_ro_project" && _env build) >/dev/null 2>&1; then
     pass "module remove refuses an unwritable metadata directory and changes nothing"
   else

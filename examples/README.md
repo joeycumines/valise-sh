@@ -2,12 +2,13 @@
 
 - `local/` is the smallest example: one metadata file and one POSIX shell
   module. It demonstrates sourcing a module without installing a release.
-- `profile-project/` is a complete consuming project: metadata-driven
-  modules, a provider layer, a bundle, a variant, and project defaults.
-  It is the shortest path from a clone to a loaded profile.
-- `e2e/` is a sample consumer profile. Its twelve modules cover dependency
-  resolution, platform and shell selection, exports, optional dependencies,
-  release installation, and shared-module composition.
+- `profile-project/` is a small complete project: two modules, a provider
+  layer, a bundle, and two variants. It is the shortest path from a clone to
+  a loaded profile.
+- `e2e/` is the project `tests/e2e.test.sh` builds. Its thirteen modules
+  cover dependency resolution, platform and shell selection, exports,
+  optional dependencies, a Fish module, and composition with a layer.
+- `shared/` is a sample provider whose modules a project vendors as a layer.
 
 ## Complete project
 
@@ -19,7 +20,8 @@ login shell.
 
 ## Minimal module
 
-From the repository root, load the example with:
+`local/` loads through the development loader, without a project or a
+release. From the repository root:
 
 ```sh
 VALISE_MODULE_ROOT="$PWD/examples/local" \
@@ -38,7 +40,6 @@ The metadata is in `examples/local/module.d/hello_valise.meta`; the body is
 
 ## Sample consumer profile
 
-`e2e/README.md` describes how to build its release manifest, install and
-verify the release, load its modules, and compose the `examples/shared/`
-provider. The example installer writes shell integration under `HOME`, so
-use a temporary home if you do not want to change your normal startup files.
+[e2e/README.md](e2e/README.md) builds, installs, and verifies that project
+in a temporary home, loads it in each shell, and composes the `shared/`
+provider as a layer.

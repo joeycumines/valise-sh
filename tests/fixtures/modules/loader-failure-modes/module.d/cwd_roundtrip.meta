@@ -1,9 +1,8 @@
 name=cwd_roundtrip
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=cwd_roundtrip_loaded
-updates=
 load=modules/cwd_roundtrip.sh

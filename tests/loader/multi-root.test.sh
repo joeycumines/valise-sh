@@ -94,11 +94,11 @@ write_layer_module() {
     printf 'name=%s\n' "$_wl_name"
     printf 'requires=%s\n' "$_wl_requires"
     printf 'optional=\n'
-    printf 'shells=sh\n'
+    printf 'shells=posix\n'
     printf 'platforms=any\n'
     printf 'side_effect=read-only\n'
     printf 'exports=%s_loaded\n' "$_wl_name"
-    printf 'updates=\n'
+    printf ''
     printf 'load=modules/%s.sh\n' "$_wl_name"
   } >"$_tmp_dir/layer/module.d/$_wl_name.meta"
   {
@@ -266,11 +266,10 @@ cat >"$_tmp_dir/symlink-component/module.d/contrib_symlink_component.meta" <<'ME
 name=contrib_symlink_component
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=contrib_symlink_component_loaded
-updates=
 load=modules/redirected/core.sh
 META
 run_case symlink_body_component "VALISE_MODULE_PATH=$_tmp_dir/symlink-component" contrib_symlink_component strict
@@ -304,8 +303,8 @@ assert_eq 'cross-root dependency executes in dependency order' $'core\ncontrib_d
 # roots — a layer module may not re-export a primary module's export.
 mkdir -p "$_tmp_dir/layer/module.d" "$_tmp_dir/layer/modules"
 {
-  printf 'name=contrib_clash\nrequires=\noptional=\nshells=sh\nplatforms=any\n'
-  printf 'side_effect=read-only\nexports=core_loaded\nupdates=\n'
+  printf 'name=contrib_clash\nrequires=\noptional=\nshells=posix\nplatforms=any\n'
+  printf 'side_effect=read-only\nexports=core_loaded\n'
   printf 'load=modules/contrib_clash.sh\n'
 } >"$_tmp_dir/layer/module.d/contrib_clash.meta"
 printf 'core_loaded() { :; }\n' >"$_tmp_dir/layer/modules/contrib_clash.sh"
@@ -364,7 +363,7 @@ assert_contains 'set-but-empty VALISE diagnostic names the module as missing' "$
 # single version. Equal versions keep the byte rule.
 mkdir -p "$_tmp_dir/layer2/module.d" "$_tmp_dir/layer2/modules"
 _skew_meta() {
-  printf 'name=contrib_skew\nrequires=\noptional=\nshells=sh\nplatforms=any\nside_effect=read-only\nversion=%s\nexports=contrib_skew_loaded\nupdates=\nload=modules/contrib_skew.sh\n' "$1" >"$2"
+  printf 'name=contrib_skew\nrequires=\noptional=\nshells=posix\nplatforms=any\nside_effect=read-only\nversion=%s\nexports=contrib_skew_loaded\nload=modules/contrib_skew.sh\n' "$1" >"$2"
 }
 _skew_meta 1.0.0 "$_tmp_dir/layer/module.d/contrib_skew.meta"
 printf 'contrib_skew_loaded() { :; }\n' >"$_tmp_dir/layer/modules/contrib_skew.sh"
@@ -440,11 +439,10 @@ cat >"$_tmp_dir/layer/module.d/contrib_up.meta" <<'META'
 name=contrib_up
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=contrib_up_loaded
-updates=
 load=modules/contrib_up.sh
 META
 printf 'printf "%%s\\n" contrib_up >>"$SP_LOADER_TEST_TRACE"\ncontrib_up_loaded() { :; }\n' \
@@ -456,11 +454,10 @@ cat >"$_tmp_dir/primary-extended/module.d/primary_needs_layer.meta" <<'META'
 name=primary_needs_layer
 requires=contrib_up
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=primary_needs_layer_loaded
-updates=
 load=modules/primary_needs_layer.sh
 META
 printf 'printf "%%s\\n" primary_needs_layer >>"$SP_LOADER_TEST_TRACE"\nprimary_needs_layer_loaded() { :; }\n' \

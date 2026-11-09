@@ -1,0 +1,8 @@
+name=valise_platform_posix
+requires=
+optional=
+shells=posix
+platforms=any
+side_effect=read-only
+exports=sp_platform_os sp_platform_cpu_count sp_platform_file_mtime sp_platform_mktemp_dir sp_platform_canonical_path sp_platform_path_under sp_platform_command_path
+load=modules/platform/posix.sh

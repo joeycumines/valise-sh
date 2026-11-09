@@ -1,9 +1,8 @@
 name=optional_invalid_user
 requires=
 optional=optional_invalid_dep
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=optional_invalid_user_loaded
-updates=
 load=modules/optional_invalid_user.sh

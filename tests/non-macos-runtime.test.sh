@@ -145,9 +145,9 @@ set -u
 _status=$?
 _os=$(sp_platform_os 2>/dev/null || printf fail)
 _available=no
-if [ "$VALISE_MODULES" = platform_linux ]; then
+if [ "$VALISE_MODULES" = valise_platform_linux ]; then
   sp_platform_linux_available >/dev/null 2>&1 && _available=yes
-elif [ "$VALISE_MODULES" = platform_bsd ]; then
+elif [ "$VALISE_MODULES" = valise_platform_bsd ]; then
   sp_platform_bsd_available >/dev/null 2>&1 && _available=yes
 fi
 _cpu=$(sp_platform_cpu_count 2>/dev/null || printf fail)
@@ -193,9 +193,9 @@ chmod 700 "$HOME" "$TMPDIR"
 _status=$?
 _os=$(sp_platform_os 2>/dev/null || printf fail)
 _available=no
-if [ "$VALISE_MODULES" = platform_linux ]; then
+if [ "$VALISE_MODULES" = valise_platform_linux ]; then
   sp_platform_linux_available >/dev/null 2>&1 && _available=yes
-elif [ "$VALISE_MODULES" = platform_bsd ]; then
+elif [ "$VALISE_MODULES" = valise_platform_bsd ]; then
   sp_platform_bsd_available >/dev/null 2>&1 && _available=yes
 fi
 _cpu=$(sp_platform_cpu_count 2>/dev/null || printf fail)
@@ -227,11 +227,11 @@ _host_uname=$(uname -s 2>/dev/null || printf unknown)
 
 case "$_host_uname" in
 Linux)
-  run_engine_direct linux platform_linux 'Linux host shell-profile engine runtime'
+  run_engine_direct linux valise_platform_linux 'Linux host shell-profile engine runtime'
   ;;
 *)
   if find_container_image linux VALISE_LINUX_IMAGE 'alpine:latest debian:stable-slim debian:latest ubuntu:latest busybox:latest'; then
-    run_engine_container linux platform_linux 'Linux container shell-profile engine runtime'
+    run_engine_container linux valise_platform_linux 'Linux container shell-profile engine runtime'
   else
     _total=$((_total + 1))
     skip "Linux runtime unavailable (host uname=$_host_uname; missing local Docker/Podman image or executable; checked:${RUNTIME_CHECKED:- none}; set VALISE_LINUX_IMAGE to a pre-pulled local Linux image)"
@@ -241,12 +241,12 @@ esac
 
 case "$_host_uname" in
 FreeBSD | OpenBSD | NetBSD | *BSD)
-  run_engine_direct bsd platform_bsd 'BSD host shell-profile engine runtime'
+  run_engine_direct bsd valise_platform_bsd 'BSD host shell-profile engine runtime'
   ;;
 *)
   if [ -n "${VALISE_BSD_IMAGE:-}" ]; then
     if find_container_image bsd VALISE_BSD_IMAGE "$VALISE_BSD_IMAGE"; then
-      run_engine_container bsd platform_bsd 'BSD configured shell-profile engine runtime'
+      run_engine_container bsd valise_platform_bsd 'BSD configured shell-profile engine runtime'
     else
       _total=$((_total + 1))
       skip "BSD runtime unavailable (host uname=$_host_uname; configured VALISE_BSD_IMAGE=$VALISE_BSD_IMAGE; missing local Docker/Podman image or executable; checked:${RUNTIME_CHECKED:- none}; Docker/Podman Linux images are not treated as BSD evidence)"

@@ -1,9 +1,8 @@
 name=command_hijack_user
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 requires=command_hijack_dep
 optional=
 load=modules/command_hijack_user.sh
 exports=command_hijack_user_loaded
-updates=

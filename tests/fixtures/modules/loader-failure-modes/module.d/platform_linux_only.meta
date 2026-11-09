@@ -1,9 +1,8 @@
 name=platform_linux_only
 requires=
 optional=
-shells=sh
+shells=posix
 platforms=linux
 side_effect=read-only
 exports=platform_linux_only_loaded
-updates=
 load=modules/platform_linux_only.sh

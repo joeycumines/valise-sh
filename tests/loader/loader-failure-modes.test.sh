@@ -837,7 +837,6 @@ shells=bash
 platforms=any
 side_effect=read-only
 exports=bash_only_loaded
-updates=
 load=modules/bash_only.sh
 SPOOF_META
 cat >"$_spoof_root/modules/bash_only.sh" <<'SPOOF_MODULE'

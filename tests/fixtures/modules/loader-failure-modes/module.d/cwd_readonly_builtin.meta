@@ -5,5 +5,4 @@ shells=bash
 platforms=any
 side_effect=read-only
 exports=cwd_readonly_builtin_loaded
-updates=
 load=modules/cwd_readonly_builtin.sh

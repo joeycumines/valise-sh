@@ -31,7 +31,8 @@ trap '_cleanup; exit 130' INT
 trap '_cleanup; exit 143' TERM
 
 _project="$_tmp/project"
-mkdir -p "$_project/shell/module.d" "$_project/shell/modules" "$_project/shell/release"
+mkdir -p "$_project/module.d" "$_project/modules"
+: >"$_project/valise.conf"
 
 _module() {
   _mod_name=$1
@@ -40,7 +41,7 @@ _module() {
   _mod_platforms=$4
   _mod_side_effect=$5
   _mod_body=$6
-  cat >"$_project/shell/module.d/$_mod_name.meta" <<EOF
+  cat >"$_project/module.d/$_mod_name.meta" <<EOF
 name=$_mod_name
 version=
 side_effect=$_mod_side_effect
@@ -49,28 +50,14 @@ optional=
 shells=bash
 platforms=$_mod_platforms
 exports=$_mod_exports
-updates=
 load=modules/$_mod_name.sh
 EOF
-  printf '%s\n' "$_mod_body" >"$_project/shell/modules/$_mod_name.sh"
+  printf '%s\n' "$_mod_body" >"$_project/modules/$_mod_name.sh"
   unset _mod_name _mod_requires _mod_exports _mod_platforms _mod_side_effect _mod_body
 }
 
-_registry_row() {
-  _row_name=$1
-  _row_requires=$2
-  _row_exports=$3
-  _row_platforms=$4
-  _row_side_effect=$5
-  _row_load=$6
-  printf '%s\t\t%s\t%s\t\tbash\t%s\t%s\t%s\t\tshell/module.d\n' \
-    "$_row_name" "$_row_side_effect" "$_row_requires" "$_row_platforms" \
-    "$_row_exports" "$_row_load" >>"$_project/shell/release/module-registry.tsv"
-  unset _row_name _row_requires _row_exports _row_platforms _row_side_effect _row_load
-}
-
 _bundle_row() {
-  printf '%s\tbash\t%s\n' "$1" "$2" >>"$_project/shell/release/bundle-roots"
+  printf '%s\tbash\t%s\n' "$1" "$2" >>"$_project/bundles.tsv"
 }
 
 _current_os=$(uname -s)
@@ -86,7 +73,7 @@ return 1'
 _module later_ok '' later_ok_loaded any read-only 'later_ok_loaded() { :; }'
 _module missing_export '' missing_export_loaded any read-only 'printf "no export\n" >/dev/null'
 _module meta_child '' meta_child_loaded any read-only 'meta_child_loaded() { :; }'
-cat >"$_project/shell/module.d/meta_parent.meta" <<'EOF'
+cat >"$_project/module.d/meta_parent.meta" <<'EOF'
 name=meta_parent
 version=
 side_effect=read-only
@@ -95,23 +82,22 @@ optional=
 shells=bash
 platforms=any
 exports=
-updates=
 load=
 EOF
-rm -f "$_project/shell/modules/meta_parent.sh"
+rm -f "$_project/modules/meta_parent.sh"
 _module platform_other '' platform_other_loaded "$_other_platform" read-only 'platform_other_loaded() { :; }'
 _module platform_edge_blocked '' platform_edge_blocked_loaded "$_other_platform" read-only 'platform_edge_blocked_loaded() { :; }'
 _module platform_edge_optional '' platform_edge_optional_loaded any read-only 'platform_edge_optional_loaded() { :; }'
 _module platform_edge_bridge platform_edge_blocked platform_edge_bridge_loaded any read-only 'platform_edge_bridge_loaded() { :; }'
 _module platform_edge_root platform_edge_bridge platform_edge_root_loaded any read-only 'platform_edge_root_loaded() { :; }'
-sed -i.bak 's/^optional=$/optional=platform_edge_blocked/' "$_project/shell/module.d/platform_edge_optional.meta"
+sed -i.bak 's/^optional=$/optional=platform_edge_blocked/' "$_project/module.d/platform_edge_optional.meta"
 _module platform_user platform_other platform_user_loaded any read-only 'platform_user_loaded() { :; }
 printf "platform_user body\n" >>"'"$_tmp"'/blocked.trace"'
 _module platform_user_user platform_user platform_user_user_loaded any read-only 'platform_user_user_loaded() { :; }
 printf "platform_user_user body\n" >>"'"$_tmp"'/blocked.trace"'
 _module failed_user first_fail failed_user_loaded any read-only 'failed_user_loaded() { :; }
 printf "failed_user body\n" >>"'"$_tmp"'/blocked.trace"'
-cat >"$_project/shell/module.d/meta_other.meta" <<EOF
+cat >"$_project/module.d/meta_other.meta" <<EOF
 name=meta_other
 version=
 side_effect=read-only
@@ -120,7 +106,6 @@ optional=
 shells=bash
 platforms=$_other_platform
 exports=
-updates=
 load=
 EOF
 _module meta_other_user meta_other meta_other_user_loaded any read-only 'meta_other_user_loaded() { :; }'
@@ -132,18 +117,18 @@ _module cross_here '' cross_here_loaded "$_here_platform" read-only 'cross_here_
 CROSS_HERE_RAN=yes'
 _module cross_user '' cross_user_loaded any read-only 'cross_user_loaded() { :; }
 CROSS_SEEN_HERE=${CROSS_HERE_RAN:-no}'
-sed -i.bak 's/^optional=$/optional=cross_here platform_other/' "$_project/shell/module.d/cross_user.meta"
+sed -i.bak 's/^optional=$/optional=cross_here platform_other/' "$_project/module.d/cross_user.meta"
 _module opt_fail_user '' opt_fail_user_loaded any read-only 'opt_fail_user_loaded() { :; }'
-sed -i.bak 's/^optional=$/optional=first_fail/' "$_project/shell/module.d/opt_fail_user.meta"
+sed -i.bak 's/^optional=$/optional=first_fail/' "$_project/module.d/opt_fail_user.meta"
 _module cycle_a '' cycle_a_loaded any read-only 'cycle_a_loaded() { :; }'
 _module cycle_b '' cycle_b_loaded any read-only 'cycle_b_loaded() { :; }'
-sed -i.bak 's/^optional=$/optional=cycle_b/' "$_project/shell/module.d/cycle_a.meta"
-sed -i.bak 's/^optional=$/optional=cycle_a/' "$_project/shell/module.d/cycle_b.meta"
+sed -i.bak 's/^optional=$/optional=cycle_b/' "$_project/module.d/cycle_a.meta"
+sed -i.bak 's/^optional=$/optional=cycle_a/' "$_project/module.d/cycle_b.meta"
 _module opt_req_cycle_user '' opt_req_cycle_user_loaded any read-only 'opt_req_cycle_user_loaded() { :; }'
 _module opt_req_cycle_a opt_req_cycle_b opt_req_cycle_a_loaded any read-only 'opt_req_cycle_a_loaded() { :; }'
 _module opt_req_cycle_b opt_req_cycle_a opt_req_cycle_b_loaded any read-only 'opt_req_cycle_b_loaded() { :; }'
-sed -i.bak 's/^optional=$/optional=opt_req_cycle_a/' "$_project/shell/module.d/opt_req_cycle_user.meta"
-cat >"$_project/shell/module.d/meta_export_bad.meta" <<'EOF'
+sed -i.bak 's/^optional=$/optional=opt_req_cycle_a/' "$_project/module.d/opt_req_cycle_user.meta"
+cat >"$_project/module.d/meta_export_bad.meta" <<'EOF'
 name=meta_export_bad
 version=
 side_effect=read-only
@@ -152,12 +137,11 @@ optional=
 shells=bash
 platforms=any
 exports=meta_export_bad_loaded
-updates=
 load=
 EOF
-rm -f "$_project"/shell/module.d/*.bak
-mkdir -p "$_project/shell/layers/demo/module.d" "$_project/shell/layers/demo/modules"
-cat >"$_project/shell/layers/demo/module.d/contrib_demo_child.meta" <<'EOF'
+rm -f "$_project"/module.d/*.bak
+mkdir -p "$_project/layers/demo/module.d" "$_project/layers/demo/modules"
+cat >"$_project/layers/demo/module.d/contrib_demo_child.meta" <<'EOF'
 name=contrib_demo_child
 version=
 side_effect=read-only
@@ -166,11 +150,10 @@ optional=
 shells=bash
 platforms=any
 exports=contrib_demo_child_loaded
-updates=
 load=modules/contrib_demo_child.sh
 EOF
-printf 'contrib_demo_child_loaded() { :; }\n' >"$_project/shell/layers/demo/modules/contrib_demo_child.sh"
-cat >"$_project/shell/layers/demo/module.d/contrib_demo_meta.meta" <<'EOF'
+printf 'contrib_demo_child_loaded() { :; }\n' >"$_project/layers/demo/modules/contrib_demo_child.sh"
+cat >"$_project/layers/demo/module.d/contrib_demo_meta.meta" <<'EOF'
 name=contrib_demo_meta
 version=
 side_effect=read-only
@@ -179,7 +162,6 @@ optional=
 shells=bash
 platforms=any
 exports=
-updates=
 load=
 EOF
 _module capability_user '' capability_user_loaded any read-only 'capability_user_loaded() { sp_cap_os; }'
@@ -192,35 +174,11 @@ existing_probe() { :; }'
 _module conflict_alias '' existing_alias_probe any read-only 'printf "alias conflict body\n" >>"'"$_tmp"'/conflict-alias.trace"
 existing_alias_probe() { :; }'
 
-{
-  printf 'name\tversion\tside_effect\trequires\toptional\tshells\tplatforms\texports\tload\tupdates\tsource\n'
-} >"$_project/shell/release/module-registry.tsv"
-_registry_row first_fail '' first_fail_loaded any read-only modules/first_fail.sh
-_registry_row later_ok '' later_ok_loaded any read-only modules/later_ok.sh
-_registry_row missing_export '' missing_export_loaded any read-only modules/missing_export.sh
-_registry_row meta_child '' meta_child_loaded any read-only modules/meta_child.sh
-_registry_row meta_parent meta_child '' any read-only ''
-_registry_row opt_req_cycle_user '' opt_req_cycle_user_loaded any read-only modules/opt_req_cycle_user.sh
-_registry_row opt_req_cycle_a opt_req_cycle_b opt_req_cycle_a_loaded any read-only modules/opt_req_cycle_a.sh
-_registry_row opt_req_cycle_b opt_req_cycle_a opt_req_cycle_b_loaded any read-only modules/opt_req_cycle_b.sh
-_registry_row meta_export_bad meta_child '' any read-only ''
-_registry_row platform_other '' platform_other_loaded "$_other_platform" read-only modules/platform_other.sh
-_registry_row platform_edge_blocked '' platform_edge_blocked_loaded "$_other_platform" read-only modules/platform_edge_blocked.sh
-_registry_row platform_edge_optional '' platform_edge_optional_loaded any read-only modules/platform_edge_optional.sh
-_registry_row platform_edge_bridge platform_edge_blocked platform_edge_bridge_loaded any read-only modules/platform_edge_bridge.sh
-_registry_row platform_edge_root platform_edge_bridge platform_edge_root_loaded any read-only modules/platform_edge_root.sh
-_registry_row capability_user '' capability_user_loaded any read-only modules/capability_user.sh
-_registry_row reload_probe '' reload_probe_loaded any read-only modules/reload_probe.sh
-_registry_row generated_bad '' generated_bad_loaded any generated-file modules/generated_bad.sh
-_registry_row wrapper_ok '' wrapper_probe any read-only modules/wrapper_ok.sh
-_registry_row wrapper_missing '' wrapper_missing_probe any read-only modules/wrapper_missing.sh
-_registry_row conflict_function '' existing_probe any read-only modules/conflict_function.sh
-_registry_row conflict_alias '' existing_alias_probe any read-only modules/conflict_alias.sh
 unset _other_platform
 
 {
   printf '# bundle\tshell\troots\n'
-} >"$_project/shell/release/bundle-roots"
+} >"$_project/bundles.tsv"
 _bundle_row behavior 'first_fail later_ok'
 _bundle_row missing missing_export
 _bundle_row meta meta_parent
@@ -235,7 +193,7 @@ _bundle_row optional-fail 'opt_fail_user'
 _bundle_row optional-cycle 'cycle_a'
 _bundle_row optional-required-cycle 'opt_req_cycle_user'
 _bundle_row meta-exports 'meta_export_bad'
-_bundle_row layer-meta 'contrib_demo_meta@shell/layers/demo/module.d'
+_bundle_row layer-meta 'contrib_demo_meta@layers/demo/module.d'
 _bundle_row capability capability_user
 _bundle_row reload reload_probe
 _bundle_row unsafe generated_bad
@@ -243,10 +201,9 @@ _bundle_row wrapper-ok wrapper_ok
 _bundle_row wrapper-missing wrapper_missing
 _bundle_row conflict-function conflict_function
 _bundle_row conflict-alias conflict_alias
-_bundle_row bodyless bodyless_orphan
 
 printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' \
-  >"$_project/shell/release/install-variants"
+  >"$_project/variants.tsv"
 
 _build() {
   _as_bundle=$1
@@ -262,26 +219,28 @@ _build() {
   unset _as_bundle _as_out
 }
 
-_reject_registry_row() {
-  _probe_row=$1
+# _reject_meta <file-name> <needle> <meta-line>...
+# Add a module whose metadata is invalid and require compile to fail with the
+# metadata diagnostic. The registry is generated from metadata, so metadata
+# validation is what keeps unsafe names and values out of the plan source.
+_reject_meta() {
+  _probe_file="$_project/module.d/$1.meta"
   _probe_needle=$2
-  _probe_saved="$_tmp/module-registry.saved"
-  cp "$_project/shell/release/module-registry.tsv" "$_probe_saved"
-  printf '%s\n' "$_probe_row" >>"$_project/shell/release/module-registry.tsv"
+  shift 2
+  printf '%s\n' "$@" >"$_probe_file"
   rm -rf "$_tmp/registry-probe-out"
   if (cd "$_project" && "$_valise" compile --bundle=reload "$_tmp/registry-probe-out") \
     >"$_tmp/registry-probe.out" 2>"$_tmp/registry-probe.err"; then
-    fail "compile rejects registry row: $_probe_needle"
+    fail "compile rejects metadata: $_probe_needle"
+  elif grep -F -- "$_probe_needle" "$_tmp/registry-probe.err" >/dev/null &&
+    [ ! -e "$_tmp/registry-probe-out" ]; then
+    pass "compile rejects metadata: $_probe_needle"
   else
-    if grep -F "$_probe_needle" "$_tmp/registry-probe.err" >/dev/null; then
-      pass "compile rejects registry row: $_probe_needle"
-    else
-      fail "compile rejects registry row: $_probe_needle"
-      cat "$_tmp/registry-probe.err" >&2
-    fi
+    fail "compile rejects metadata: $_probe_needle"
+    cat "$_tmp/registry-probe.err" >&2
   fi
-  cp "$_probe_saved" "$_project/shell/release/module-registry.tsv"
-  unset _probe_row _probe_needle _probe_saved
+  rm -f "$_probe_file"
+  unset _probe_file _probe_needle
 }
 
 printf '=== compiled-plan contract ===\n'
@@ -309,7 +268,7 @@ _build conflict-alias "$_tmp/release-conflict-alias"
 
 # Strict mode stops at the first failing module and names it.
 if VALISE_MODULE_ROOT="$_tmp/release-behavior" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   _status=$?
   printf "status=%s\n" "$_status"
   if command -v first_fail_loaded >/dev/null; then printf "first=loaded\n"; else printf "first=absent\n"; fi
@@ -333,7 +292,7 @@ fi
 
 # Permissive mode reports the failure, continues, and returns success, as the loader does.
 if ! VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-behavior" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   _status=$?
   printf "status=%s\n" "$_status"
   if command -v first_fail_loaded >/dev/null; then printf "first=loaded\n"; else printf "first=absent\n"; fi
@@ -356,7 +315,7 @@ fi
 
 # A declared but missing export is reported with the module and export names.
 if VALISE_MODULE_ROOT="$_tmp/release-missing" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
 ' >"$_tmp/missing.out" 2>"$_tmp/missing.err"; then
   fail "missing export fails the plan"
 else
@@ -370,9 +329,9 @@ else
 fi
 
 # Dependency-only meta modules compile, order their dependencies, and load no body.
-if grep -F '# order=meta_child meta_parent' "$_tmp/release-meta/generated/installed-modules.bash" >/dev/null &&
+if grep -F '# order=meta_child meta_parent' "$_tmp/release-meta/plans/bash.sh" >/dev/null &&
   VALISE_MODULE_ROOT="$_tmp/release-meta" /bin/bash -c '
-    . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+    . "$VALISE_MODULE_ROOT/plans/bash.sh"
     command -v meta_child_loaded >/dev/null
   ' >"$_tmp/meta.out" 2>"$_tmp/meta.err"; then
   pass "meta module orders its dependency closure without a body"
@@ -384,7 +343,7 @@ fi
 # A root declared for another platform fails strict with a named diagnostic, as
 # the loader does, and is skipped in permissive mode.
 if VALISE_MODULE_ROOT="$_tmp/release-platform" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
 ' >"$_tmp/platform.out" 2>"$_tmp/platform.err"; then
   fail "strict plan fails on an unsupported root"
 elif grep -F 'module platform_other skipped: unsupported platform' "$_tmp/platform.err" >/dev/null; then
@@ -394,7 +353,7 @@ else
   cat "$_tmp/platform.err" >&2
 fi
 if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-platform" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "status=%s\n" "$?"
   if command -v platform_other_loaded >/dev/null; then printf "platform=loaded\n"; else printf "platform=skipped\n"; fi
 ' >"$_tmp/platform.out" 2>"$_tmp/platform.err" &&
@@ -409,7 +368,7 @@ fi
 # The cross-platform form: optional dependencies. Strict mode succeeds on any
 # host, the host's module loads first, and the expected absence prints nothing.
 if VALISE_MODULE_ROOT="$_tmp/release-optional" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   _status=$?
   printf "status=%s\n" "$_status"
   command -v cross_user_loaded >/dev/null && printf "user=loaded\n"
@@ -432,7 +391,7 @@ fi
 
 # A failing optional dependency is reported and does not fail strict mode.
 if VALISE_MODULE_ROOT="$_tmp/release-optional-fail" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   command -v opt_fail_user_loaded >/dev/null
 ' >"$_tmp/optional-fail.out" 2>"$_tmp/optional-fail.err" &&
   grep -F 'module first_fail failed with status 1' "$_tmp/optional-fail.err" >/dev/null; then
@@ -444,7 +403,7 @@ fi
 
 # An optional cycle cannot deadlock the plan; a required cycle still fails.
 if VALISE_MODULE_ROOT="$_tmp/release-optional-cycle" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   command -v cycle_a_loaded >/dev/null && command -v cycle_b_loaded >/dev/null
 ' >"$_tmp/optional-cycle.out" 2>"$_tmp/optional-cycle.err"; then
   pass "an optional-only cycle still loads its members"
@@ -455,7 +414,7 @@ fi
 
 # An optional edge into a required cycle is quarantined, as the loader does.
 if VALISE_MODULE_ROOT="$_tmp/release-optional-required-cycle" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   command -v opt_req_cycle_user_loaded >/dev/null &&
     ! command -v opt_req_cycle_a_loaded >/dev/null &&
     ! command -v opt_req_cycle_b_loaded >/dev/null
@@ -483,7 +442,7 @@ fi
 # anything that depends on it runs.
 : >"$_tmp/blocked.trace"
 if VALISE_MODULE_ROOT="$_tmp/release-blocked-platform" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   _status=$?
   printf "status=%s\n" "$_status"
   exit "$_status"
@@ -503,7 +462,7 @@ fi
 # Permissive mode skips the whole dependent chain and still loads unrelated modules.
 : >"$_tmp/blocked.trace"
 if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-platform" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "status=%s\n" "$?"
   command -v later_ok_loaded >/dev/null && printf "later=loaded\n"
   set | grep "^_shell_installed_plan_" || printf "leaks=none\n"
@@ -522,7 +481,7 @@ fi
 # Permissive mode does not run a dependent of a failed module.
 : >"$_tmp/blocked.trace"
 VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-failed" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "status=%s\n" "$?"
   command -v later_ok_loaded >/dev/null && printf "later=loaded\n"
 ' >"$_tmp/blocked-failed.out" 2>"$_tmp/blocked-failed.err" || :
@@ -538,7 +497,7 @@ fi
 
 # A meta module's platforms= gates it too, so its dependents are blocked.
 if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-meta" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   ! command -v meta_other_user_loaded >/dev/null
 ' >"$_tmp/blocked-meta.out" 2>"$_tmp/blocked-meta.err" &&
   grep -F 'module meta_other_user skipped: required dependency unavailable: meta_other' "$_tmp/blocked-meta.err" >/dev/null; then
@@ -549,9 +508,9 @@ else
 fi
 
 # A layer meta module has no body, so the plan must not source a directory.
-if ! grep -F 'layers/demo/"' "$_tmp/release-layer-meta/generated/installed-modules.bash" >/dev/null &&
+if ! grep -F 'layers/demo/"' "$_tmp/release-layer-meta/plans/bash.sh" >/dev/null &&
   VALISE_MODULE_ROOT="$_tmp/release-layer-meta" /bin/bash -c '
-    . "$VALISE_MODULE_ROOT/generated/installed-modules.bash" && command -v contrib_demo_child_loaded >/dev/null
+    . "$VALISE_MODULE_ROOT/plans/bash.sh" && command -v contrib_demo_child_loaded >/dev/null
   ' >"$_tmp/layer-meta.out" 2>"$_tmp/layer-meta.err"; then
   pass "layer meta module compiles without a load path"
 else
@@ -561,7 +520,7 @@ fi
 
 # Capability functions remain available after the plan finishes.
 if VALISE_MODULE_ROOT="$_tmp/release-capability" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   capability_user_loaded >/dev/null
   command -v sp_cap_os >/dev/null
 ' >"$_tmp/capability.out" 2>"$_tmp/capability.err"; then
@@ -574,9 +533,9 @@ fi
 # A capability-prelude failure must fail the whole plan and skip module bodies.
 rm -rf "$_tmp/release-prelude-failure"
 cp -R "$_tmp/release-capability" "$_tmp/release-prelude-failure"
-printf '%s\n' 'bad ((' >"$_tmp/release-prelude-failure/vendor/shell-profile/lib/capabilities.sh"
+printf '%s\n' 'bad ((' >"$_tmp/release-prelude-failure/runtime/capabilities.sh"
 if VALISE_MODULE_ROOT="$_tmp/release-prelude-failure" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   _status=$?
   printf "status=%s\n" "$_status"
   if command -v capability_user_loaded >/dev/null; then printf "module=loaded\n"; else printf "module=skipped\n"; fi
@@ -597,10 +556,10 @@ fi
 
 # Re-sourcing with VALISE_RELOAD=1 clears the plan's declared exports.
 if VALISE_MODULE_ROOT="$_tmp/release-reload" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "first=%s\n" "$?"
   VALISE_RELOAD=1
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "second=%s\n" "$?"
   command -v reload_probe_loaded >/dev/null
 ' >"$_tmp/reload.out" 2>"$_tmp/reload.err"; then
@@ -622,7 +581,7 @@ printf '%s\n' '#!/bin/sh' 'exit 0' >"$_tmp/fakebin/wrapper_probe"
 printf '%s\n' '#!/bin/sh' 'exit 0' >"$_tmp/fakebin/wrapper_missing_probe"
 chmod +x "$_tmp/fakebin/wrapper_probe" "$_tmp/fakebin/wrapper_missing_probe"
 if PATH="$_tmp/fakebin:$PATH" VALISE_MODULE_ROOT="$_tmp/release-wrapper-ok" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
   [ "$(command -v wrapper_probe)" = wrapper_probe ]
 ' >"$_tmp/wrapper-ok.out" 2>"$_tmp/wrapper-ok.err"; then
   pass "wrapper export replaces an external command with a function"
@@ -631,7 +590,7 @@ else
   cat "$_tmp/wrapper-ok.err" >&2
 fi
 if PATH="$_tmp/fakebin:$PATH" VALISE_MODULE_ROOT="$_tmp/release-wrapper-missing" /bin/bash -c '
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
 ' >"$_tmp/wrapper-missing.out" 2>"$_tmp/wrapper-missing.err"; then
   fail "unprovided wrapper export fails the plan"
 else
@@ -648,7 +607,7 @@ fi
 rm -f "$_tmp/conflict-function.trace"
 if VALISE_MODULE_ROOT="$_tmp/release-conflict-function" /bin/bash -c '
   existing_probe() { :; }
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
 ' >"$_tmp/conflict-function.out" 2>"$_tmp/conflict-function.err"; then
   fail "existing function export fails the plan"
 else
@@ -665,7 +624,7 @@ rm -f "$_tmp/conflict-alias.trace"
 if VALISE_MODULE_ROOT="$_tmp/release-conflict-alias" /bin/bash -c '
   shopt -s expand_aliases
   alias existing_alias_probe=/bin/true
-  . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
 ' >"$_tmp/conflict-alias.out" 2>"$_tmp/conflict-alias.err"; then
   fail "existing alias export fails the plan"
 else
@@ -696,54 +655,40 @@ else
 fi
 
 # A module with neither a load path nor dependencies has nothing to load.
-# The compiler rejects it by name instead of emitting a plan that silently
-# does nothing for that module. The row is appended to the registry because
-# build regenerates the registry from the metadata, and a malformed module
-# has no metadata to generate it from.
-_bodyless_saved="$_tmp/module-registry.bodyless.saved"
-cp "$_project/shell/release/module-registry.tsv" "$_bodyless_saved"
-printf 'bodyless_orphan\t\tread-only\t\t\tbash\tany\t\t\t\tshell/module.d\n' \
-  >>"$_project/shell/release/module-registry.tsv"
-rm -rf "$_tmp/bodyless-out"
-if (cd "$_project" && "$_valise" compile --bundle=bodyless "$_tmp/bodyless-out") \
+# Metadata validation already refuses one, so the compiler check is defence in
+# depth: feed the compiler a stream that carries such a row and require it to
+# reject the module by name instead of emitting a plan that does nothing.
+printf 'SEED:bodyless_orphan@module.d\nPRELUDE:sp_cap_os\nMOD:bodyless_orphan@module.d\t\t\tany\tread-only\t\t\n' \
+  >"$_tmp/bodyless.stream"
+if awk -v target_shell=bash -v plan_name=bash -f "$_repo/lib/compiler.awk" "$_tmp/bodyless.stream" \
   >"$_tmp/bodyless.out" 2>"$_tmp/bodyless.err"; then
-  fail "bodyless module with no dependencies fails compile"
+  fail "compiler rejects a bodyless module with no dependencies"
+elif grep -F 'module bodyless_orphan has no load path and no dependencies' "$_tmp/bodyless.err" >/dev/null; then
+  pass "compiler rejects a bodyless module with no dependencies by name"
 else
-  if grep -F 'module bodyless_orphan has no load path and no dependencies' \
-    "$_tmp/bodyless.err" >/dev/null &&
-    [ ! -e "$_tmp/bodyless-out" ]; then
-    pass "bodyless module with no dependencies fails compile with the module named"
-  else
-    fail "bodyless module with no dependencies fails compile with the module named"
-    cat "$_tmp/bodyless.err" >&2
-  fi
+  fail "compiler rejects a bodyless module with no dependencies by name"
+  cat "$_tmp/bodyless.err" >&2
 fi
-cp "$_bodyless_saved" "$_project/shell/release/module-registry.tsv"
+_reject_meta bodyless_orphan 'metadata: missing required metadata field: load or requires' \
+  name=bodyless_orphan version= side_effect=read-only requires= optional= shells=bash platforms=any exports=
 
-# Registry rows that would silently change case dispatch are rejected up front.
-_reject_registry_row \
-  'brack[1]		read-only			bash	any	brack_loaded	modules/first_fail.sh		shell/module.d' \
-  'invalid module name in registry: brack[1]'
-_reject_registry_row \
-  'missing_platform		read-only			bash		missing_platform_loaded	modules/first_fail.sh		shell/module.d' \
-  'missing platforms for registry module: missing_platform'
-_reject_registry_row \
-  'bad_effect		weird-effect			bash	any	bad_effect_loaded	modules/first_fail.sh		shell/module.d' \
-  'invalid side_effect for registry module bad_effect: weird-effect'
-_reject_registry_row \
-  'bad_source		read-only			bash	any	bad_source_loaded	modules/first_fail.sh		shell/mod*' \
-  'invalid registry source for module bad_source: shell/mod*'
-_reject_registry_row "$(printf 'bad_layer_name\t\tread-only\t\t\tsh\tany\t\tmodules/x.sh\t\tshell/layers/l)/module.d')" \
-  'invalid layer source in registry for module bad_layer_name: shell/layers/l)/module.d'
-_reject_registry_row "$(printf 'reserved_export\t\tread-only\t\t\tsh\tany\tif\tmodules/x.sh\t\tshell/module.d')" \
-  'invalid export for registry module reserved_export: if'
-_reject_registry_row \
-  'bad_exports		read-only			bash	any	bad_exports$(id)	modules/first_fail.sh		shell/module.d' \
-  'invalid export for registry module bad_exports: bad_exports$(id)'
+# Values that would change case dispatch or plan source text are rejected up
+# front. Unsafe registry sources and layer names are covered by the registry
+# contract, where the sources are discovered.
+_reject_meta brack 'metadata: invalid module name: brack[1]' \
+  'name=brack[1]' version= side_effect=read-only requires= optional= shells=bash platforms=any exports= load=modules/first_fail.sh
+_reject_meta missing_platform 'metadata: missing required metadata field: platforms' \
+  name=missing_platform version= side_effect=read-only requires= optional= shells=bash exports= load=modules/first_fail.sh
+_reject_meta bad_effect 'metadata: invalid side_effect: weird-effect' \
+  name=bad_effect version= side_effect=weird-effect requires= optional= shells=bash platforms=any exports= load=modules/first_fail.sh
+_reject_meta reserved_export 'metadata: invalid export (reserved word): if' \
+  name=reserved_export version= side_effect=read-only requires= optional= shells=bash platforms=any exports=if load=modules/first_fail.sh
+_reject_meta bad_exports 'metadata: invalid export: bad_exports$(id)' \
+  name=bad_exports version= side_effect=read-only requires= optional= shells=bash platforms=any 'exports=bad_exports$(id)' load=modules/first_fail.sh
 
 # The generated header names valise, and rebuilding is deterministic.
 if grep -F '# Generated by valise compile; DO NOT EDIT.' \
-  "$_tmp/release-reload/generated/installed-modules.bash" >/dev/null; then
+  "$_tmp/release-reload/plans/bash.sh" >/dev/null; then
   pass "plan header names valise"
 else
   fail "plan header names valise"
@@ -751,18 +696,18 @@ fi
 
 # The header names the plan format version. A consumer that reads the plan
 # must be able to tell which format it is holding, so the marker is pinned.
-if grep -F '# shell-profile-installed-modules-v1' \
-  "$_tmp/release-reload/generated/installed-modules.bash" >/dev/null; then
+if grep -F '# valise-plan-v2' \
+  "$_tmp/release-reload/plans/bash.sh" >/dev/null; then
   pass "plan header names the plan format version"
 else
   fail "plan header names the plan format version"
-  head -5 "$_tmp/release-reload/generated/installed-modules.bash" >&2
+  head -5 "$_tmp/release-reload/plans/bash.sh" >&2
 fi
 rm -rf "$_tmp/release-reload-2"
 if (cd "$_project" && "$_valise" build --bundle=reload "$_tmp/release-reload-2") \
   >"$_tmp/reload-2.out" 2>"$_tmp/reload-2.err" &&
-  cmp -s "$_tmp/release-reload/shell/install/profile-release.manifest" \
-    "$_tmp/release-reload-2/shell/install/profile-release.manifest"; then
+  cmp -s "$_tmp/release-reload/manifest.tsv" \
+    "$_tmp/release-reload-2/manifest.tsv"; then
   pass "repeated build produces an identical manifest"
 else
   fail "repeated build produces an identical manifest"
@@ -779,7 +724,7 @@ _parity_loader() {
   _pl_wanted=$2
   _pl_out=$3
   _pl_err=$4
-  PARITY_MODE=$_pl_mode PARITY_WANTED=$_pl_wanted PARITY_PROBES=$_parity_probes PARITY_ROOT=$_project/shell \
+  PARITY_MODE=$_pl_mode PARITY_WANTED=$_pl_wanted PARITY_PROBES=$_parity_probes PARITY_ROOT=$_project \
     /bin/bash -c '
       . "$1/lib/metadata.sh"
       . "$1/lib/loader.sh"
@@ -804,7 +749,7 @@ _parity_plan() {
   _pp_err=$4
   VALISE_MODE=$_pp_mode VALISE_MODULE_ROOT=$_pp_release PARITY_PROBES=$_parity_probes \
     /bin/bash -c '
-      . "$VALISE_MODULE_ROOT/generated/installed-modules.bash"
+      . "$VALISE_MODULE_ROOT/plans/bash.sh"
       _status=$?
       printf "status=%s\n" "$_status"
       for _probe in $PARITY_PROBES; do

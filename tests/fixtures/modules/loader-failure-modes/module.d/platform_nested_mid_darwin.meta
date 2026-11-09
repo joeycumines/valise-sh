@@ -1,9 +1,8 @@
 name=platform_nested_mid_darwin
 requires=platform_edge_blocked_linux
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=platform_nested_mid_darwin_loaded
-updates=
 load=modules/platform_nested_mid_darwin.sh

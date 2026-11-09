@@ -1,0 +1,9 @@
+name=contrib_demo_greeting
+version=1.0.0
+side_effect=read-only
+requires=
+optional=
+shells=posix
+platforms=any
+exports=contrib_demo_greeting_ready
+load=modules/shared/contrib_demo_greeting.sh

@@ -1,4 +1,0 @@
-name	version	side_effect	requires	optional	shells	platforms	exports	load	updates	source
-greeting	1.0.0	read-only			sh bash zsh ksh	any	greet	modules/greeting.sh		shell/module.d
-profile_main	1.0.0	read-only	greeting		bash zsh ksh	any				shell/module.d
-contrib_demo_greeting	1.0.0	read-only			sh bash zsh ksh	any	contrib_demo_greeting_ready	modules/shared/contrib_demo_greeting.sh		shell/layers/demo/module.d

@@ -1,0 +1,8 @@
+bundle	shell	roots
+# Each row names a bundle, a shell (sh bash zsh ksh fish), and the
+# space-separated root modules for that shell. A bare name means the module
+# in module.d/, else the only module of that name; name@layers/<p>/module.d
+# names a layer module exactly.
+default	bash	profile_main contrib_demo_greeting
+default	zsh	profile_main contrib_demo_greeting
+default	ksh	profile_main contrib_demo_greeting

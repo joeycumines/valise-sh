@@ -89,7 +89,7 @@ printf '  valise: %s\n' "$_valise"
 printf '  home: %s\n\n' "$_test_home"
 
 # --- Version ---
-check_output_equals "version prints version string" "0.2.0" "$_valise" version
+check_output_equals "version prints version string" "0.3.0" "$_valise" version
 
 # The release policy requires package.json and bin/valise to carry the same
 # version. A bump that updates one and forgets the other ships a tarball
@@ -164,13 +164,14 @@ mkdir -p "$_mm_tree/bin"
 printf '#!/bin/sh\necho hi\n' >"$_mm_tree/bin/tool.sh"
 chmod 0755 "$_mm_tree/bin/tool.sh"
 printf 'plain\n' >"$_mm_tree/readme.txt"
+chmod 0644 "$_mm_tree/readme.txt"
 if "$_valise" make-manifest "$_mm_tree" >"$_test_home/make-manifest.out" 2>&1; then
   pass "make-manifest writes a manifest for a tree"
 else
   fail "make-manifest writes a manifest for a tree"
 fi
 check_output_contains "make-manifest reports file count" "2 files" cat "$_test_home/make-manifest.out"
-_mm_manifest="$_mm_tree/shell/install/profile-release.manifest"
+_mm_manifest="$_mm_tree/manifest.tsv"
 _mm_row1=$(awk -F'\t' 'NR==3 { print $1, $2, $3, $4 }' "$_mm_manifest")
 if [ "$_mm_row1" = "bin/tool.sh bin/tool.sh 0755 0555" ]; then
   pass "make-manifest records executable mode pair"
@@ -208,7 +209,7 @@ chmod 0755 "$_mm_outdir"
 if "$_valise" make-manifest "$_mm_tree" --output "$_mm_outdir" >/dev/null 2>&1; then
   fail "make-manifest rejects a directory output"
 elif [ "$(stat -c %a "$_mm_outdir" 2>/dev/null || stat -f %Lp "$_mm_outdir")" = 755 ] &&
-  [ ! -e "$_mm_outdir/profile-release.manifest" ]; then
+  [ ! -e "$_mm_outdir/manifest.tsv" ]; then
   pass "make-manifest rejects a directory output without changing it"
 else
   fail "make-manifest rejects a directory output without changing it"
@@ -283,15 +284,16 @@ done
 # a built checkout must still ship only the intended example sources.
 if command -v npm >/dev/null 2>&1; then
   _pack_probe="$_test_home/pack-probe"
+  # One listed example file, then build output beside it and below it.
   mkdir -p "$_pack_probe/examples/profile-project/build/release" \
            "$_pack_probe/examples/e2e/build/release" \
-           "$_pack_probe/examples/profile-project/shell"
+           "$_pack_probe/examples/profile-project/modules" \
+           "$_pack_probe/examples/profile-project/vendor/dep/build/release"
+  printf 'source\n' >"$_pack_probe/examples/profile-project/modules/greeting.sh"
   printf 'generated\n' >"$_pack_probe/examples/profile-project/build/release/plan.sh"
   printf 'generated\n' >"$_pack_probe/examples/e2e/build/release/plan.sh"
-  printf 'source\n' >"$_pack_probe/examples/profile-project/shell/keep.sh"
   # A build directory nested below a subdirectory is the case that a
   # single-level '!examples/*/build/' would miss, so pin it too.
-  mkdir -p "$_pack_probe/examples/profile-project/vendor/dep/build/release"
   printf 'generated\n' >"$_pack_probe/examples/profile-project/vendor/dep/build/release/plan.sh"
   cp "$_pkg_root/package.json" "$_pack_probe/package.json"
   _pack_status=0
@@ -310,15 +312,54 @@ if command -v npm >/dev/null 2>&1; then
     else
       fail "npm pack excludes generated examples build output (no example files listed)"
     fi
-    if printf '%s\n' "$_pack_out" | grep -Eq '"path": *"examples/profile-project/shell/keep\.sh"'; then
-      pass "npm pack still ships example project sources"
+    # The file list is explicit, so an unlisted example file cannot ship and a
+    # deleted source makes npm fail; this probe pins the exclusion.
+    _pack_has=$(printf '%s\n' "$_pack_out" | grep -E '"path": *"examples/profile-project/modules/greeting\.sh"' | wc -l)
+    _pack_absent=$(printf '%s\n' "$_pack_out" | grep -E '"path": *"examples/profile-project/modules/keep\.sh"' | wc -l)
+    if [ "$_pack_has" -eq 1 ] && [ "$_pack_absent" -eq 0 ]; then
+      pass "npm pack ships listed example sources and nothing else"
     else
-      fail "npm pack still ships example project sources"
+      fail "npm pack ships listed example sources and nothing else"
     fi
   fi
   unset _pack_probe _pack_out _pack_status
 else
   printf '  SKIP: npm pack example exclusion check (npm unavailable)\n'
+fi
+
+# The files list names every shipped file: packing a tree that holds the
+# tracked files plus stray local files, including ones whose names look like
+# shipped sources, must ship exactly the tracked payload. A tracked file
+# missing from the list fails here too.
+if command -v npm >/dev/null 2>&1 && command -v git >/dev/null 2>&1 &&
+  git -C "$_pkg_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  _allow_probe="$_test_home/allow-probe"
+  mkdir -p "$_allow_probe"
+  (cd "$_pkg_root" && git ls-files -z | xargs -0 tar cf -) | (cd "$_allow_probe" && tar xf -)
+  for _junk in lib/.env lib/cli/.cache/c module.d/x.meta.bak docs/notes/private.md \
+    examples/.env examples/e2e/node_modules/x/a.sh examples/e2e/build/release/plans/sh.sh \
+    modules/system/notes.txt bin/valise.orig entrypoints/scratch.txt \
+    lib/scratch.sh lib/cli/extra.sh docs/private.md module.d/stray.meta \
+    examples/profile-project/modules/stray.sh examples/e2e/stray.tsv; do
+    mkdir -p "$_allow_probe/${_junk%/*}"
+    printf 'junk\n' >"$_allow_probe/$_junk"
+  done
+  _allow_out=$(cd "$_allow_probe" && npm pack --dry-run --json 2>/dev/null |
+    sed -n 's/^ *"path": *"\([^"]*\)".*/\1/p' | LC_ALL=C sort) || _allow_out=
+  _allow_want=$(cd "$_pkg_root" && { git ls-files bin lib modules module.d entrypoints manifests docs examples |
+    grep -v -e '/\.gitkeep$' -e '/build/' -e '/\.gitignore$'; printf '%s\n' LICENSE CHANGELOG.md README.md package.json; } |
+    LC_ALL=C sort)
+  if [ -n "$_allow_out" ] && [ "$_allow_out" = "$_allow_want" ]; then
+    pass "npm pack ships exactly the tracked payload from a tree with stray files"
+  else
+    fail "npm pack ships exactly the tracked payload from a tree with stray files"
+    printf '%s\n' "$_allow_out" >"$_test_home/allow.got"
+    printf '%s\n' "$_allow_want" >"$_test_home/allow.want"
+    diff "$_test_home/allow.want" "$_test_home/allow.got" >&2 || :
+  fi
+  unset _allow_probe _allow_out _allow_want _junk
+else
+  printf '  SKIP: npm pack allowlist check (npm or git unavailable)\n'
 fi
 unset _pkg_root
 if command -v npm >/dev/null 2>&1; then
@@ -343,7 +384,7 @@ if command -v npm >/dev/null 2>&1; then
   else
     fail "packed tarball extracts"
   fi
-  for _tar_member in package/bin/valise package/entrypoints/profile.sh package/entrypoints/fish/profile.fish package/lib/loader.sh package/lib/metadata.sh package/lib/capabilities.sh package/lib/fish/loader.fish package/lib/fish/metadata.fish package/manifests/parser-support.tsv package/module.d/contrib_path.meta package/modules/system/contrib_path.sh package/docs/installation.md package/docs/release-policy.md package/examples/local/modules/hello_valise.sh package/LICENSE package/CHANGELOG.md; do
+  for _tar_member in package/bin/valise package/lib/cli/usage.sh package/lib/cli/common.sh package/lib/cli/store.sh package/lib/cli/fish-hook.sh package/lib/cli/integration.sh package/lib/cli/project.sh package/entrypoints/profile.sh package/lib/fish/profile.fish package/lib/loader.sh package/lib/metadata.sh package/lib/capabilities.sh package/lib/fish/loader.fish package/lib/fish/metadata.fish package/manifests/parser-support.tsv package/module.d/valise_path.meta package/modules/system/valise_path.sh package/docs/installation.md package/docs/release-policy.md package/examples/local/modules/hello_valise.sh package/LICENSE package/CHANGELOG.md; do
     if [ -f "$_tar_root/$_tar_member" ]; then
       pass "tarball contains $_tar_member"
     else
@@ -352,9 +393,9 @@ if command -v npm >/dev/null 2>&1; then
   done
   if VALISE_ROOT="$_tar_root/package" \
      VALISE_MODULE_ROOT="$_tar_root/package" \
-     VALISE_MODULES='contrib_pager' \
+     VALISE_MODULES='valise_pager' \
      VALISE_MODE=strict \
-     /bin/sh -c '. "$VALISE_ROOT/entrypoints/profile.sh" || exit 99; command -v contrib_pager_defaults >/dev/null 2>&1' >/dev/null 2>&1; then
+     /bin/sh -c '. "$VALISE_ROOT/entrypoints/profile.sh" || exit 99; command -v valise_pager_defaults >/dev/null 2>&1' >/dev/null 2>&1; then
     pass "module loads from the extracted tarball tree"
   else
     fail "module loads from the extracted tarball tree"
@@ -362,7 +403,7 @@ if command -v npm >/dev/null 2>&1; then
   _npm_prefix="$_test_home/npm-prefix"
   if npm install --global --offline --prefix "$_npm_prefix" "$_npm_root/$_npm_tgz" >"$_test_home/npm-install.out" 2>&1; then
     pass "npm installs the packed CLI without a registry"
-    if "$_npm_prefix/bin/valise" version 2>/dev/null | grep '^0.2.0$' >/dev/null 2>&1; then
+    if "$_npm_prefix/bin/valise" version 2>/dev/null | grep '^0.3.0$' >/dev/null 2>&1; then
       pass "installed npm binary runs"
     else
       fail "installed npm binary runs"
@@ -394,7 +435,7 @@ fi
 
 # --- Install (requires manifest context) ---
 # Create a minimal fake manifest for testing
-_manifest_dir="$_test_home/repo/shell/install"
+_manifest_dir="$_test_home/repo"
 mkdir -p "$_manifest_dir"
 _release_sha="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 _fixture_source="$_test_home/repo/fixture.sh"
@@ -410,10 +451,20 @@ else
   printf '%s\n' 'FAIL: no SHA-256 utility (need sha256sum or shasum)' >&2
   exit 1
 fi
+# install accepts only a release that declares format=2.
+_release_conf_source="$_test_home/repo/valise-release.conf"
+printf 'format=2\n' >"$_release_conf_source"
+chmod 0644 "$_release_conf_source"
+if command -v sha256sum >/dev/null 2>&1; then
+  _release_conf_digest=$(sha256sum "$_release_conf_source" | cut -d' ' -f1)
+else
+  _release_conf_digest=$(shasum -a 256 "$_release_conf_source" | cut -d' ' -f1)
+fi
 printf '%s\n' \
-  'shell-profile-release-manifest-v1' \
+  'valise-manifest-v2' \
   'destination	source	source_mode	install_mode	bytes	sha256' \
-  "fixture.sh	fixture.sh	0644	0444	10	$_fixture_digest" > "$_manifest_dir/profile-release.manifest"
+  "fixture.sh	fixture.sh	0644	0444	10	$_fixture_digest" \
+  "valise-release.conf	valise-release.conf	0644	0444	9	$_release_conf_digest" > "$_manifest_dir/manifest.tsv"
 
 # Test install from repo root context
 (cd "$_test_home/repo" && "$_valise" install 2>&1)
@@ -564,25 +615,30 @@ else
 fi
 
 # --- Atomic symlink swap test ---
-# Create two fake releases and verify swap doesn't touch .profile
-_rel1="$XDG_DATA_HOME/valise/releases/release_a"
-_rel2="$XDG_DATA_HOME/valise/releases/release_b"
-_installed_active=$(readlink "$XDG_CONFIG_HOME/valise/active")
-mkdir -p "$_rel1" "$_rel2"
-cp -p "$_installed_active/fixture.sh" "$_rel1/fixture.sh"
-cp -p "$_installed_active/fixture.sh" "$_rel2/fixture.sh"
-chmod 0444 "$_rel1/fixture.sh" "$_rel2/fixture.sh"
-chmod 0555 "$_rel1" "$_rel2"
+# Install a second real release beside the first (release use verifies the
+# sealed manifest snapshot, whose digest is the release name) and verify the
+# swap does not touch .profile.
+_rel1=$(cd "$XDG_CONFIG_HOME/valise/active" && pwd -P)
+_repo2="$_test_home/repo2"
+mkdir -p "$_repo2"
+printf '# fixture two\n' >"$_repo2/fixture.sh"
+cp "$_release_conf_source" "$_repo2/valise-release.conf"
+chmod 0644 "$_repo2/fixture.sh" "$_repo2/valise-release.conf"
+"$_valise" make-manifest "$_repo2" >/dev/null
+(cd "$_repo2" && "$_valise" install --no-integration >/dev/null)
+_rel2=$(cd "$XDG_CONFIG_HOME/valise/active" && pwd -P)
+release_a=${_rel1##*/}
+release_b=${_rel2##*/}
 
 # Set initial active
-ln -sfn "$_rel1" "$XDG_CONFIG_HOME/valise/active"
+(cd "$_test_home/repo" && "$_valise" release use "$release_a" >/dev/null)
 
 # Create a .profile that should NOT be modified by variant switch
 printf '# test profile\n' > "$_test_home/.profile"
 _profile_before=$(cat "$_test_home/.profile")
 
 # Switch variant
-(cd "$_test_home/repo" && "$_valise" release use release_b 2>/dev/null)
+(cd "$_test_home/repo" && "$_valise" release use "$release_b" >/dev/null)
 
 _profile_after=$(cat "$_test_home/.profile")
 if [ "$_profile_before" = "$_profile_after" ]; then
@@ -605,7 +661,7 @@ else
 fi
 
 # Switch back
-(cd "$_test_home/repo" && "$_valise" release use release_a 2>/dev/null)
+(cd "$_test_home/repo" && "$_valise" release use "$release_a" >/dev/null)
 _active_target=$(readlink "$XDG_CONFIG_HOME/valise/active" 2>/dev/null || :)
 _active_resolved=$(cd "$_active_target" 2>/dev/null && pwd -P) || _active_resolved=
 _rel1_resolved=$(cd "$_rel1" 2>/dev/null && pwd -P) || _rel1_resolved=

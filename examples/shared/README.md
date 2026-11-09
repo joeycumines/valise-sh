@@ -9,41 +9,20 @@ be pinned to a reviewed commit in the consuming project.
 
 | Module | Version | Export | Behavior |
 |---|---|---|---|
-| `contrib_shared_paths` | 1.0.0 | `contrib_shared_paths_setup` | Adds `$HOME/.local/bin` and `$HOME/.go/bin` using `contrib_path_prepend`. |
+| `contrib_shared_paths` | 1.0.0 | `contrib_shared_paths_setup` | Adds `$HOME/.local/bin` and `$HOME/.go/bin` using `valise_path_prepend`. |
 | `contrib_shared_umask` | 1.0.0 | `contrib_shared_umask_secure` | Sets `umask 077` when explicitly called. |
 
 The modules and their metadata are under `modules/shared/` and
 `module.d/`. Layer-only modules use the `contrib_` prefix. The paths module
-requires the engine's `contrib_path` module; this exercises dependency
-resolution from a layer into the primary module root.
+requires the engine's `valise_path` module; this exercises dependency
+resolution from a layer into the engine's modules.
 
-## Use in the sample profile
+## Use in a project
 
-From the repository root, build the sample release and install it from the
-e2e directory. Installation adds an integration hook under `HOME`; use a
-temporary home to avoid changing your own shell startup files (see the top
-level README).
-
-```sh
-sh examples/e2e/build-manifest.sh
-cd examples/e2e/build/release
-valise install
-valise release verify
-```
-
-Then load the shared modules from a POSIX shell. The active release path
-below uses the default XDG locations; if you set `XDG_CONFIG_HOME`, use that
-instead.
-
-```sh
-_active=$(cd "$HOME/.config/valise/active" && pwd -P)
-VALISE_MODULE_ROOT="$_active" \
-VALISE_MODULE_PATH="$_active/layer/shared" \
-VALISE_MODULES='e2e_layer_probe contrib_shared_umask' \
-VALISE_MODE=strict \
-. "$_active/entrypoints/profile.sh"
-```
-
-For a Fish example and details about provider pinning, see
-[the end-to-end walkthrough](../e2e/README.md) and the
-[module ABI](../../docs/module-abi.md).
+A consuming project vendors this directory as `layers/<provider>/`, for
+example `layers/shared/`, and names the modules it wants in `bundles.tsv` or
+in the `requires=` and `optional=` fields of its own modules. `valise build`
+then copies only the provider modules some plan loads into the release under
+`layers/shared/`. [The end-to-end walkthrough](../e2e/README.md) shows the
+steps against the sample project; see the [module ABI](../../docs/module-abi.md)
+for dependency resolution across a project and its layers.

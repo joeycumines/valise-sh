@@ -1,40 +1,32 @@
-# profile-project: a complete valise project
+# profile-project: a small valise project
 
-This is a small but complete consuming project. It shows every piece a
-profile project needs: metadata that describes the modules, module bodies,
-a provider layer contributed by somebody else, a bundle that says which
-roots load, a variant that says what to leave out, and project defaults.
-
-Everything here is plain text. There is no build script and no hand-written
-registry. `valise` reads the metadata and generates what it needs.
+This project has two modules of its own, one module from a provider layer, a
+bundle, and two variants. Everything is plain text; `valise` reads the
+metadata and generates the rest.
 
 ## What is in it
 
 ```
-shell/
-  module.d/                          the project's own modules
-    profile_main.meta                the entry module
-    greeting.meta                    a dependency of profile_main
-  modules/                           the bodies of those modules
-    greeting.sh
-  layers/demo/                       a provider layer
-    module.d/contrib_demo_greeting.meta
-    modules/shared/contrib_demo_greeting.sh
-  release/
-    bundle-roots                     which roots load, per shell
-    install-variants                 named exclusion sets
-    project.conf                     defaults for build and apply
+valise.conf                          default bundle and variant
+module.d/
+  profile_main.meta                  the root: requires greeting
+  greeting.meta                      defines greet
+modules/
+  greeting.sh
+layers/demo/                         a provider layer
+  module.d/contrib_demo_greeting.meta
+  modules/shared/contrib_demo_greeting.sh
+bundles.tsv                          the roots for bash, zsh, and ksh
+variants.tsv                         default and workstation-lean
 ```
 
-`profile_main` is a meta module: it has `requires=greeting` and no body of
-its own, so there is no `modules/profile_main.sh`. It exists only to name
-what the project loads. `greeting` is an ordinary module that defines
-`greet`.
+`profile_main` is a meta module: it has `requires=greeting` and no body. It
+names what the project loads. `greeting` is an ordinary module with
+`shells=posix`.
 
-The layer under `shell/layers/demo/` is a provider layer. Its module is
-named `contrib_demo_greeting`, following the `contrib_<owner>_<thing>`
-convention, and its body lives under `layers/demo/` in the installed
-release, so it never collides with the project's own modules.
+The layer module is named `contrib_demo_greeting`, following the
+`contrib_<owner>_<thing>` convention. A release copies it to
+`layers/demo/`, so it cannot collide with the project's own files.
 
 ## Build it
 
@@ -44,60 +36,38 @@ From this directory:
 valise build
 ```
 
-That compiles a plan for each supported shell and writes a release under
-`build/release/`. The release contains:
-
 ```
 build/release/
-  generated/installed-modules.bash    compiled plan for bash
-  generated/installed-modules.zsh     compiled plan for zsh
-  generated/installed-modules.ksh     compiled plan for ksh
-  vendor/shell-profile/lib/capabilities.sh
-  module.d/                          the project's metadata
-  modules/                           the project's bodies
-  layers/demo/module.d/              the layer's metadata
-  layers/demo/modules/shared/        the layer's bodies
-  shell/release/                     registry, bundle, variants, defaults
-  shell/install/profile-release.manifest
+  valise-release.conf                bundle, variant, roots, modules
+  manifest.tsv                       every file with its size and SHA-256
+  plans/bash.sh                      the compiled plan for bash
+  plans/zsh.sh
+  plans/ksh.sh
+  runtime/capabilities.sh            the sp_cap_* helpers
+  module.d/, modules/                the project's modules
+  layers/demo/                       the layer module
 ```
 
-The plans are plain POSIX shell. You can read one to see exactly what will
-run.
+The plans are plain POSIX shell; read one to see what will run at startup.
+`bundles.tsv` has no `sh` row, so dash and other plain `sh` shells load
+nothing.
 
 ## Load it
 
+Run this in a scratch `HOME` (see the main README) unless you want it in your
+real startup files:
+
 ```sh
 valise apply
-```
-
-`apply` builds the release, installs it under your XDG data directory, and
-writes a managed block into the startup files your shells read. It prints
-what it changed and where.
-
-The managed block is guarded by a source-once variable, so your login shell
-loads the profile exactly once. It prefers the compiled plan for your shell
-and falls back to the loader if the release has no compiled plan.
-
-zsh does not read `~/.profile` on its own, so when zsh is present `apply`
-writes the same managed block to `~/.zprofile`. bash reads `~/.profile` only
-when no `~/.bash_profile` exists; `apply` never creates one, so it does not
-shadow your `~/.profile`.
-
-Now open a new login shell:
-
-```sh
-bash -l
-greet
+bash -l -c greet
 # hello from the valise profile project
 ```
 
-The same works in zsh and ksh. It does not work in dash: the plans are
-compiled for bash, zsh and ksh, and dash is not one of them.
-
-To undo it, remove the managed block from every startup file `apply`
-reported.
-
-To check the current state:
+`apply` builds the release, installs it under your XDG data directory, and
+writes a managed block into `~/.profile`, `~/.zprofile` when zsh is
+installed, and `~/.bashrc` or `~/.zshrc` when that is your shell. It prints
+each file it wrote. `valise apply --dry-run` prints what it would change
+without changing it.
 
 ```sh
 valise status
@@ -105,77 +75,77 @@ valise status
 
 ```
 project: /path/to/profile-project
-variant: default
-bundle: default
+project default bundle: default
+project default variant: default
 integration: /home/you/.profile: managed block present
 integration: /home/you/.zprofile: managed block present
-registry: up to date
-active release: 0a723dcb0860bcae3ea259c631aaa76ce8e0b4e6991448979018c1d08fc35802
-build output: /path/to/profile-project/build/release
+active release: ad98ea2ba30bb6c6d4f08b6dec59585228cdf855b814543a37f80ee0f0518773
+active bundle: default
+active variant: default
+active built by valise: 0.3.0
+build output: /path/to/profile-project/build/release (bundle default, variant default)
 drift: active release matches build output
 ```
 
-`status` reports the active release, the startup files, and whether the
-installed release still matches what the project would build. If you edit a
-module and re-apply, the release changes and the drift line tells you the
-active release is no longer the one you built.
+Edit a module and run `valise status` again after `valise build`: the drift
+line reports that the active release no longer matches the build.
+
+`valise uninstall` removes the managed blocks, the Fish hook, and the
+installed releases.
 
 ## Try a variant
 
-The project ships two variants. `default` loads everything;
-`workstation-lean` leaves out the provider layer:
+`workstation-lean` leaves out the layer module:
 
 ```sh
 valise explain-variant workstation-lean
 ```
 
-To use the lean variant, set it in `shell/release/project.conf`:
+```
+Variant: workstation-lean
+Description: No provider layer
+Excluded modules: contrib_demo_greeting@layers/demo/module.d
 
-```sh
-variant=workstation-lean
+Per-shell impact (bundle default):
+  bash: 1 of 2 roots, 2 of 3 modules
+  zsh: 1 of 2 roots, 2 of 3 modules
+  ksh: 1 of 2 roots, 2 of 3 modules
 ```
 
-Then re-apply. The `contrib_demo_greeting` module disappears from the plan
-and the rest still loads.
-
-An exclusion that removes a module something else still depends on is an
-error, not a silent surprise:
-
-```
-ERROR: variant exclusion breaks a required dependency: profile_main requires contrib_demo_greeting
-```
+Build it with `valise apply --variant=workstation-lean`, or set
+`variant=workstation-lean` in `valise.conf`. An exclusion that removes a
+module something else still requires fails the build and names both
+modules.
 
 ## Try a bundle
 
-`shell/release/bundle-roots` says which roots load for each shell:
+`bundles.tsv` lists the roots for each shell:
 
 ```
-default	bash	profile_main contrib_demo_greeting@shell/layers/demo/module.d
+default	bash	profile_main contrib_demo_greeting
 ```
 
-The first root is a bare name, meaning a module from the project's own
-`shell/module.d/`. The second is qualified with its source, so it is
-unambiguous even though it lives in a layer.
+A bare name means the project's own module when there is one, otherwise the
+only module with that name. `name@layers/demo/module.d` names the layer's
+copy exactly, which you need when two sources define the same name.
 
 ```sh
 valise explain-bundles
 ```
 
-## Check the layer
-
-A provider layer has rules: the `contrib_` prefix, a version, a body that
-exists, and no dependency that escapes the layer.
+## Check it
 
 ```sh
+valise lint          # metadata, layers, every bundle and variant, syntax
 valise layer-lint demo
 # layer demo: 1 module(s) validated
 ```
 
 ## Where to go next
 
-- [The module ABI](../../docs/module-abi.md) — every metadata field.
-- [The authoring guide](../../docs/contrib-modules.md) — writing modules.
-- [The compile and build contract](../../docs/variants.md) — the registry,
-  bundles, variants, and what a compiled plan contains.
-- [Shared modules](../../docs/shared-modules.md) — how layer modules are
+- [Projects](../../docs/projects.md): bundles, variants, compile, and build.
+- [Writing modules](../../docs/contrib-modules.md): authoring, linting, and
+  testing.
+- [The module ABI](../../docs/module-abi.md): every metadata field.
+- [Shared modules](../../docs/shared-modules.md): how layer modules are
   named and owned.

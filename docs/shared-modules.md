@@ -7,18 +7,20 @@ removed.
 
 ## Namespace and ownership
 
-The loader enforces the layer namespace. This policy assigns ownership and
-review responsibility.
+`valise build`, `valise lint`, and `valise layer-lint` enforce the layer
+namespace. This policy assigns ownership and review responsibility.
 
-- Layer-only modules must use the `contrib_` prefix. The loader rejects
-  other layer-only names (see [module-abi.md](module-abi.md)).
+- Layer modules must use the `contrib_` prefix, and the `valise_` prefix
+  belongs to the engine (see [module-abi.md](module-abi.md#layers)).
 - Module names are owned by the tree that ships them. The engine
   repository owns every module under its `module.d/`. A provider
   repository owns every module in its layer tree.
-- A module with the same name in multiple roots must have matching metadata
-  and body bytes. Different bytes or different `version=` values make the
-  load fail with a diagnostic naming the providers. Identical copies resolve
-  by root priority; providers should still agree on which tree owns the name.
+- When two sources in a project define the same name, a bare bundle root
+  or exclusion naming it is ambiguous and the build fails until it is
+  qualified as `name@source`; a dependency resolves to its own source first. The Fish loader and the development loader accept several
+  providers of one name only when their metadata and bodies are
+  byte-identical. Either way, providers should agree on which tree owns a
+  name.
 - A provider repository that wants its modules consumed must document them
   in an index of its own, following this document's shape (name, version,
   exports, source, status). Consumers read the provider's index to
@@ -46,7 +48,7 @@ consistently across all of its modules, so a consumer can see at a glance
 which provider owns what.
 
 If you must ship a module whose name another provider might already use,
-prefix it with your owner segment anyway — a name collision between two
+prefix it with your owner segment anyway: a name collision between two
 vendored providers is otherwise unresolvable without renaming one of them.
 
 ## What belongs in a layer
@@ -64,19 +66,21 @@ A layer module must have:
   editor, no particular toolchain, model, or theme.
 - **No dependency outside the layer**, apart from the engine's own modules.
   A layer module may require an engine module, but it may not require a
-  module that lives in the consumer's primary root — that dependency cannot
+  module that lives in the consumer's primary root, because that dependency cannot
   be satisfied when someone else vendors the layer.
 
 Everything else stays in the primary root: environment setup, completions,
 tool wrappers, work-specific modules, and the aggregators.
 
-`valise layer-lint <layer-name>` enforces the mechanical half of this. It
+`valise layer-lint <layer-name>` and `valise lint` enforce the mechanical
+half of this. It
 checks that the layer has a `module.d/` directory, that every metadata file
 is a regular file with a safe mode, that every module name carries the
 `contrib_` prefix, that the metadata validates as data, that the version is
 present, that the load target exists as a regular file, and that every
-dependency resolves inside the layer or to an engine module. It needs no
-Python.
+dependency resolves inside the layer or to an engine module. Set
+`lint_layer_forbid` in `valise.conf` to make `valise lint` reject named
+identifiers, such as an employer's, anywhere under `layers/`.
 
 ### 1. Separate generic engines from opinionated presets
 
@@ -116,7 +120,7 @@ contrib_owner_cli_quote     # POSIX, no dependencies
 contrib_owner_cli_local     # needs a non-POSIX shell
 ```
 
-Now the first module keeps `shells=sh bash zsh ksh` and the second declares
+Now the first module keeps `shells=posix` and the second declares
 what it actually needs. The same rule applies to dependencies: a module that
 pulls in a heavy dependency should be separate from one that does not.
 
@@ -130,12 +134,7 @@ consistently.
 A layer module **may** call `sp_cap_*` helpers at run time. A compiled plan
 sources the capability prelude and leaves it in place, so a function the
 module defines can call `sp_cap_os`, `sp_cap_cpu_count`, or any other helper
-long after the profile finished loading. The loader behaves the same way.
-
-This is a change from earlier engine behavior, where the helpers were
-removed after loading and a module function that called one broke. If you
-have a layer that avoided the helpers to work around that, you can now use
-them directly.
+long after the profile finished loading.
 
 Prefer the `sp_cap_*` helpers over open-coding platform-specific commands.
 See [contrib-modules.md](contrib-modules.md) for the list.
@@ -144,11 +143,15 @@ See [contrib-modules.md](contrib-modules.md) for the list.
 
 | Module | Version | Exports | Source | Status |
 |---|---|---|---|---|
-| `contrib_path` | 1.0.0 | `contrib_path_prepend`, `contrib_path_append` | `modules/system/contrib_path.sh` | active |
-| `contrib_editor` | 1.0.0 | `contrib_editor_defaults` | `modules/system/contrib_editor.sh` | active |
-| `contrib_pager` | 1.0.0 | `contrib_pager_defaults` | `modules/system/contrib_pager.sh` | active |
-| `contrib_xdg` | 1.0.0 | `contrib_xdg_defaults` | `modules/system/contrib_xdg.sh` | active |
-| `contrib_history` | 1.0.0 | `contrib_history_defaults` | `modules/system/contrib_history.sh` | active |
+| `valise_path` | 1.0.0 | `valise_path_prepend`, `valise_path_append` | `modules/system/valise_path.sh` | active |
+| `valise_editor` | 1.0.0 | `valise_editor_defaults` | `modules/system/valise_editor.sh` | active |
+| `valise_pager` | 1.0.0 | `valise_pager_defaults` | `modules/system/valise_pager.sh` | active |
+| `valise_xdg` | 1.0.0 | `valise_xdg_defaults` | `modules/system/valise_xdg.sh` | active |
+| `valise_history` | 1.0.0 | `valise_history_defaults` | `modules/system/valise_history.sh` | active |
+| `valise_platform_posix` | — | `sp_platform_*` helpers | `modules/platform/posix.sh` | active |
+| `valise_platform_macos` | — | `sp_platform_macos_*` helpers | `modules/platform/macos/capabilities.sh` | active |
+| `valise_platform_linux` | — | `sp_platform_linux_*` helpers | `modules/platform/linux/capabilities.sh` | active |
+| `valise_platform_bsd` | — | `sp_platform_bsd_*` helpers | `modules/platform/bsd/capabilities.sh` | active |
 
 The example provider tree in this repository
 (`examples/shared/`) additionally ships:
@@ -158,9 +161,7 @@ The example provider tree in this repository
 | `contrib_shared_paths` | 1.0.0 | `contrib_shared_paths_setup` | `examples/shared/modules/shared/contrib_shared_paths.sh` | active |
 | `contrib_shared_umask` | 1.0.0 | `contrib_shared_umask_secure` | `examples/shared/modules/shared/contrib_shared_umask.sh` | active |
 
-These engine-shipped modules predate the owner-segment recommendation and
-keep their existing names; renaming them would break every consumer that
-already vendors them. New modules should use the owner-segment form.
+The example provider's owner segment is `shared`.
 
 Update the index in the same change that adds, renames, deprecates, or
 removes a shared module. Provider repositories should maintain a corresponding
@@ -181,27 +182,27 @@ Every change to a shared module passes the same floor:
    and quiet.
 3. For engine modules, review happens in this repository's normal commit
    review. For provider modules, review happens in the provider
-   repository; the consumer re-applies judgment at re-pin time by
-   reviewing the vendored diff (see the update policy in
-   [module-abi.md](module-abi.md)).
+   repository, and the consumer reviews the vendored diff again when
+   copying a new revision into `layers/<provider>/` (see
+   [module-abi.md](module-abi.md#layers)).
 
 Breaking changes to behavior require a `version=` bump so the skew rule
 can catch mixed-version compositions.
 
 ## Deprecation
 
-A deprecated module keeps shipping unchanged — its bytes stay available
-to every consumer that already pinned them — but is marked for eventual
+A deprecated module keeps shipping unchanged, so its bytes stay available
+to every consumer that already pinned them, but it is marked for eventual
 removal:
 
 1. Set the module's status to `deprecated` in this index.
 2. Freeze its `version=`: no feature work lands; fixes that cannot wait
-   follow the normal re-pin policy with the deprecation still visible.
+   follow the normal update policy with the deprecation still visible.
 3. State the replacement (another module, or none) in the index row.
 
 A module stays deprecated for at least one release before it may be
-removed, so consumers see the deprecation in a re-pin before the
-disappearance. The loader continues to load a deprecated module;
+removed, so consumers see the deprecation in an update before the
+disappearance. Builds continue to include a deprecated module;
 deprecation is a signal to consumers, not a gate.
 
 ## Removal
@@ -214,6 +215,6 @@ Removing a shared module is a release-visible change:
 3. Rebuild the manifest and install: the content-derived release ID
    changes, making the switch to a post-removal release an explicit,
    reviewed act.
-4. Consumers keep working on their already-installed sealed releases —
-   each verifies against its own manifest — and notice the removal at
-   their next re-pin, when the module is absent from the diff.
+4. Consumers keep working on their already-installed sealed releases,
+   each of which verifies against its own manifest, and notice the removal at
+   their next update, when the module is absent from the diff.

@@ -61,11 +61,11 @@ while [ "$i" -le 40 ]; do
     printf 'name=%s\n' "$_name"
     printf 'requires=%s\n' "$_requires"
     printf 'optional=\n'
-    printf 'shells=sh\n'
+    printf 'shells=posix\n'
     printf 'platforms=any\n'
     printf 'side_effect=read-only\n'
     printf 'exports=%s_loaded\n' "$_name"
-    printf 'updates=\n'
+    printf ''
     printf 'load=modules/%s.sh\n' "$_name"
   } >"$_root/module.d/$_name.meta"
   printf '%s_loaded() { :; }\n' "$_name" >"$_root/modules/$_name.sh"

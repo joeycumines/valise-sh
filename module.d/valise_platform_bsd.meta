@@ -1,0 +1,8 @@
+name=valise_platform_bsd
+requires=valise_platform_posix
+optional=
+shells=posix
+platforms=bsd freebsd openbsd netbsd
+side_effect=read-only
+exports=sp_platform_bsd_available sp_platform_bsd_cpu_count sp_platform_bsd_file_mtime
+load=modules/platform/bsd/capabilities.sh

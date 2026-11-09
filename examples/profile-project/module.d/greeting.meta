@@ -1,0 +1,9 @@
+name=greeting
+version=1.0.0
+side_effect=read-only
+requires=
+optional=
+shells=posix
+platforms=any
+exports=greet
+load=modules/greeting.sh

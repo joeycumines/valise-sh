@@ -1,9 +1,8 @@
 name=clobber_utility
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 requires=
 optional=
 load=modules/clobber_utility.sh
 exports=clobber_utility_loaded
-updates=

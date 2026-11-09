@@ -10,31 +10,28 @@ VALISE_REQUIRE_TOOLING ?= $(if $(filter true TRUE 1 yes YES,$(CI) $(GITHUB_ACTIO
 comma := ,
 VALISE_REQUIRED_PARSERS ?= $(if $(filter 1,$(VALISE_REQUIRE_TOOLING)),sh$(comma)dash$(comma)ksh$(comma)busybox-ash$(comma)bash$(comma)fish,)
 
-.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-consumer-profile clean distclean
+VALISE_CLI_LIBS := $(wildcard lib/cli/*.sh)
+
+.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-project-layout test-commands test-lifecycle test-dev-commands test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-consumer-profile clean distclean
 .NOTPARALLEL: check test
 
 TEST_ENV_PATH = /usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
-TEST_RUNNER = PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_REQUIRED_PARSERS="$(VALISE_REQUIRED_PARSERS)" MACOS_PROFILE_PARSER_SEARCH_PATH="$${MACOS_PROFILE_PARSER_SEARCH_PATH:-}" T07_TEST_CHILD_SHELL="$${T07_TEST_CHILD_SHELL:-/bin/bash}" T07_TEST_CHILD_SHELL_ARGS="$${T07_TEST_CHILD_SHELL_ARGS:-}" T07_TEST_CHILD_PATH="$${T07_TEST_CHILD_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
-RUNTIME_TEST_RUNNER = PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_LINUX_IMAGE="$${VALISE_LINUX_IMAGE:-}" VALISE_BSD_IMAGE="$${VALISE_BSD_IMAGE:-}" VALISE_RUNTIME_SEARCH_PATH="$${VALISE_RUNTIME_SEARCH_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
+TEST_RUNNER = umask 022; PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_CONSUMER_PROFILE="$${VALISE_CONSUMER_PROFILE:-}" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_REQUIRED_PARSERS="$(VALISE_REQUIRED_PARSERS)" MACOS_PROFILE_PARSER_SEARCH_PATH="$${MACOS_PROFILE_PARSER_SEARCH_PATH:-}" T07_TEST_CHILD_SHELL="$${T07_TEST_CHILD_SHELL:-/bin/bash}" T07_TEST_CHILD_SHELL_ARGS="$${T07_TEST_CHILD_SHELL_ARGS:-}" T07_TEST_CHILD_PATH="$${T07_TEST_CHILD_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
+RUNTIME_TEST_RUNNER = umask 022; PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_LINUX_IMAGE="$${VALISE_LINUX_IMAGE:-}" VALISE_BSD_IMAGE="$${VALISE_BSD_IMAGE:-}" VALISE_RUNTIME_SEARCH_PATH="$${VALISE_RUNTIME_SEARCH_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
 
 check: syntax test test-fish-syntax test-docs test-detection-contract-busybox test-loader-multi-root-lanes test-e2e
 
 FISH ?= $(shell PATH="$(TEST_ENV_PATH)" command -v fish 2>/dev/null)
 
-test-fish-syntax: lib/fish/loader.fish lib/fish/metadata.fish
+test-fish-syntax: lib/fish/loader.fish lib/fish/metadata.fish lib/fish/profile.fish
 	@if test -z "$(FISH)"; then \
 		if test "$(VALISE_REQUIRE_TOOLING)" = 1; then \
 			echo "FAIL: fish is required for the native Fish syntax check (VALISE_REQUIRE_TOOLING=1)" >&2; exit 1; \
 		else echo "SKIP: fish syntax (install fish or set VALISE_REQUIRE_TOOLING=1 to require it)"; exit 0; fi; \
 	fi; \
-	"$(FISH)" -n lib/fish/loader.fish && \
-	"$(FISH)" -n lib/fish/metadata.fish && \
-	if test -f entrypoints/fish/profile.fish; then \
-		"$(FISH)" -n entrypoints/fish/profile.fish; \
-	fi && \
-	if test -f ../../shell/entrypoints/fish/profile.fish; then \
-		"$(FISH)" -n ../../shell/entrypoints/fish/profile.fish; \
-	fi
+	for f in lib/fish/loader.fish lib/fish/metadata.fish lib/fish/profile.fish; do \
+		"$(FISH)" -n "$$f" || exit 1; \
+	done
 
 syntax: test-parser-support
 
@@ -70,6 +67,10 @@ test: test-runner-quarantine
 	@$(MAKE) test-compiler-plan
 	@$(MAKE) test-registry
 	@$(MAKE) test-project-ux
+	@$(MAKE) test-project-layout
+	@$(MAKE) test-commands
+	@$(MAKE) test-lifecycle
+	@$(MAKE) test-dev-commands
 	@$(MAKE) test-compiler-benchmark
 	@$(MAKE) test-fish-runtime
 	@$(MAKE) test-consumer-profile
@@ -192,28 +193,40 @@ test-entrypoint-runtime: tests/entrypoint-runtime.test.sh entrypoints/profile.sh
 test-capabilities: tests/capabilities.test.sh lib/capabilities.sh entrypoints/profile.sh
 	@$(TEST_RUNNER)
 
-test-contrib-modules: tests/contrib-modules.test.sh entrypoints/profile.sh lib/metadata.sh lib/capabilities.sh lib/loader.sh module.d/contrib_path.meta module.d/contrib_editor.meta module.d/contrib_pager.meta module.d/contrib_xdg.meta module.d/contrib_history.meta modules/system/contrib_path.sh modules/system/contrib_editor.sh modules/system/contrib_pager.sh modules/system/contrib_xdg.sh modules/system/contrib_history.sh
+test-contrib-modules: tests/contrib-modules.test.sh entrypoints/profile.sh lib/metadata.sh lib/capabilities.sh lib/loader.sh module.d/valise_path.meta module.d/valise_editor.meta module.d/valise_pager.meta module.d/valise_xdg.meta module.d/valise_history.meta modules/system/valise_path.sh modules/system/valise_editor.sh modules/system/valise_pager.sh modules/system/valise_xdg.sh modules/system/valise_history.sh
 	@$(TEST_RUNNER)
 
-test-non-macos-runtime: tests/non-macos-runtime.test.sh manifests/parser-support.tsv entrypoints/profile.sh lib/capabilities.sh lib/metadata.sh lib/loader.sh module.d/platform_posix.meta module.d/platform_linux.meta module.d/platform_bsd.meta modules/platform/posix.sh modules/platform/linux/capabilities.sh modules/platform/bsd/capabilities.sh
+test-non-macos-runtime: tests/non-macos-runtime.test.sh manifests/parser-support.tsv entrypoints/profile.sh lib/capabilities.sh lib/metadata.sh lib/loader.sh module.d/valise_platform_posix.meta module.d/valise_platform_linux.meta module.d/valise_platform_bsd.meta modules/platform/posix.sh modules/platform/linux/capabilities.sh modules/platform/bsd/capabilities.sh
 	@$(RUNTIME_TEST_RUNNER)
 
-test-cli-posix: tests/cli-posix.test.sh bin/valise
+test-cli-posix: tests/cli-posix.test.sh bin/valise $(VALISE_CLI_LIBS)
 	@$(TEST_RUNNER)
 
-test-cli-gaps: tests/cli-gaps.test.sh bin/valise
+test-cli-gaps: tests/cli-gaps.test.sh bin/valise $(VALISE_CLI_LIBS)
 	@$(TEST_RUNNER)
 
-test-compile-assemble: tests/compile-assemble.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
+test-compile-assemble: tests/compile-assemble.test.sh bin/valise $(VALISE_CLI_LIBS) lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
-test-compiler-plan: tests/compiler-plan.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
+test-compiler-plan: tests/compiler-plan.test.sh bin/valise $(VALISE_CLI_LIBS) lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
-test-registry: tests/registry.test.sh bin/valise lib/metadata.sh lib/compiler.awk lib/capabilities.sh
+test-registry: tests/registry.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
-test-project-ux: tests/project-ux.test.sh bin/valise lib/metadata.sh lib/compiler.awk lib/capabilities.sh
+test-project-ux: tests/project-ux.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
+	@$(TEST_RUNNER)
+
+test-project-layout: tests/project-layout.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
+	@$(TEST_RUNNER)
+
+test-commands: tests/commands.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
+	@$(TEST_RUNNER)
+
+test-lifecycle: tests/lifecycle.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
+	@$(TEST_RUNNER)
+
+test-dev-commands: tests/dev-commands.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh lib/fish/metadata.fish lib/fish/loader.fish lib/fish/profile.fish
 	@$(TEST_RUNNER)
 
 test-compiler-benchmark: tests/compiler-benchmark.test.sh lib/compiler.awk
@@ -226,7 +239,7 @@ benchmark-timing: tools/compiler-benchmark-timing.sh lib/compiler.awk
 	@echo "=== manual compiler timing diagnosis (non-gating) ==="
 	@PATH="$(TEST_ENV_PATH)"; export PATH; sh tools/compiler-benchmark-timing.sh $(MODULES)
 
-test-fish-runtime: tests/fish-runtime.test.sh lib/fish/loader.fish lib/fish/metadata.fish
+test-fish-runtime: tests/fish-runtime.test.sh lib/fish/loader.fish lib/fish/metadata.fish lib/fish/profile.fish lib/cli/fish-hook.sh
 	@if test -z "$(FISH)"; then \
 		if test "$(VALISE_REQUIRE_TOOLING)" = 1; then \
 			echo "FAIL: fish is required for the native Fish runtime check (VALISE_REQUIRE_TOOLING=1)" >&2; exit 1; \
@@ -245,18 +258,18 @@ test-doc-links: tests/docs/doc-links.test.sh README.md AGENTS.md $(wildcard docs
 	@echo "=== shell-profile doc-link case-sensitivity ==="
 	@$(TEST_RUNNER)
 
-test-e2e: tests/e2e.test.sh bin/valise examples/e2e/build-manifest.sh
+test-e2e: tests/e2e.test.sh bin/valise $(VALISE_CLI_LIBS) examples/e2e/valise.conf examples/e2e/bundles.tsv
 	@echo "=== valise end-to-end test ==="
 	@VALISE_REQUIRE_TOOLING="$(VALISE_REQUIRE_TOOLING)" /bin/bash tests/e2e.test.sh
 
-# The reference consumer profile lives in scratch/shell-profile and is not
-# tracked by the repository. The suite copies it to a temporary directory
-# and works only on the copy, so the original tree and the live profile
-# are never touched. It skips with a visible message when the tree is
-# absent, which is the case in CI and in a package install.
-test-consumer-profile: tests/consumer-profile.test.sh bin/valise lib/compiler.awk lib/capabilities.sh
+# VALISE_CONSUMER_PROFILE names a real consumer project (a directory with
+# valise.conf). The suite copies it to a temporary directory and works only
+# on the copy, so the original tree and the live profile are never touched.
+# It skips with a visible message when the variable is unset.
+VALISE_CONSUMER_PROFILE ?=
+test-consumer-profile: tests/consumer-profile.test.sh bin/valise $(VALISE_CLI_LIBS) lib/compiler.awk lib/capabilities.sh
 	@echo "=== valise consumer-profile end-to-end test ==="
-	@$(TEST_RUNNER)
+	@VALISE_CONSUMER_PROFILE="$(VALISE_CONSUMER_PROFILE)" $(TEST_RUNNER)
 
 clean: ## Delete build products, temporary release trees, and pack tarballs.
 	@rm -rf examples/e2e/build examples/profile-project/build *.tgz .valise-* scratch/.valise-* scratch/valise-*
@@ -264,4 +277,4 @@ clean: ## Delete build products, temporary release trees, and pack tarballs.
 distclean: clean ## Delete all generated files and local build directories.
 	@rm -rf build
 
-check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-registry test-project-ux test-cli-gaps test-contrib-modules test-consumer-profile test-docs test-doc-links
+check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-registry test-project-ux test-project-layout test-commands test-lifecycle test-dev-commands test-cli-gaps test-contrib-modules test-consumer-profile test-docs test-doc-links

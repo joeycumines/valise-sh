@@ -722,6 +722,14 @@ chmod o-w "$_compromised"
 ln -s "$_outside" "$_home/.local/bin/symlinked-tool"
 sp_cap_secure_local_bin_check "$_home" >/dev/null 2>&1
 assert_status 'sp_cap_secure_local_bin_check rejects symlink in local bin tree' 1 "$?"
+sp_cap_secure_local_bin_check "$_home" allow-owned-symlinks >/dev/null 2>&1
+assert_status 'sp_cap_secure_local_bin_check accepts a user-owned symlink with allow-owned-symlinks' 0 "$?"
+chmod o+w "$_compromised"
+sp_cap_secure_local_bin_check "$_home" allow-owned-symlinks >/dev/null 2>&1
+assert_status 'sp_cap_secure_local_bin_check still rejects a world-writable file with allow-owned-symlinks' 1 "$?"
+chmod o-w "$_compromised"
+sp_cap_secure_local_bin_check "$_home" unknown-policy >/dev/null 2>&1
+assert_status 'sp_cap_secure_local_bin_check rejects an unknown symlink policy' 1 "$?"
 
 printf '\n=== Background process helper ===\n'
 _background_marker="$_tmp/background-marker"
@@ -746,11 +754,10 @@ cat >"$_modroot/module.d/cap_probe.meta" <<'META'
 name=cap_probe
 requires=
 optional=
-shells=sh bash zsh ksh
+shells=posix bash zsh ksh
 platforms=any
 side_effect=read-only
 exports=cap_probe_loaded
-updates=
 load=modules/cap_probe.sh
 META
 cat >"$_modroot/modules/cap_probe.sh" <<'MODULE'
@@ -778,10 +785,10 @@ printf '\n=== Platform module metadata presence ===\n'
 # shellcheck disable=SC1090
 . "$METADATA_SH"
 for _file in \
-  "$ROOT_DIR/module.d/platform_posix.meta" \
-  "$ROOT_DIR/module.d/platform_macos.meta" \
-  "$ROOT_DIR/module.d/platform_linux.meta" \
-  "$ROOT_DIR/module.d/platform_bsd.meta" \
+  "$ROOT_DIR/module.d/valise_platform_posix.meta" \
+  "$ROOT_DIR/module.d/valise_platform_macos.meta" \
+  "$ROOT_DIR/module.d/valise_platform_linux.meta" \
+  "$ROOT_DIR/module.d/valise_platform_bsd.meta" \
   "$ROOT_DIR/modules/platform/posix.sh" \
   "$ROOT_DIR/modules/platform/macos/capabilities.sh" \
   "$ROOT_DIR/modules/platform/linux/capabilities.sh" \
@@ -789,14 +796,14 @@ for _file in \
   assert_file "$_file" "platform artifact exists: ${_file#$ROOT_DIR/}"
 done
 unset _file
-_out=$(sp_metadata_read "$ROOT_DIR/module.d/platform_posix.meta" 2>&1)
-assert_contains 'platform_posix metadata supports all platforms' "$_out" 'platforms=any'
-_out=$(sp_metadata_read "$ROOT_DIR/module.d/platform_macos.meta" 2>&1)
-assert_contains 'platform_macos metadata gates Darwin only' "$_out" 'platforms=darwin'
-_out=$(sp_metadata_read "$ROOT_DIR/module.d/platform_linux.meta" 2>&1)
-assert_contains 'platform_linux metadata gates Linux only' "$_out" 'platforms=linux'
-_out=$(sp_metadata_read "$ROOT_DIR/module.d/platform_bsd.meta" 2>&1)
-assert_contains 'platform_bsd metadata gates BSD family' "$_out" 'platforms=bsd freebsd openbsd netbsd'
+_out=$(sp_metadata_read "$ROOT_DIR/module.d/valise_platform_posix.meta" 2>&1)
+assert_contains 'valise_platform_posix metadata supports all platforms' "$_out" 'platforms=any'
+_out=$(sp_metadata_read "$ROOT_DIR/module.d/valise_platform_macos.meta" 2>&1)
+assert_contains 'valise_platform_macos metadata gates Darwin only' "$_out" 'platforms=darwin'
+_out=$(sp_metadata_read "$ROOT_DIR/module.d/valise_platform_linux.meta" 2>&1)
+assert_contains 'valise_platform_linux metadata gates Linux only' "$_out" 'platforms=linux'
+_out=$(sp_metadata_read "$ROOT_DIR/module.d/valise_platform_bsd.meta" 2>&1)
+assert_contains 'valise_platform_bsd metadata gates BSD family' "$_out" 'platforms=bsd freebsd openbsd netbsd'
 
 printf '\n=== capabilities summary ===\n'
 printf 'Total: %d  Pass: %d  Fail: %d\n' "$_total" "$_pass" "$_fail"

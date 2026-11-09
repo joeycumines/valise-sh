@@ -144,7 +144,7 @@ sp_metadata_validate_shell_list() {
   for _spm_shell in $1; do
     _spm_shell_seen=1
     case "$_spm_shell" in
-    sh | bash | zsh | ksh | fish) ;;
+    posix | sh | bash | zsh | ksh | fish) ;;
     *)
       sp_metadata_error "invalid shell: $_spm_shell"
       if [ "$_spm_shell_ifs_was_set" -eq 1 ]; then
@@ -285,6 +285,92 @@ sp_metadata_validate_relative_path() {
   return 0
 }
 
+# sp_metadata_validate_path_list <list> <label>
+# Validate space-separated module-relative file paths: each must be a
+# relative path with no empty, "." or ".." segment and no trailing slash.
+sp_metadata_validate_path_list() {
+  _spm_plist=$1
+  _spm_plabel=$2
+  sp_metadata_reject_glob_characters "$_spm_plist" "$_spm_plabel" || {
+    unset _spm_plist _spm_plabel
+    return 1
+  }
+  if [ "${IFS+x}" = x ]; then
+    _spm_plist_ifs_was_set=1
+    _spm_plist_ifs=${IFS-}
+  else
+    _spm_plist_ifs_was_set=0
+    _spm_plist_ifs=
+  fi
+  _spm_plist_status=0
+  IFS=' '
+  for _spm_pword in $_spm_plist; do
+    case "$_spm_pword" in
+    . | ./* | */. | */./* | *//* | */)
+      sp_metadata_error "invalid $_spm_plabel path: $_spm_pword"
+      _spm_plist_status=1
+      break
+      ;;
+    esac
+    if ! sp_metadata_validate_relative_path "$_spm_pword"; then
+      _spm_plist_status=1
+      break
+    fi
+    if [ "$_spm_plabel" = executable ]; then
+      _spm_pbase=${_spm_pword##*/}
+      case "$_spm_pbase" in
+      [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*) ;;
+      *)
+        sp_metadata_error "invalid executable name: $_spm_pbase"
+        _spm_plist_status=1
+        break
+        ;;
+      esac
+    fi
+  done
+  if [ "$_spm_plist_ifs_was_set" -eq 1 ]; then
+    IFS=$_spm_plist_ifs
+  else
+    unset IFS
+  fi
+  _spm_plist_rc=$_spm_plist_status
+  unset _spm_plist _spm_plabel _spm_pword _spm_pbase _spm_plist_ifs _spm_plist_ifs_was_set _spm_plist_status
+  return "$_spm_plist_rc"
+}
+
+# sp_metadata_validate_commands <commands> <exports>
+# Every published command must be one of the module's declared exports.
+sp_metadata_validate_commands() {
+  sp_metadata_validate_identifier_list "$1" command || return 1
+  if [ "${IFS+x}" = x ]; then
+    _spm_cmd_ifs_was_set=1
+    _spm_cmd_ifs=${IFS-}
+  else
+    _spm_cmd_ifs_was_set=0
+    _spm_cmd_ifs=
+  fi
+  _spm_cmd_status=0
+  IFS=' '
+  for _spm_cmd in $1; do
+    case " $2 " in
+    *" $_spm_cmd "*) ;;
+    *)
+      sp_metadata_error "command is not a declared export: $_spm_cmd"
+      _spm_cmd_status=1
+      break
+      ;;
+    esac
+  done
+  if [ "$_spm_cmd_ifs_was_set" -eq 1 ]; then
+    IFS=$_spm_cmd_ifs
+  else
+    unset IFS
+  fi
+  _spm_cmd_rc=$_spm_cmd_status
+  unset _spm_cmd _spm_cmd_ifs _spm_cmd_ifs_was_set _spm_cmd_status
+  return "$_spm_cmd_rc"
+}
+
 sp_metadata_validate_load_target() {
   _spm_target_load=$1
   _spm_target_requires=${2-}
@@ -327,9 +413,12 @@ sp_metadata_read() (
   _spm_platforms=
   _spm_side_effect=
   _spm_exports=
-  _spm_updates=
+  _spm_commands=
+  _spm_executables=
+  _spm_tests=
   _spm_version=
   _spm_load=
+  _spm_seen=' '
 
   while IFS= read -r _spm_line || [ -n "$_spm_line" ]; do
     case "$_spm_line" in
@@ -343,6 +432,13 @@ sp_metadata_read() (
     _spm_key=${_spm_line%%=*}
     _spm_value=${_spm_line#*=}
     sp_metadata_reject_control_characters "$_spm_value" "$_spm_key" || return 1
+    case "$_spm_seen" in
+    *" $_spm_key "*)
+      sp_metadata_error "duplicate metadata field: $_spm_key"
+      return 1
+      ;;
+    esac
+    _spm_seen="$_spm_seen$_spm_key "
     case "$_spm_key" in
     name) _spm_name=$_spm_value ;;
     requires) _spm_requires=$_spm_value ;;
@@ -351,7 +447,13 @@ sp_metadata_read() (
     platforms) _spm_platforms=$_spm_value ;;
     side_effect) _spm_side_effect=$_spm_value ;;
     exports) _spm_exports=$_spm_value ;;
-    updates) _spm_updates=$_spm_value ;;
+    commands) _spm_commands=$_spm_value ;;
+    executables) _spm_executables=$_spm_value ;;
+    tests) _spm_tests=$_spm_value ;;
+    updates)
+      sp_metadata_error 'metadata field updates is not supported since valise 0.3.0; publish commands with commands= or executables='
+      return 1
+      ;;
     version) _spm_version=$_spm_value ;;
     load) _spm_load=$_spm_value ;;
     load_hook)
@@ -381,7 +483,9 @@ sp_metadata_read() (
   sp_metadata_validate_platform_list "$_spm_platforms" || return 1
   sp_metadata_validate_side_effect "$_spm_side_effect" || return 1
   sp_metadata_validate_identifier_list "$_spm_exports" export || return 1
-  sp_metadata_validate_identifier_list "$_spm_updates" update_registration || return 1
+  sp_metadata_validate_commands "$_spm_commands" "$_spm_exports" || return 1
+  sp_metadata_validate_path_list "$_spm_executables" executable || return 1
+  sp_metadata_validate_path_list "$_spm_tests" test || return 1
   sp_metadata_validate_version "$_spm_version" || return 1
   sp_metadata_validate_relative_path "$_spm_load" || return 1
 
@@ -392,7 +496,9 @@ sp_metadata_read() (
   printf 'platforms=%s\n' "$_spm_platforms"
   printf 'side_effect=%s\n' "$_spm_side_effect"
   printf 'exports=%s\n' "$_spm_exports"
-  printf 'updates=%s\n' "$_spm_updates"
+  printf 'commands=%s\n' "$_spm_commands"
+  printf 'executables=%s\n' "$_spm_executables"
+  printf 'tests=%s\n' "$_spm_tests"
   printf 'version=%s\n' "$_spm_version"
   printf 'load=%s\n' "$_spm_load"
 )

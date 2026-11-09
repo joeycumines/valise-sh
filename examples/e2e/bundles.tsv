@@ -1,0 +1,6 @@
+bundle	shell	roots
+default	sh	e2e_env_setup e2e_generated_config e2e_optional_network e2e_layer_probe e2e_platform_tools
+default	bash	e2e_env_setup e2e_generated_config e2e_optional_network e2e_layer_probe e2e_platform_tools e2e_aliases e2e_completions_bash
+default	zsh	e2e_env_setup e2e_generated_config e2e_optional_network e2e_layer_probe e2e_platform_tools e2e_aliases e2e_completions_zsh
+default	ksh	e2e_env_setup e2e_generated_config e2e_optional_network e2e_layer_probe e2e_platform_tools e2e_ksh_features
+default	fish	e2e_fish_features

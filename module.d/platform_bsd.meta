@@ -1,9 +1,0 @@
-name=platform_bsd
-requires=platform_posix
-optional=
-shells=sh bash zsh ksh
-platforms=bsd freebsd openbsd netbsd
-side_effect=read-only
-exports=sp_platform_bsd_available sp_platform_bsd_cpu_count sp_platform_bsd_file_mtime
-updates=
-load=modules/platform/bsd/capabilities.sh

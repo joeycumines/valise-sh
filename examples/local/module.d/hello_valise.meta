@@ -1,9 +1,8 @@
 name=hello_valise
 requires=
 optional=
-shells=sh bash zsh ksh
+shells=posix bash zsh ksh
 platforms=any
 side_effect=read-only
 exports=hello_valise_loaded
-updates=
 load=modules/hello_valise.sh

@@ -1,9 +1,8 @@
 name=platform_edge_optional_darwin
 requires=
 optional=platform_edge_blocked_linux
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=platform_edge_optional_darwin_loaded
-updates=
 load=modules/platform_edge_optional_darwin.sh

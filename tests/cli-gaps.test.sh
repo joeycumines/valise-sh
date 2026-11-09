@@ -49,13 +49,16 @@ _env() {
 }
 mkdir -p "$_test_root/home"
 
-# Build a release tree with one regular file and install it.
+# Build a minimal installable release tree: the format=2 release
+# configuration install requires, plus one regular file.
 _make_release() {
   _mr_tree=$1
   _mr_body=$2
   mkdir -p "$_mr_tree/bin"
   printf '%s\n' "$_mr_body" >"$_mr_tree/bin/tool.sh"
   chmod 0755 "$_mr_tree/bin/tool.sh"
+  printf 'format=2\n' >"$_mr_tree/valise-release.conf"
+  chmod 0644 "$_mr_tree/valise-release.conf"
   (cd "$_mr_tree" && "$_valise" make-manifest . >/dev/null 2>&1)
 }
 
@@ -368,37 +371,38 @@ fi
 # --- explain-bundles without python3 ---
 
 _project="$_test_root/project"
-mkdir -p "$_project/shell/module.d" "$_project/shell/modules" "$_project/shell/release"
+mkdir -p "$_project/module.d" "$_project/modules"
+: >"$_project/valise.conf"
 printf '%s\n' \
   'name=root_mod' \
   'version=1.0.0' \
   'side_effect=read-only' \
   'requires=' \
   'optional=' \
-  'shells=sh bash zsh ksh' \
+  'shells=posix bash zsh ksh' \
   'platforms=any' \
   'exports=root_mod_ready' \
-  'updates=' \
+  \
   'load=modules/root_mod.sh' \
-  >"$_project/shell/module.d/root_mod.meta"
-printf 'root_mod_ready() { :; }\n' >"$_project/shell/modules/root_mod.sh"
+  >"$_project/module.d/root_mod.meta"
+printf 'root_mod_ready() { :; }\n' >"$_project/modules/root_mod.sh"
 printf '%s\n' \
   'name=dep_mod' \
   'version=1.0.0' \
   'side_effect=read-only' \
   'requires=root_mod' \
   'optional=' \
-  'shells=sh bash zsh ksh' \
+  'shells=posix bash zsh ksh' \
   'platforms=any' \
   'exports=dep_mod_ready' \
-  'updates=' \
+  \
   'load=modules/dep_mod.sh' \
-  >"$_project/shell/module.d/dep_mod.meta"
-printf 'dep_mod_ready() { :; }\n' >"$_project/shell/modules/dep_mod.sh"
+  >"$_project/module.d/dep_mod.meta"
+printf 'dep_mod_ready() { :; }\n' >"$_project/modules/dep_mod.sh"
 printf '# bundle\tshell\troots\ndefault\tbash\tdep_mod\ndefault\tzsh\tdep_mod\n' \
-  >"$_project/shell/release/bundle-roots"
+  >"$_project/bundles.tsv"
 printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll modules\t\n' \
-  >"$_project/shell/release/install-variants"
+  >"$_project/variants.tsv"
 
 # A PATH without python3 proves the native implementation is used.
 _no_python_path="$_test_root/no-python-bin"
@@ -422,7 +426,7 @@ else
   fail "explain-bundles runs without python3"
   cat "$_test_root/explain-bundles.err" >&2
 fi
-if grep -F 'Installed bundle resolution' "$_test_root/explain-bundles.out" >/dev/null 2>&1 &&
+if grep -F 'Bundle resolution' "$_test_root/explain-bundles.out" >/dev/null 2>&1 &&
   grep -F 'dep_mod' "$_test_root/explain-bundles.out" >/dev/null 2>&1 &&
   grep -F 'root_mod' "$_test_root/explain-bundles.out" >/dev/null 2>&1; then
   pass "explain-bundles reports the roots and the module closure"
@@ -440,6 +444,31 @@ else
   fail "explain-bundles accepts a bundle name"
   cat "$_test_root/explain-bundles-one.out" >&2
 fi
+# A qualified exclusion removes a bare root, and the counts are closures.
+printf 'lean\tNo dep_mod\tdep_mod@module.d\n' >>"$_project/variants.tsv"
+if (
+  cd "$_project" &&
+    PATH="$_no_python_path" HOME="$_test_root/home" \
+      "$_valise" explain-variant lean
+) >"$_test_root/explain-variant.out" 2>&1 &&
+  grep -Fx '  bash: 0 of 1 roots, 0 of 2 modules' "$_test_root/explain-variant.out" >/dev/null &&
+  grep -Fx '  zsh: 0 of 1 roots, 0 of 2 modules' "$_test_root/explain-variant.out" >/dev/null; then
+  pass "explain-variant counts a qualified exclusion of a bare root"
+else
+  fail "explain-variant counts a qualified exclusion of a bare root"
+  cat "$_test_root/explain-variant.out" >&2
+fi
+if (
+  cd "$_project" &&
+    PATH="$_no_python_path" HOME="$_test_root/home" \
+      "$_valise" explain-variant
+) >"$_test_root/explain-variant-default.out" 2>&1 &&
+  grep -Fx '  bash: 1 of 1 roots, 2 of 2 modules' "$_test_root/explain-variant-default.out" >/dev/null; then
+  pass "explain-variant reports the full closure for a variant without exclusions"
+else
+  fail "explain-variant reports the full closure for a variant without exclusions"
+  cat "$_test_root/explain-variant-default.out" >&2
+fi
 if (
   cd "$_project" &&
     PATH="$_no_python_path" HOME="$_test_root/home" \
@@ -451,38 +480,37 @@ else
 fi
 
 # explain-bundles must report what compile builds: optional edges join the
-# closure, a qualified exclusion removes its layer module, and shells=sh does
+# closure, a qualified exclusion removes its layer module, and shells=posix does
 # not make a module available under Fish.
 _closure_project="$_test_root/closure-project"
-mkdir -p "$_closure_project/shell/module.d" "$_closure_project/shell/modules" \
-  "$_closure_project/shell/layers/demo/module.d" "$_closure_project/shell/layers/demo/modules" \
-  "$_closure_project/shell/release"
+mkdir -p "$_closure_project/module.d" "$_closure_project/modules" \
+  "$_closure_project/layers/demo/module.d" "$_closure_project/layers/demo/modules"
+: >"$_closure_project/valise.conf"
 printf '%s\n' \
   'name=base_mod' 'version=' 'side_effect=read-only' 'requires=' \
   'optional=opt_mod contrib_demo' \
-  'shells=sh' 'platforms=any' 'exports=base_mod_ready' 'updates=' \
-  'load=modules/base_mod.sh' >"$_closure_project/shell/module.d/base_mod.meta"
-printf 'base_mod_ready() { :; }\n' >"$_closure_project/shell/modules/base_mod.sh"
+  'shells=posix' 'platforms=any' 'exports=base_mod_ready' \
+  'load=modules/base_mod.sh' >"$_closure_project/module.d/base_mod.meta"
+printf 'base_mod_ready() { :; }\n' >"$_closure_project/modules/base_mod.sh"
 printf '%s\n' \
   'name=opt_mod' 'version=' 'side_effect=read-only' 'requires=' \
-  'optional=' 'shells=sh' 'platforms=any' 'exports=opt_mod_ready' 'updates=' \
-  'load=modules/opt_mod.sh' >"$_closure_project/shell/module.d/opt_mod.meta"
-printf 'opt_mod_ready() { :; }\n' >"$_closure_project/shell/modules/opt_mod.sh"
+  'optional=' 'shells=posix' 'platforms=any' 'exports=opt_mod_ready' \
+  'load=modules/opt_mod.sh' >"$_closure_project/module.d/opt_mod.meta"
+printf 'opt_mod_ready() { :; }\n' >"$_closure_project/modules/opt_mod.sh"
 printf '%s\n' \
   'name=contrib_demo' 'version=1.0.0' 'side_effect=read-only' 'requires=' \
-  'optional=' 'shells=sh' 'platforms=any' 'exports=contrib_demo_ready' 'updates=' \
-  'load=modules/contrib_demo.sh' >"$_closure_project/shell/layers/demo/module.d/contrib_demo.meta"
-printf 'contrib_demo_ready() { :; }\n' >"$_closure_project/shell/layers/demo/modules/contrib_demo.sh"
-printf '# bundle\tshell\troots\ndefault\tbash\tbase_mod\ndefault\tfish\tbase_mod\n' \
-  >"$_closure_project/shell/release/bundle-roots"
-printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\tcontrib_demo@shell/layers/demo/module.d\n' \
-  >"$_closure_project/shell/release/install-variants"
+  'optional=' 'shells=posix' 'platforms=any' 'exports=contrib_demo_ready' \
+  'load=modules/contrib_demo.sh' >"$_closure_project/layers/demo/module.d/contrib_demo.meta"
+printf 'contrib_demo_ready() { :; }\n' >"$_closure_project/layers/demo/modules/contrib_demo.sh"
+printf '# bundle\tshell\troots\ndefault\tbash\tbase_mod\n' \
+  >"$_closure_project/bundles.tsv"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\tcontrib_demo@layers/demo/module.d\n' \
+  >"$_closure_project/variants.tsv"
 if (cd "$_closure_project" && "$_valise" explain-bundles) \
   >"$_test_root/explain-closure.out" 2>"$_test_root/explain-closure.err"; then
   if grep -F 'bash: 1 root(s), 2 module(s)' "$_test_root/explain-closure.out" >/dev/null 2>&1 &&
     grep -F 'module opt_mod' "$_test_root/explain-closure.out" >/dev/null 2>&1 &&
-    ! grep -F 'contrib_demo' "$_test_root/explain-closure.out" >/dev/null 2>&1 &&
-    grep -F 'fish: 1 root(s), 0 module(s)' "$_test_root/explain-closure.out" >/dev/null 2>&1; then
+    ! grep -F 'contrib_demo' "$_test_root/explain-closure.out" >/dev/null 2>&1; then
     pass "explain-bundles matches compile closure semantics"
   else
     fail "explain-bundles matches compile closure semantics"
@@ -493,9 +521,22 @@ else
   cat "$_test_root/explain-closure.err" >&2
 fi
 
+# shells=posix does not cover Fish: a Fish bundle row naming a posix-only root
+# is a configuration error that names the root and the shell.
+printf '# bundle\tshell\troots\ndefault\tbash\tbase_mod\ndefault\tfish\tbase_mod\n' \
+  >"$_closure_project/bundles.tsv"
+if (cd "$_closure_project" && "$_valise" explain-bundles) >/dev/null 2>"$_test_root/explain-fish.err"; then
+  fail "a Fish bundle row with a posix-only root is rejected"
+elif grep -F 'bundle root base_mod does not support shell fish' "$_test_root/explain-fish.err" >/dev/null 2>&1; then
+  pass "a Fish bundle row with a posix-only root is rejected"
+else
+  fail "a Fish bundle row with a posix-only root is rejected"
+  cat "$_test_root/explain-fish.err" >&2
+fi
+
 # --- layer-lint without python3 ---
 
-_layer="$_project/shell/layers/vendor"
+_layer="$_project/layers/vendor"
 mkdir -p "$_layer/module.d" "$_layer/modules/shared"
 printf '%s\n' \
   'name=contrib_vendor_tool' \
@@ -503,10 +544,10 @@ printf '%s\n' \
   'side_effect=read-only' \
   'requires=' \
   'optional=' \
-  'shells=sh bash zsh ksh' \
+  'shells=posix bash zsh ksh' \
   'platforms=any' \
   'exports=contrib_vendor_tool_ready' \
-  'updates=' \
+  \
   'load=modules/shared/contrib_vendor_tool.sh' \
   >"$_layer/module.d/contrib_vendor_tool.meta"
 printf 'contrib_vendor_tool_ready() { :; }\n' \
@@ -524,20 +565,20 @@ else
 fi
 
 # An unprefixed name must be rejected.
-mkdir -p "$_project/shell/layers/unprefixed/module.d" "$_project/shell/layers/unprefixed/modules/shared"
+mkdir -p "$_project/layers/unprefixed/module.d" "$_project/layers/unprefixed/modules/shared"
 printf '%s\n' \
   'name=no_prefix_module' \
   'version=1.0.0' \
   'side_effect=read-only' \
   'requires=' \
   'optional=' \
-  'shells=sh' \
+  'shells=posix' \
   'platforms=any' \
   'exports=' \
-  'updates=' \
+  \
   'load=modules/shared/no_prefix_module.sh' \
-  >"$_project/shell/layers/unprefixed/module.d/no_prefix_module.meta"
-printf '# body\n' >"$_project/shell/layers/unprefixed/modules/shared/no_prefix_module.sh"
+  >"$_project/layers/unprefixed/module.d/no_prefix_module.meta"
+printf '# body\n' >"$_project/layers/unprefixed/modules/shared/no_prefix_module.sh"
 if (
   cd "$_project" &&
     PATH="$_no_python_path" HOME="$_test_root/home" \
@@ -549,20 +590,20 @@ else
 fi
 
 # An unversioned module must be rejected.
-mkdir -p "$_project/shell/layers/unversioned/module.d" "$_project/shell/layers/unversioned/modules/shared"
+mkdir -p "$_project/layers/unversioned/module.d" "$_project/layers/unversioned/modules/shared"
 printf '%s\n' \
   'name=contrib_unversioned' \
   'version=' \
   'side_effect=read-only' \
   'requires=' \
   'optional=' \
-  'shells=sh' \
+  'shells=posix' \
   'platforms=any' \
   'exports=' \
-  'updates=' \
+  \
   'load=modules/shared/contrib_unversioned.sh' \
-  >"$_project/shell/layers/unversioned/module.d/contrib_unversioned.meta"
-printf '# body\n' >"$_project/shell/layers/unversioned/modules/shared/contrib_unversioned.sh"
+  >"$_project/layers/unversioned/module.d/contrib_unversioned.meta"
+printf '# body\n' >"$_project/layers/unversioned/modules/shared/contrib_unversioned.sh"
 if (
   cd "$_project" &&
     PATH="$_no_python_path" HOME="$_test_root/home" \
@@ -574,19 +615,19 @@ else
 fi
 
 # A broken load target must be rejected.
-mkdir -p "$_project/shell/layers/broken/module.d"
+mkdir -p "$_project/layers/broken/module.d"
 printf '%s\n' \
   'name=contrib_broken' \
   'version=1.0.0' \
   'side_effect=read-only' \
   'requires=' \
   'optional=' \
-  'shells=sh' \
+  'shells=posix' \
   'platforms=any' \
   'exports=' \
-  'updates=' \
+  \
   'load=modules/shared/contrib_broken.sh' \
-  >"$_project/shell/layers/broken/module.d/contrib_broken.meta"
+  >"$_project/layers/broken/module.d/contrib_broken.meta"
 if (
   cd "$_project" &&
     PATH="$_no_python_path" HOME="$_test_root/home" \
@@ -598,20 +639,20 @@ else
 fi
 
 # A dependency outside the layer and outside the engine must be rejected.
-mkdir -p "$_project/shell/layers/outside/module.d" "$_project/shell/layers/outside/modules/shared"
+mkdir -p "$_project/layers/outside/module.d" "$_project/layers/outside/modules/shared"
 printf '%s\n' \
   'name=contrib_outside' \
   'version=1.0.0' \
   'side_effect=read-only' \
   'requires=not_in_this_layer' \
   'optional=' \
-  'shells=sh' \
+  'shells=posix' \
   'platforms=any' \
   'exports=' \
-  'updates=' \
+  \
   'load=modules/shared/contrib_outside.sh' \
-  >"$_project/shell/layers/outside/module.d/contrib_outside.meta"
-printf '# body\n' >"$_project/shell/layers/outside/modules/shared/contrib_outside.sh"
+  >"$_project/layers/outside/module.d/contrib_outside.meta"
+printf '# body\n' >"$_project/layers/outside/modules/shared/contrib_outside.sh"
 if (
   cd "$_project" &&
     PATH="$_no_python_path" HOME="$_test_root/home" \
@@ -689,56 +730,66 @@ fi
 
 # (3) A Fish user's deployed conf.d hook must be checked. install writes
 # the hook; doctor must look for it when $SHELL names fish.
-_fish_home="$_test_root/fish-home"
-mkdir -p "$_fish_home"
-_fish_release="$_test_root/fish-release"
-_make_release "$_fish_release" '# fish release'
-(
-  cd "$_fish_release" &&
-    HOME="$_fish_home" \
-      XDG_DATA_HOME="$_fish_home/.local/share" \
-      XDG_CONFIG_HOME="$_fish_home/.config" \
-      XDG_STATE_HOME="$_fish_home/.local/state" \
-      SHELL=/usr/local/bin/fish \
-      "$_valise" install
-) >"$_test_root/install-fish.out" 2>&1 || :
-if (
-  HOME="$_fish_home" \
-    XDG_DATA_HOME="$_fish_home/.local/share" \
-    XDG_CONFIG_HOME="$_fish_home/.config" \
-    XDG_STATE_HOME="$_fish_home/.local/state" \
-    SHELL=/usr/local/bin/fish \
-    "$_valise" doctor
-) >"$_test_root/doctor-fish.out" 2>&1; then
-  pass "doctor checks the fish integration hook"
+# install writes the hook only when it finds Fish in a trusted location.
+_have_trusted_fish=0
+for _fish_candidate in /opt/homebrew/bin/fish /usr/local/bin/fish /usr/bin/fish /bin/fish; do
+  [ -x "$_fish_candidate" ] && _have_trusted_fish=1 && break
+done
+if [ "$_have_trusted_fish" -eq 0 ]; then
+  skip "doctor checks the fish integration hook (no Fish in a trusted location)"
+  skip "doctor accepts a hand-saved init fish hook (no Fish in a trusted location)"
 else
-  fail "doctor checks the fish integration hook"
-  cat "$_test_root/doctor-fish.out" >&2
-fi
-
-# A user who follows the manual instructions saves `valise init fish`
-# output as the hook. It must carry the same header install writes, or
-# doctor rejects the very file the docs told the user to create.
-if (
-  HOME="$_fish_home" \
-    XDG_DATA_HOME="$_fish_home/.local/share" \
-    XDG_CONFIG_HOME="$_fish_home/.config" \
-    XDG_STATE_HOME="$_fish_home/.local/state" \
-    SHELL=/usr/local/bin/fish \
-    "$_valise" init fish
-) >"$_fish_home/.config/fish/conf.d/valise.fish" 2>"$_test_root/init-fish.err" &&
+  _fish_home="$_test_root/fish-home"
+  mkdir -p "$_fish_home"
+  _fish_release="$_test_root/fish-release"
+  _make_release "$_fish_release" '# fish release'
   (
+    cd "$_fish_release" &&
+      HOME="$_fish_home" \
+        XDG_DATA_HOME="$_fish_home/.local/share" \
+        XDG_CONFIG_HOME="$_fish_home/.config" \
+        XDG_STATE_HOME="$_fish_home/.local/state" \
+        SHELL=/usr/local/bin/fish \
+        "$_valise" install
+  ) >"$_test_root/install-fish.out" 2>&1 || :
+  if (
     HOME="$_fish_home" \
       XDG_DATA_HOME="$_fish_home/.local/share" \
       XDG_CONFIG_HOME="$_fish_home/.config" \
       XDG_STATE_HOME="$_fish_home/.local/state" \
       SHELL=/usr/local/bin/fish \
       "$_valise" doctor
-  ) >"$_test_root/doctor-fish-manual.out" 2>&1; then
-  pass "doctor accepts a hand-saved init fish hook"
-else
-  fail "doctor accepts a hand-saved init fish hook"
-  cat "$_test_root/doctor-fish-manual.out" "$_test_root/init-fish.err" >&2 2>/dev/null || :
+  ) >"$_test_root/doctor-fish.out" 2>&1; then
+    pass "doctor checks the fish integration hook"
+  else
+    fail "doctor checks the fish integration hook"
+    cat "$_test_root/doctor-fish.out" >&2
+  fi
+
+  # A user who follows the manual instructions saves `valise init fish`
+  # output as the hook. It must carry the same header install writes, or
+  # doctor rejects the very file the docs told the user to create.
+  if (
+    HOME="$_fish_home" \
+      XDG_DATA_HOME="$_fish_home/.local/share" \
+      XDG_CONFIG_HOME="$_fish_home/.config" \
+      XDG_STATE_HOME="$_fish_home/.local/state" \
+      SHELL=/usr/local/bin/fish \
+      "$_valise" init fish
+  ) >"$_fish_home/.config/fish/conf.d/valise.fish" 2>"$_test_root/init-fish.err" &&
+    (
+      HOME="$_fish_home" \
+        XDG_DATA_HOME="$_fish_home/.local/share" \
+        XDG_CONFIG_HOME="$_fish_home/.config" \
+        XDG_STATE_HOME="$_fish_home/.local/state" \
+        SHELL=/usr/local/bin/fish \
+        "$_valise" doctor
+    ) >"$_test_root/doctor-fish-manual.out" 2>&1; then
+    pass "doctor accepts a hand-saved init fish hook"
+  else
+    fail "doctor accepts a hand-saved init fish hook"
+    cat "$_test_root/doctor-fish-manual.out" "$_test_root/init-fish.err" >&2 2>/dev/null || :
+  fi
 fi
 
 # (4) `layer-lint` with no argument must print its usage and fail on
@@ -758,31 +809,24 @@ done
 # (5) layer-lint must accept a valid layer whose dependency sorts LAST.
 # The name lists are matched with " $name ", so they need a trailing
 # space or the final entry never matches.
-mkdir -p "$_test_root/order-project/shell/module.d" \
-  "$_test_root/order-project/shell/modules" \
-  "$_test_root/order-project/shell/layers/ordered/module.d" \
-  "$_test_root/order-project/shell/layers/ordered/modules/shared"
-printf '%s\n' \
-  'name=platform_posix' 'version=1.0.0' 'side_effect=read-only' 'requires=' \
-  'optional=' 'shells=sh' 'platforms=any' 'exports=' 'updates=' \
-  'load=modules/platform_posix.sh' \
-  >"$_test_root/order-project/shell/module.d/platform_posix.meta"
-printf '# body\n' >"$_test_root/order-project/shell/modules/platform_posix.sh"
+mkdir -p "$_test_root/order-project/layers/ordered/module.d" \
+  "$_test_root/order-project/layers/ordered/modules/shared"
+: >"$_test_root/order-project/valise.conf"
 for _ord_name in contrib_aaa contrib_zzz; do
   printf '%s\n' \
     "name=$_ord_name" 'version=1.0.0' 'side_effect=read-only' 'requires=' \
-    'optional=' 'shells=sh' 'platforms=any' 'exports=' 'updates=' \
+    'optional=' 'shells=posix' 'platforms=any' 'exports=' \
     "load=modules/shared/$_ord_name.sh" \
-    >"$_test_root/order-project/shell/layers/ordered/module.d/$_ord_name.meta"
+    >"$_test_root/order-project/layers/ordered/module.d/$_ord_name.meta"
   printf '# body\n' \
-    >"$_test_root/order-project/shell/layers/ordered/modules/shared/$_ord_name.sh"
+    >"$_test_root/order-project/layers/ordered/modules/shared/$_ord_name.sh"
 done
 # contrib_aaa depends on contrib_zzz, which sorts last.
 printf '%s\n' \
   'name=contrib_aaa' 'version=1.0.0' 'side_effect=read-only' \
-  'requires=contrib_zzz' 'optional=' 'shells=sh' 'platforms=any' 'exports=' \
-  'updates=' 'load=modules/shared/contrib_aaa.sh' \
-  >"$_test_root/order-project/shell/layers/ordered/module.d/contrib_aaa.meta"
+  'requires=contrib_zzz' 'optional=' 'shells=posix' 'platforms=any' 'exports=' \
+  'load=modules/shared/contrib_aaa.sh' \
+  >"$_test_root/order-project/layers/ordered/module.d/contrib_aaa.meta"
 if (
   cd "$_test_root/order-project" && "$_valise" layer-lint ordered
 ) >"$_test_root/layer-lint-order.out" 2>&1; then
@@ -888,16 +932,16 @@ fi
 _leak_home="$_test_root/leak-home"
 _leak_project="$_test_root/leak-project"
 _leak_tmp="$_test_root/leak-tmp"
-mkdir -p "$_leak_home" "$_leak_project/shell/module.d" "$_leak_project/shell/modules" \
-  "$_leak_project/shell/release" "$_leak_tmp"
+mkdir -p "$_leak_home" "$_leak_project/module.d" "$_leak_project/modules" "$_leak_tmp"
+: >"$_leak_project/valise.conf"
 printf '%s\n' \
   'name=leak_module' 'version=1.0.0' 'side_effect=read-only' 'requires=' \
-  'optional=' 'shells=sh' 'platforms=any' 'exports=' 'updates=' \
+  'optional=' 'shells=posix' 'platforms=any' 'exports=' \
   'load=modules/leak_module.sh' \
-  >"$_leak_project/shell/module.d/leak_module.meta"
-printf '# body\n' >"$_leak_project/shell/modules/leak_module.sh"
+  >"$_leak_project/module.d/leak_module.meta"
+printf '# body\n' >"$_leak_project/modules/leak_module.sh"
 printf '# bundle\tshell\troots\ndefault\tbash\tleak_module\n' \
-  >"$_leak_project/shell/release/bundle-roots"
+  >"$_leak_project/bundles.tsv"
 if (
   cd "$_leak_project" &&
     TMPDIR="$_leak_tmp" HOME="$_leak_home" \

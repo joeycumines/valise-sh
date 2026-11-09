@@ -1,9 +1,0 @@
-# bundle	shell	roots
-# The first row is a header, not a bundle definition. Each row names a
-# bundle, a shell, and the space-separated root modules for that shell.
-#
-# A layer module is named by its qualified identity so the source directory
-# is unambiguous: name@shell/layers/<provider>/module.d
-default	bash	profile_main contrib_demo_greeting@shell/layers/demo/module.d
-default	zsh	profile_main contrib_demo_greeting@shell/layers/demo/module.d
-default	ksh	profile_main contrib_demo_greeting@shell/layers/demo/module.d

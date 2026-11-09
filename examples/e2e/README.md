@@ -1,31 +1,40 @@
 # End-to-end example
 
-This directory is a sample consuming profile. It includes twelve modules
-that exercise dependencies, shell and platform selection, exports, optional
-dependencies, and composition with the shared provider in `examples/shared/`.
+This directory is a valise project used by `tests/e2e.test.sh`. Its modules
+exercise dependencies, shell and platform selection, exports, optional
+dependencies, a Fish module, and composition with the shared provider in
+`examples/shared/`.
 
 ## Modules
 
 | Module | Shells | Platforms | Depends on | Export |
 |---|---|---|---|---|
-| `e2e_env_setup` | sh bash zsh ksh | any | `platform_posix` | `e2e_env_ready` |
-| `e2e_aliases` | sh bash zsh ksh | any | `e2e_env_setup` | `e2e_show_aliases` |
+| `e2e_env_setup` | posix | any | `valise_platform_posix` | `e2e_env_ready` |
+| `e2e_aliases` | posix | any | `e2e_env_setup` | `e2e_show_aliases` |
 | `e2e_completions_bash` | bash | any | `e2e_aliases` | `e2e_bash_completions_loaded` |
 | `e2e_completions_zsh` | zsh | any | `e2e_aliases` | `e2e_zsh_completions_loaded` |
 | `e2e_ksh_features` | ksh | any | `e2e_env_setup` | `e2e_ksh_loaded` |
 | `e2e_fish_features` | fish | any | optional `e2e_env_setup` | `e2e_fish_loaded` |
-| `e2e_platform_tools_darwin` | sh bash zsh ksh | darwin | `platform_macos` | `e2e_darwin_tools_ready` |
-| `e2e_platform_tools_linux` | sh bash zsh ksh | linux | `platform_linux` | `e2e_linux_tools_ready` |
-| `e2e_platform_tools_bsd` | sh bash zsh ksh | bsd | `platform_bsd` | `e2e_bsd_tools_ready` |
-| `e2e_optional_network` | sh bash zsh ksh | any | optional `e2e_env_setup` | `e2e_net_available` |
-| `e2e_generated_config` | sh bash zsh ksh | any | `e2e_env_setup` | `e2e_config_loaded` |
-| `e2e_layer_probe` | sh bash zsh ksh | any | `e2e_env_setup`, optional `contrib_shared_paths` | `e2e_layer_probe_ok` |
+| `e2e_platform_tools` | posix | any | `e2e_env_setup`, optional the three below | none |
+| `e2e_platform_tools_darwin` | posix | darwin | `valise_platform_macos` | `e2e_darwin_tools_ready` |
+| `e2e_platform_tools_linux` | posix | linux | `valise_platform_linux` | `e2e_linux_tools_ready` |
+| `e2e_platform_tools_bsd` | posix | bsd | `valise_platform_bsd` | `e2e_bsd_tools_ready` |
+| `e2e_optional_network` | posix | any | optional `e2e_env_setup` | `e2e_net_available` |
+| `e2e_generated_config` | posix | any | `e2e_env_setup` | `e2e_config_loaded` |
+| `e2e_layer_probe` | posix | any | `e2e_env_setup`, optional `contrib_shared_paths` | `e2e_layer_probe_ok` |
 
-`e2e_layer_probe` depends on a primary-root module and optionally on a
-module in the shared layer. It tests dependency resolution in both directions
-across the two roots.
+`bundles.tsv` gives each shell its roots. The POSIX rows name
+`e2e_platform_tools`, which lists the per-platform modules as optional
+dependencies: a platform module that does not match the running system is
+skipped quietly, while naming it as a root would be a strict-mode failure on
+every other platform. `variants.tsv` has `default` and `no-network`, which
+excludes `e2e_optional_network`.
 
-## Build, install, and verify
+`e2e_layer_probe` optionally depends on `contrib_shared_paths` from the
+shared provider. Without the provider it reports a standalone load; with the
+provider vendored as a layer it reports that the layer resolved.
+
+## Build, install, and load
 
 Run these commands from the repository root. Installation writes shell
 integration under `HOME`; this example uses a temporary home so it does not
@@ -33,7 +42,7 @@ touch your normal startup files.
 
 ```sh
 export PATH="$PWD/bin:$PATH"
-sh examples/e2e/build-manifest.sh
+valise -C examples/e2e build
 
 _demo=$(mktemp -d)
 mkdir -p "$_demo/home"
@@ -46,35 +55,20 @@ export XDG_STATE_HOME="$_demo/state"
 valise release verify
 ```
 
-The build script copies the engine runtime and shared example into
-`examples/e2e/build/release`, then writes `shell/install/profile-release.manifest`
-with each file's size and SHA-256 digest using `valise make-manifest`. Generated
-release files are isolated in `build/` and can be rebuilt at any time.
+`valise build` writes the release to `examples/e2e/build/release`: one plan
+per POSIX shell class under `plans/`, the Fish runtime under `runtime/fish/`,
+and only the modules some shell loads. `valise install` seals it, makes it
+active, and writes the managed block to `~/.profile` (plus `~/.bashrc` or
+`~/.zshrc` for those shells) and the Fish hook.
 
-Load sample modules in a POSIX shell:
-
-```sh
-_active=$(cd "$XDG_CONFIG_HOME/valise/active" && pwd -P)
-VALISE_MODULE_ROOT="$_active" \
-VALISE_MODULES='e2e_env_setup e2e_aliases e2e_generated_config e2e_optional_network' \
-VALISE_MODE=strict \
-. "$_active/entrypoints/profile.sh"
-
-e2e_env_ready
-e2e_show_aliases
-e2e_config_loaded
-```
-
-Try the Fish module in a new Fish process. The installed `conf.d` hook loads
-the sealed release at startup, so set the module list in the child's
-environment before starting Fish:
+Start a shell through the startup file valise wrote:
 
 ```sh
-VALISE_MODULES=e2e_fish_features VALISE_MODE=strict fish -c \
-  'functions -q e2e_fish_loaded; and valise release verify'
+bash -c '. "$HOME/.bashrc"; e2e_env_ready; e2e_show_aliases; e2e_config_loaded'
+fish -c 'functions -q e2e_fish_loaded; and valise release verify'
 ```
 
-When finished, stop using the functions and remove the temporary installation:
+When finished, remove the temporary installation:
 
 ```sh
 chmod -R u+w "$_demo"
@@ -83,31 +77,30 @@ rm -rf "$_demo"
 
 ## Shared provider composition
 
-The build script vendors `examples/shared/` under `layer/shared/` and records
-its source revision in `layer/shared/layer-pin.txt`. The release manifest
-covers both the profile and provider files. After the build, installation,
-and verification above, load the cross-root probe and shared utilities:
+A project composes a provider by vendoring its tree as `layers/<provider>/`.
+To try it, copy this project, vendor `examples/shared/` as `layers/shared/`,
+and add the provider's modules to the POSIX roots:
 
 ```sh
-_active=$(cd "$XDG_CONFIG_HOME/valise/active" && pwd -P)
-VALISE_MODULE_ROOT="$_active" \
-VALISE_MODULE_PATH="$_active/layer/shared" \
-VALISE_MODULES='e2e_layer_probe contrib_shared_paths contrib_shared_umask' \
-VALISE_MODE=strict \
-. "$_active/entrypoints/profile.sh"
-
-e2e_layer_probe_ok
-contrib_shared_paths_setup
-contrib_shared_umask_secure  # explicitly changes umask to 077
+_proj=$(mktemp -d)
+cp -R examples/e2e/valise.conf examples/e2e/variants.tsv \
+  examples/e2e/module.d examples/e2e/modules "$_proj/"
+mkdir -p "$_proj/layers/shared"
+cp -R examples/shared/module.d examples/shared/modules "$_proj/layers/shared/"
+awk -F '\t' 'BEGIN { OFS = "\t" } NR > 1 && $2 != "fish" { $3 = $3 " contrib_shared_umask" } { print }' \
+  examples/e2e/bundles.tsv >"$_proj/bundles.tsv"
+valise -C "$_proj" build
 ```
 
-The provider modules are POSIX-only; Fish users can load the profile's Fish
-modules but not these utilities. To update the provider in a real consuming
-project, vendor a reviewed commit, inspect the diff, then rebuild and verify
-the release. See [the module ABI](../../docs/module-abi.md) for multi-root
-resolution and [the installation guide](../../docs/installation.md) for the
-integrity and provenance limits.
+The release then carries the provider's modules under `layers/shared/`, and
+`e2e_layer_probe_ok` reports that the shared layer resolved. The provider
+modules are POSIX-only, so the Fish closure is unchanged. To update a
+vendored provider in a real project, copy a reviewed commit, inspect the
+diff, then rebuild and verify. See [the module ABI](../../docs/module-abi.md)
+for dependency resolution and [the installation guide](../../docs/installation.md)
+for the integrity and provenance limits.
 
-`tests/e2e.test.sh` runs the install, verification, tamper, and composition
-scenarios in quarantined homes. It also runs available host-shell lanes;
-configured Lima Linux, BusyBox, and BSD lanes run when their VMs are present.
+`tests/e2e.test.sh` runs these scenarios in quarantined homes: every
+available host shell, a tamper lane, and the composition lane. Configured
+Lima Linux, BusyBox, and BSD guests run the same install and load checks
+when their VMs are present.

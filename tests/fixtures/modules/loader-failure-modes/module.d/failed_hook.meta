@@ -1,9 +1,8 @@
 name=failed_hook
 requires=core
 optional=
-shells=sh
+shells=posix
 platforms=any
 side_effect=read-only
 exports=failed_hook_loaded
-updates=
 load=modules/failed_hook.sh

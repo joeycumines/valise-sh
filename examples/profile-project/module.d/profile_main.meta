@@ -1,0 +1,8 @@
+name=profile_main
+version=1.0.0
+side_effect=read-only
+requires=greeting
+optional=
+shells=bash zsh ksh
+platforms=any
+exports=

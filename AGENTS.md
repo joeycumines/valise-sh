@@ -10,11 +10,13 @@ Read [architecture.md](docs/architecture.md) for scope and [module-abi.md](docs/
 - Run tests with their controlled environment. Never source or modify a live user profile as part of testing.
 - Run the narrowest relevant target, then `make check`. Missing extended runtimes skip locally; CI requires them. See the README for overrides.
 - Ensure the `package.json` `files` field is appropriately scoped so release artifacts ship all required contents and remain safely restricted to intended files, even when packaging from a local tree.
+- Run `~/.bun/bin/bun-install` from the repository root to install this working tree as the global `valise` command.
 
 ## Reference
 
 - [Installation and releases](docs/installation.md)
 - [Module ABI](docs/module-abi.md)
+- [Projects, bundles, variants, and builds](docs/projects.md)
 - [Architecture and scope](docs/architecture.md)
 - [Module authoring](docs/contrib-modules.md)
 - [Shared-module policy](docs/shared-modules.md)

@@ -1,0 +1,8 @@
+name=valise_platform_linux
+requires=valise_platform_posix
+optional=
+shells=posix
+platforms=linux
+side_effect=read-only
+exports=sp_platform_linux_available sp_platform_linux_cpu_count sp_platform_linux_file_mtime
+load=modules/platform/linux/capabilities.sh
