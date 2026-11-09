@@ -154,6 +154,17 @@ _home_env() {
     "$@"
 }
 
+# _probe_term: a usable TERM for a child shell. Fish treats an unset or
+# "unknown" terminal as unusable; a real session never does, and autoloading a
+# stock Fish function that runs tput would otherwise write terminal errors to
+# stderr that valise did not produce.
+_probe_term() {
+  case "${TERM:-}" in
+    ''|unknown|dumb) printf '%s\n' xterm ;;
+    *) printf '%s\n' "$TERM" ;;
+  esac
+}
+
 # --- Host lanes ---
 run_lane() {
   _lane=$1
@@ -202,8 +213,13 @@ run_lane() {
   if [ "$_shell_name" = fish ]; then
     # Fish reads its conf.d hook at startup: the hook authenticates the
     # active release and sources the release's runtime/fish/profile.fish.
+    # A real Fish session always has a usable TERM; without one Fish reports
+    # "unknown", and autoloading a stock function that runs tput (for example
+    # __fish_cancel_commandline, whose definition clears to end of line) then
+    # writes "tput: unknown terminal" to stderr. That is Fish's own startup
+    # noise, not valise output, so give the probe a terminal like a user's.
     # shellcheck disable=SC2086
-    _home_env "$_tmp_home" "$_shell_path" -c "$_fish_probe" ${_expect_line#expect } ${_absent_line#absent } \
+    _home_env "$_tmp_home" TERM="$(_probe_term)" "$_shell_path" -c "$_fish_probe" ${_expect_line#expect } ${_absent_line#absent } \
       >"$_tmp_home/load.out" 2>"$_tmp_home/load.err"
     check_load "$_lane/$_shell_name" "$_tmp_home/load.out" "$_expect_line" "$_absent_line" "$_tmp_home/load.err"
     if grep -qx ready "$_tmp_home/load.out"; then
@@ -336,7 +352,7 @@ _e2e="$E2E_RELEASE"
 _snippet_path="\$_tmp_home/$_lima_snippet"
 _henv() {
   env HOME="\$_tmp_home" XDG_DATA_HOME="\$_tmp_home/.local/share" XDG_CONFIG_HOME="\$_tmp_home/.config" \
-    XDG_STATE_HOME="\$_tmp_home/.local/state" PATH="$REPO_ROOT/bin:/usr/local/bin:/usr/bin:/bin" "\$@"
+    XDG_STATE_HOME="\$_tmp_home/.local/state" TERM="$(_probe_term)" PATH="$REPO_ROOT/bin:/usr/local/bin:/usr/bin:/bin" "\$@"
 }
 if (cd "\$_e2e" && _henv SHELL="$_shell_path" "\$_valise" install) >"\$_tmp_home/install1.out" 2>&1 &&
   grep -q 'installing release' "\$_tmp_home/install1.out"; then
