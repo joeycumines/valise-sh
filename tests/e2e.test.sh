@@ -310,18 +310,53 @@ run_lane() {
   # interactive shell loads both. Re-reading the startup file in the same
   # shell is a no-op for the env plan (release-id guard), and a nested
   # shell re-runs the env plan, repairing a simulated path_helper reorder.
+  # For zsh the non-login env path is ~/.zshenv (read by every zsh), so the
+  # non-interactive probe sources .zshenv instead of the rc file; for sh/ksh
+  # the interactive subshell path is $ENV, asserted separately below.
   if [ "$_shell_name" != fish ]; then
     _snippet="$_tmp_home/$(startup_file_for "$_shell_name")"
+    _ni_snippet=$_snippet
+    [ "$_class" = zsh ] && _ni_snippet="$_tmp_home/.zshenv"
     _int_names=''
     case "$_class" in
       bash) _int_names='e2e_show_aliases e2e_bash_completions_loaded' ;;
       zsh)  _int_names='e2e_show_aliases e2e_zsh_completions_loaded' ;;
       ksh)  _int_names='e2e_ksh_loaded' ;;
     esac
+    # zsh reads ~/.zshenv for EVERY invocation, so the block must exist there
+    # (covering non-login 'zsh -c') in addition to the rc/login files.
+    if [ "$_class" = zsh ]; then
+      if [ -f "$_tmp_home/.zshenv" ] && grep -q '# BEGIN valise managed block' "$_tmp_home/.zshenv" &&
+        grep -q 'plans/$_valise_plan.sh' "$_tmp_home/.zshenv"; then
+        pass "$_lane/$_shell_name: the managed block is written to ~/.zshenv"
+      else
+        fail "$_lane/$_shell_name: ~/.zshenv lacks the managed block"
+      fi
+    fi
+    # sh/ksh interactive subshells read $ENV: the .profile block must export
+    # ENV at the valise shim, and install must have deployed the shim carrying
+    # the same two-stage block minus the ENV export.
+    case $_class in
+      sh|ksh)
+        _shim="$_tmp_home/.config/valise/env.sh"
+        if grep -q 'export ENV' "$_tmp_home/.profile" &&
+          grep -q "ENV='$_shim'" "$_tmp_home/.profile" &&
+          [ -f "$_shim" ] &&
+          grep -q '# BEGIN valise managed block' "$_shim" &&
+          grep -q 'case $- in \*i\*)' "$_shim" &&
+          ! grep -q 'export ENV' "$_shim"; then
+          pass "$_lane/$_shell_name: .profile exports ENV at the deployed shim (which carries no ENV export)"
+        else
+          fail "$_lane/$_shell_name: the ENV shim wiring is incomplete"
+          ls -l "$_tmp_home/.profile" "$_shim" >&2 2>/dev/null || :
+          grep -n 'ENV' "$_tmp_home/.profile" >&2 2>/dev/null || :
+        fi
+        ;;
+    esac
     if [ -n "$_int_names" ]; then
       # shellcheck disable=SC2086
       env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
-        "$_shell_path" -c ". '$_snippet'; if command -v e2e_env_ready >/dev/null; then printf 'env=yes'; else printf 'env=no'; fi; for _n in $_int_names; do command -v \"\$_n\" >/dev/null 2>&1 && printf ' int=%s' \"\$_n\"; done; printf '\n'" \
+        "$_shell_path" -c ". '$_ni_snippet'; if command -v e2e_env_ready >/dev/null; then printf 'env=yes'; else printf 'env=no'; fi; for _n in $_int_names; do command -v \"\$_n\" >/dev/null 2>&1 && printf ' int=%s' \"\$_n\"; done; printf '\n'" \
         >"$_tmp_home/ni.out" 2>"$_tmp_home/ni.err"
       if grep -q 'env=yes' "$_tmp_home/ni.out" && \
         ! grep -q 'int=' "$_tmp_home/ni.out" && \
@@ -330,6 +365,22 @@ run_lane() {
       else
         fail "$_lane/$_shell_name: non-interactive startup load is not env-only/silent"
         cat "$_tmp_home/ni.out" "$_tmp_home/ni.err" >&2
+      fi
+      # zsh non-login env: 'zsh -c' reads only ~/.zshenv (plus /etc/zshenv);
+      # with the block there, the env plan applies and the interactive plan
+      # does not, with zero stderr.
+      if [ "$_class" = zsh ]; then
+        env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
+          "$_shell_path" -c 'if command -v e2e_env_ready >/dev/null; then printf "zenv=yes"; else printf "zenv=no"; fi; if command -v e2e_show_aliases >/dev/null 2>&1; then printf " zint=yes"; fi; printf "\n"' \
+          >"$_tmp_home/zc.out" 2>"$_tmp_home/zc.err"
+        if grep -q 'zenv=yes' "$_tmp_home/zc.out" && \
+          ! grep -q 'zint=' "$_tmp_home/zc.out" && \
+          [ ! -s "$_tmp_home/zc.err" ]; then
+          pass "$_lane/$_shell_name: zsh -c loads the env plan via ~/.zshenv, silently, no interactive plan"
+        else
+          fail "$_lane/$_shell_name: zsh -c did not load env-only via ~/.zshenv"
+          cat "$_tmp_home/zc.out" "$_tmp_home/zc.err" >&2
+        fi
       fi
       # shellcheck disable=SC2086
       env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
@@ -341,6 +392,32 @@ run_lane() {
         fail "$_lane/$_shell_name: interactive startup did not load the interactive plan"
         cat "$_tmp_home/int.out" >&2
       fi
+      # sh/ksh: an interactive subshell reads $ENV (exported by the .profile
+      # block), so 'sh -i' with ENV set must load both plans; a
+      # non-interactive child reads no ENV and loads nothing extra.
+      case $_class in
+        sh|ksh)
+          _shim="$_tmp_home/.config/valise/env.sh"
+          env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin "ENV=$_shim" \
+            "$_shell_path" -i -c 'if command -v e2e_env_ready >/dev/null; then printf "subenv=yes"; else printf "subenv=no"; fi; if command -v e2e_ksh_loaded >/dev/null 2>&1 || command -v e2e_show_aliases >/dev/null 2>&1; then printf " subint=yes"; fi; printf "\n"' \
+            >"$_tmp_home/sub.out" 2>/dev/null </dev/null
+          if grep -q 'subenv=yes' "$_tmp_home/sub.out" && grep -q 'subint=yes' "$_tmp_home/sub.out"; then
+            pass "$_lane/$_shell_name: interactive subshell via the \$ENV shim loads both plans"
+          else
+            fail "$_lane/$_shell_name: interactive subshell via the \$ENV shim did not load valise"
+            cat "$_tmp_home/sub.out" >&2
+          fi
+          env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin "ENV=$_shim" \
+            "$_shell_path" -c 'if command -v e2e_env_ready >/dev/null; then printf "cenv=yes"; else printf "cenv=no"; fi; printf "\n"' \
+            >"$_tmp_home/child.out" 2>"$_tmp_home/child.err"
+          if grep -q 'cenv=no' "$_tmp_home/child.out"; then
+            pass "$_lane/$_shell_name: non-interactive child reads no \$ENV"
+          else
+            fail "$_lane/$_shell_name: non-interactive child unexpectedly read \$ENV"
+            cat "$_tmp_home/child.out" "$_tmp_home/child.err" >&2
+          fi
+          ;;
+      esac
       # Same shell, second read: the env plan must not re-run (guard holds
       # the release id), proven by a load-counting probe through VALISE_RELOAD.
       env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
@@ -358,8 +435,9 @@ run_lane() {
       # after the nested shell re-runs the env plan, sourcing the plan again
       # changes nothing (fixed point) and the reordered helper stays behind
       # the entries the plan asserts.
+      _nested_snippet=$_ni_snippet
       env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
-        "$_shell_path" -c ". '$_snippet'; PATH=\"/usr/bin:/bin:/reordered/helper:\$PATH\"; export PATH; env -i HOME=\"\$HOME\" XDG_CONFIG_HOME=\"\$XDG_CONFIG_HOME\" PATH=\"\$PATH\" '$_shell_path' -c '. \"\$HOME/'"$(startup_file_for "$_shell_name")"'\"; p1=\$PATH; VALISE_RELOAD=1 . \"\$HOME/'"$(startup_file_for "$_shell_name")"'\"; p2=\$PATH; [ \"\$p1\" = \"\$p2\" ] && printf \"fixed=yes path=%s\n\" \"\$p2\" || printf \"fixed=no p1=%s p2=%s\n\" \"\$p1\" \"\$p2\"'" \
+        "$_shell_path" -c ". '$_nested_snippet'; PATH=\"/usr/bin:/bin:/reordered/helper:\$PATH\"; export PATH; env -i HOME=\"\$HOME\" XDG_CONFIG_HOME=\"\$XDG_CONFIG_HOME\" PATH=\"\$PATH\" '$_shell_path' -c '. \"\$HOME/'"$(basename "$_nested_snippet")"'\"; p1=\$PATH; VALISE_RELOAD=1 . \"\$HOME/'"$(basename "$_nested_snippet")"'\"; p2=\$PATH; [ \"\$p1\" = \"\$p2\" ] && printf \"fixed=yes path=%s\n\" \"\$p2\" || printf \"fixed=no p1=%s p2=%s\n\" \"\$p1\" \"\$p2\"'" \
         >"$_tmp_home/nested.out" 2>"$_tmp_home/nested.err"
       if grep -q 'fixed=yes' "$_tmp_home/nested.out"; then
         pass "$_lane/$_shell_name: nested shell re-runs the env plan to a fixed point"

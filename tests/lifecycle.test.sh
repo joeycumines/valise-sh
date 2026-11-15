@@ -371,6 +371,114 @@ else
   od -c "$_home/.zshrc" | tail -3 >&2
 fi
 
+# --- ENV shim deploy, user-owned ENV, and uninstall removal ---
+
+_use_home envshim
+_v "$_proj" apply >/dev/null 2>&1
+_shim="$_home/.config/valise/env.sh"
+# The shim carries the two-stage block but must NOT export ENV itself, and
+# the .profile block must point ENV at the shim (SHELL=/bin/bash is not
+# sh/ksh, so test the block emission through SHELL=/bin/sh instead).
+if [ -f "$_shim" ] &&
+  grep -q '# BEGIN valise managed block' "$_shim" &&
+  grep -q 'case $- in \*i\*)' "$_shim" &&
+  ! grep -q 'export ENV' "$_shim" &&
+  [ "$(_mode "$_shim")" = 644 ]; then
+  pass "apply deploys the ENV shim with the two-stage block and no ENV export"
+else
+  fail "apply did not deploy a correct ENV shim"
+  ls -l "$_shim" >&2 2>/dev/null || :
+  cat "$_shim" >&2 2>/dev/null || :
+fi
+# With SHELL=/bin/sh the .profile block exports ENV at the shim.
+( cd "$_proj" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+    XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+    XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh "$_valise" apply ) >/dev/null 2>&1
+if grep -q 'export ENV' "$_home/.profile" &&
+  grep -qF "ENV='$_shim'" "$_home/.profile"; then
+  pass "with SHELL=/bin/sh the .profile block exports ENV at the shim"
+else
+  fail "the .profile block does not export ENV at the shim"
+  grep -n 'ENV' "$_home/.profile" >&2
+fi
+# A user-owned $ENV file is never overwritten: the block only sets ENV when
+# the current value does not name an existing file, and install leaves a
+# non-valise shim in place.
+printf 'export USER_ENV=1\n' >"$_tmp/user-env.sh"
+( cd "$_proj" && env -i HOME="$_home" PATH=/usr/bin:/bin ENV="$_tmp/user-env.sh" \
+    XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+    XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh "$_valise" apply ) >/dev/null 2>&1
+if [ "$(cksum <"$_tmp/user-env.sh")" = "$(printf 'export USER_ENV=1\n' | cksum)" ]; then
+  pass "a user-owned \$ENV file is left untouched"
+else
+  fail "a user-owned \$ENV file was modified"
+fi
+# A non-valise file at the shim path is left in place with a warning.
+_use_home envshim-owned
+printf 'export MINE=1\n' >"$_home/.config/valise/env.sh" 2>/dev/null || {
+  mkdir -p "$_home/.config/valise"
+  printf 'export MINE=1\n' >"$_home/.config/valise/env.sh"
+}
+_v "$_proj" apply >"$_tmp/env-owned.out" 2>&1
+if [ "$(cksum <"$_home/.config/valise/env.sh")" = "$(printf 'export MINE=1\n' | cksum)" ] &&
+  grep -F "leaving $_home/.config/valise/env.sh: it is not the valise ENV shim" "$_tmp/env-owned.out" >/dev/null; then
+  pass "a user-owned shim file is left in place with a warning"
+else
+  fail "a user-owned shim file was overwritten"
+  cat "$_tmp/env-owned.out" >&2
+fi
+# Uninstall removes the valise-owned shim, and leaves a foreign one alone.
+_use_home envshim
+_v "$_proj" uninstall >"$_tmp/env-un.out" 2>&1
+if [ ! -e "$_shim" ] && grep -F "removed the ENV shim: $_shim" "$_tmp/env-un.out" >/dev/null; then
+  pass "uninstall removes the valise ENV shim"
+else
+  fail "uninstall did not remove the valise ENV shim"
+  cat "$_tmp/env-un.out" >&2
+fi
+_v "$_proj" apply >/dev/null 2>&1
+printf 'export MINE=2\n' >"$_shim"
+_v "$_proj" uninstall >"$_tmp/env-un2.out" 2>&1
+if [ -f "$_shim" ] && grep -F "leaving $_shim: it is not the valise ENV shim" "$_tmp/env-un2.out" >/dev/null; then
+  pass "uninstall leaves a user-owned shim in place with a warning"
+else
+  fail "uninstall did not leave a user-owned shim alone"
+  cat "$_tmp/env-un2.out" >&2
+fi
+
+# --- zshenv target ---
+
+_use_home zshenv
+_v "$_proj" apply >/dev/null 2>&1
+# zsh is installed on this host class list only when present; the .zshenv
+# target is emitted when zsh exists OR the file exists. Force the file to
+# exist case by pre-creating it, then re-apply.
+if command -v zsh >/dev/null 2>&1; then
+  if [ -f "$_home/.zshenv" ] && grep -q '# BEGIN valise managed block' "$_home/.zshenv"; then
+    pass "apply writes the managed block to ~/.zshenv when zsh is installed"
+  else
+    fail "apply did not write the managed block to ~/.zshenv"
+    ls -l "$_home/.zshenv" >&2 2>/dev/null || :
+  fi
+else
+  printf 'export ZPRE=1\n' >"$_home/.zshenv"
+  _v "$_proj" apply >/dev/null 2>&1
+  if grep -q '# BEGIN valise managed block' "$_home/.zshenv" &&
+    grep -q 'export ZPRE=1' "$_home/.zshenv"; then
+    pass "apply writes the managed block to an existing ~/.zshenv"
+  else
+    fail "apply did not add the block to an existing ~/.zshenv"
+  fi
+  _v "$_proj" uninstall >/dev/null 2>&1
+  if [ "$(cat "$_home/.zshenv" 2>/dev/null)" = 'export ZPRE=1' ]; then
+    pass "uninstall removes the block from ~/.zshenv leaving prior content intact"
+  else
+    fail "uninstall did not restore ~/.zshenv exactly"
+    cat "$_home/.zshenv" >&2 2>/dev/null || :
+  fi
+fi
+
+
 # --- apply --dry-run ---
 
 _use_home dryrun

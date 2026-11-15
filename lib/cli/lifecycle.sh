@@ -15,7 +15,7 @@ _txn_old_previous=""
 _txn_changed=""
 
 # The startup files valise may write a managed block into.
-VALISE_STARTUP_NAMES='.profile .bash_profile .bash_login .bashrc .zprofile .zshrc'
+VALISE_STARTUP_NAMES='.profile .bash_profile .bash_login .bashrc .zprofile .zshrc .zshenv'
 
 previous_record_path() {
   printf '%s\n' "$VALISE_XDG_STATE/previous"
@@ -426,6 +426,18 @@ cmd_uninstall() {
     elif [ -e "$_un_hook" ] || [ -L "$_un_hook" ]; then
       info "warning: leaving $_un_hook: it is not a regular file"
     fi
+    # Remove the $ENV shim only when valise owns it.
+    _un_shim=$(env_shim_path)
+    if [ -f "$_un_shim" ] && [ ! -L "$_un_shim" ]; then
+      if integration_has_managed_block "$_un_shim" 2>/dev/null; then
+        "$_un_rm" -f "$_un_shim" || die "cannot remove the ENV shim: $_un_shim"
+        info "removed the ENV shim: $_un_shim"
+      else
+        info "warning: leaving $_un_shim: it is not the valise ENV shim"
+      fi
+    elif [ -e "$_un_shim" ] || [ -L "$_un_shim" ]; then
+      info "warning: leaving $_un_shim: it is not a regular file"
+    fi
     _un_lines=$(integration_unmanaged_report) || {
       info "warning: these lines load valise outside a managed block; remove them yourself:"
       printf '%s\n' "$_un_lines"
@@ -461,7 +473,7 @@ cmd_uninstall() {
   "$_un_rmdir" "$VALISE_XDG_STATE" 2>/dev/null || :
   info "valise integration removed; the valise CLI itself is still installed"
   unset _un_keep _un_arg _un_rm _un_rmdir _un_mkdir _un_home _un_name _un_file _un_hook _un_first \
-    _un_lines _un_record
+    _un_lines _un_record _un_shim
 }
 
 # --- Install preview ---

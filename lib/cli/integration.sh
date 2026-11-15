@@ -27,6 +27,10 @@
 # set; any other shell uses the generic sh plan.
 print_posix_integration() {
   _pix_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
+  _pix_env_export=''
+  case "${SHELL:-}" in
+    */ksh|ksh|*/sh|"/bin/sh"|sh) _pix_env_export=1 ;;
+  esac
   printf '%s\n' \
     '# BEGIN valise managed block' \
     "_valise_active_link=$_pix_active_literal" \
@@ -53,9 +57,43 @@ print_posix_integration() {
     '  unset _valise_release_id' \
     'fi' \
     'unset _valise_active _valise_plan' \
-    'unset _valise_active_link' \
-    '# END valise managed block'
-  unset _pix_active_literal
+    'unset _valise_active_link'
+  # sh/ksh interactive subshells read $ENV on startup; point it at the valise
+  # shim so a nested POSIX shell loads valise too. Only set when ENV does not
+  # already name an existing user-owned file.
+  if [ "$_pix_env_export" = 1 ]; then
+    _pix_shim_literal=$(shell_quote "${XDG_CONFIG_HOME:-$HOME/.config}/valise/env.sh") || { unset _pix_active_literal _pix_env_export; return 1; }
+    printf '%s\n' \
+      "if [ -z \"\${ENV:-}\" ] || [ ! -e \"\$ENV\" ]; then" \
+      "  ENV=$_pix_shim_literal" \
+      '  export ENV' \
+      'fi'
+    unset _pix_shim_literal
+  fi
+  printf '%s\n' '# END valise managed block'
+  unset _pix_active_literal _pix_env_export
+}
+
+# env_shim_path: the $ENV shim install writes for sh/ksh subshells.
+env_shim_path() {
+  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/valise/env.sh"
+}
+
+# print_env_shim: the contents of the $ENV shim. It is the same two-stage
+# managed block, minus the ENV export (a shim must not re-point ENV).
+print_env_shim() {
+  _pes_saved_shell=${SHELL:-}
+  SHELL=/bin/sh
+  print_posix_integration | awk '
+    /^# BEGIN valise managed block$/ { inblock = 1; print; next }
+    /^# END valise managed block$/   { inblock = 0; print; next }
+    inblock && /^if \[ -z "\$\{ENV:-\}" \]/ { skip = 1; next }
+    skip && /^fi$/ { skip = 0; next }
+    skip { next }
+    { print }
+  '
+  SHELL=$_pes_saved_shell
+  unset _pes_saved_shell
 }
 
 # integration_markers_paired <file>
@@ -126,7 +164,7 @@ integration_shell_files() {
     printf '%s\n' "$2/.bashrc"
     ;;
   zsh)
-    printf '%s\n' "$2/.zprofile" "$2/.zshrc"
+    printf '%s\n' "$2/.zshenv" "$2/.zprofile" "$2/.zshrc"
     ;;
   fish)
     printf '%s\n' "${XDG_CONFIG_HOME:-$2/.config}/fish/conf.d/valise.fish"
@@ -162,6 +200,14 @@ posix_startup_targets() {
   */zsh | zsh) printf '%s\n' "$1/.zshrc" ;;
   *) if [ -e "$1/.zshrc" ] || [ -L "$1/.zshrc" ]; then printf '%s\n' "$1/.zshrc"; fi ;;
   esac
+  # zsh reads ~/.zshenv for EVERY invocation (login or not, interactive or
+  # not), before /etc/zprofile runs path_helper on macOS, so the managed
+  # block there covers 'zsh -c' env and the .zprofile block repairs PATH
+  # after path_helper; double evaluation is harmless (release-id guard +
+  # convergent env plan).
+  if [ -e "$1/.zshenv" ] || [ -L "$1/.zshenv" ] || command -v zsh >/dev/null 2>&1; then
+    printf '%s\n' "$1/.zshenv"
+  fi
 }
 
 # Write the managed block to every startup file install manages.
@@ -179,7 +225,32 @@ write_posix_integration() {
   done <<EOF
 $_wpi_targets
 EOF
-  unset _wpi_home _wpi_snippet _wpi_targets _wpi_target
+  # The $ENV shim for sh/ksh subshells: the same two-stage block, minus the
+  # ENV export. Never overwrite a user-owned shim.
+  _wpi_shim=$(env_shim_path)
+  _wpi_shim_parent=$(path_parent "$_wpi_shim")
+  _wpi_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  [ -d "$_wpi_shim_parent" ] || "$_wpi_mkdir" -p "$_wpi_shim_parent" || die "cannot create shim parent: $_wpi_shim_parent"
+  if [ -e "$_wpi_shim" ] || [ -L "$_wpi_shim" ]; then
+    if [ -L "$_wpi_shim" ] || ! integration_has_managed_block "$_wpi_shim" 2>/dev/null; then
+      info "warning: leaving $_wpi_shim: it is not the valise ENV shim"
+      unset _wpi_home _wpi_snippet _wpi_targets _wpi_target _wpi_shim _wpi_shim_parent _wpi_mkdir
+      return 0
+    fi
+  fi
+  _wpi_shim_tmp=$(trusted_mktemp_at "$_wpi_shim_parent" file "$_wpi_shim_parent/.valise-env.XXXXXX") ||
+    die "cannot create shim staging file"
+  if ! print_env_shim >"$_wpi_shim_tmp"; then
+    _wpi_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
+    "$_wpi_rm" -f "$_wpi_shim_tmp"
+    die "cannot generate the ENV shim"
+  fi
+  _wpi_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+  _wpi_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
+  "$_wpi_chmod" 0644 "$_wpi_shim_tmp" && "$_wpi_mv" -f "$_wpi_shim_tmp" "$_wpi_shim" ||
+    { "$_wpi_rm" -f "$_wpi_shim_tmp" 2>/dev/null || :; die "cannot publish the ENV shim: $_wpi_shim"; }
+  info "ENV shim deployed: $_wpi_shim"
+  unset _wpi_home _wpi_snippet _wpi_targets _wpi_target _wpi_shim _wpi_shim_parent _wpi_mkdir _wpi_shim_tmp _wpi_chmod _wpi_mv _wpi_rm
 }
 
 cmd_doctor() {
@@ -339,6 +410,28 @@ cmd_doctor() {
         printf '  FAIL: no valise integration found for %s (checked:%s)\n' \
           "${_doctor_shell:-the current shell}" "$_doctor_candidates"
         _status=1
+      fi
+      # Archetype diagnostics: a legacy single-stage block (no $- gate inside
+      # the markers) is upgradeable; an sh/ksh login shell whose ENV does not
+      # point at the valise shim misses interactive subshells; zsh without a
+      # .zshenv block misses non-login 'zsh -c' env.
+      if [ -f "$HOME/.profile" ] && [ ! -L "$HOME/.profile" ]; then
+        if integration_has_managed_block "$HOME/.profile" &&
+          ! awk '/^# BEGIN valise managed block$/ { inblock = 1 } inblock && /case \$- in \*i\*\)/ { gate = 1 } /^# END valise managed block$/ { inblock = 0 } END { exit gate ? 0 : 1 }' "$HOME/.profile"; then
+          printf '  warn: ~/.profile has a legacy single-stage block; run valise install again to upgrade to the two-stage block\n'
+        fi
+      fi
+      case "${_doctor_shell:-}" in
+        ksh|sh|"")
+          if [ -n "${ENV:-}" ] && [ -e "$ENV" ] && [ "$ENV" != "$(env_shim_path)" ]; then
+            printf '  warn: $ENV points at %s, not the valise shim %s; interactive sh/ksh subshells will not load valise\n' "$ENV" "$(env_shim_path)"
+          fi
+          ;;
+      esac
+      if [ "$_doctor_shell" = zsh ] && command -v zsh >/dev/null 2>&1; then
+        if [ ! -f "$HOME/.zshenv" ] || ! integration_has_managed_block "$HOME/.zshenv" 2>/dev/null; then
+          printf '  warn: no valise managed block in ~/.zshenv; non-login zsh (zsh -c) will not load the env plan\n'
+        fi
       fi
     else
       printf '  info: skipping the shell integration check\n'

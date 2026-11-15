@@ -206,6 +206,70 @@ if _env; then
   fi
 fi
 
+# --- doctor archetype diagnostics ---
+# (a) A legacy single-stage block (managed markers but no 'case $- in *i*)'
+# gate inside) is reported as upgradeable.
+# (b) An sh/ksh login shell whose ENV points elsewhere is warned about.
+# (c) zsh installed without a .zshenv block is warned about.
+# The running shell here is unknown (SHELL unset in the harness), which maps
+# to the sh/ksh diagnostics branch.
+
+if _env; then
+  # Restore a good block in .profile, then rewrite it as a legacy
+  # single-stage block (markers present, no $- gate inside).
+  if [ -f "$HOME/.profile" ]; then
+    # Regenerate a legacy single-stage block: keep the markers, drop the
+    # whole stage-2 'case $- in *i*) ... esac' gate.
+    awk '
+      /^  case \$- in \*i\*\)$/ { skip = 1; next }
+      skip && /^  esac$/ { skip = 0; next }
+      skip { next }
+      { print }
+    ' "$HOME/.profile" >"$_test_root/legacy-profile"
+    cp "$_test_root/legacy-profile" "$HOME/.profile"
+    "$_valise" doctor >"$_test_root/doctor-legacy.out" 2>&1 || :
+    if grep -F 'legacy single-stage block' "$_test_root/doctor-legacy.out" >/dev/null 2>&1; then
+      pass "doctor flags a legacy single-stage block as upgradeable"
+    else
+      fail "doctor did not flag the legacy single-stage block"
+      cat "$_test_root/doctor-legacy.out" >&2
+    fi
+    # Restore the good two-stage block for later scenarios.
+    "$_valise" install >/dev/null 2>&1 || :
+  else
+    skip "doctor flags a legacy single-stage block as upgradeable (no .profile)"
+  fi
+
+  # (b) ENV pointing at a user file for an sh-class shell: warn.
+  printf 'export USER_ENV=1\n' >"$_test_root/user-env.sh"
+  env SHELL=/bin/sh ENV="$_test_root/user-env.sh" "$_valise" doctor >"$_test_root/doctor-env.out" 2>&1 || :
+  if grep -F 'not the valise shim' "$_test_root/doctor-env.out" >/dev/null 2>&1; then
+    pass "doctor warns when \$ENV points away from the valise shim"
+  else
+    fail "doctor did not warn about a foreign \$ENV"
+    cat "$_test_root/doctor-env.out" >&2
+  fi
+
+  # (c) zsh installed but no .zshenv block: warn. Only when zsh exists.
+  if command -v zsh >/dev/null 2>&1; then
+    if env SHELL=/bin/zsh "$_valise" doctor >"$_test_root/doctor-zshenv.out" 2>&1; then
+      :
+    fi
+    if [ ! -f "$HOME/.zshenv" ] || ! grep -q '# BEGIN valise managed block' "$HOME/.zshenv" 2>/dev/null; then
+      if grep -F 'no valise managed block in ~/.zshenv' "$_test_root/doctor-zshenv.out" >/dev/null 2>&1; then
+        pass "doctor warns when zsh is installed but ~/.zshenv has no block"
+      else
+        fail "doctor did not warn about the missing ~/.zshenv block"
+        cat "$_test_root/doctor-zshenv.out" >&2
+      fi
+    else
+      skip "doctor warns when zsh is installed but ~/.zshenv has no block (block present)"
+    fi
+  else
+    skip "doctor warns when zsh is installed but ~/.zshenv has no block (no zsh)"
+  fi
+fi
+
 # --- doctor: a tampered release fails ---
 
 if _env; then
