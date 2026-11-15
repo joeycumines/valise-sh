@@ -29,7 +29,7 @@ print_posix_integration() {
   _pix_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
   _pix_env_export=''
   case "${SHELL:-}" in
-    */ksh|ksh|*/sh|"/bin/sh"|sh) _pix_env_export=1 ;;
+    */ksh|ksh|*/sh|"/bin/sh"|sh|*/dash|dash|*/ash|ash|*/busybox|busybox) _pix_env_export=1 ;;
   esac
   printf '%s\n' \
     '# BEGIN valise managed block' \
