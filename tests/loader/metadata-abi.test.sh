@@ -551,6 +551,67 @@ _status=$?
 assert_exit 'ordinary source rejects install-time side-effect class' 1 "$_status"
 assert_contains 'install-time source rejection diagnostic is explicit' "$_out" 'side_effect not allowed during ordinary source: install-time'
 
+printf '\n=== Metadata phase field ===\n'
+_phase_meta() {
+  _pm_target="$_tmp/$1.meta"
+  shift
+  _pm_side=read-only
+  _pm_extra=
+  for _pm_line do
+    case "$_pm_line" in
+    side_effect=*) _pm_side=${_pm_line#side_effect=} ;;
+    *) _pm_extra="$_pm_extra$_pm_line
+" ;;
+    esac
+  done
+  {
+    printf '%s\n' 'name=phase_probe' 'requires=' 'optional=' 'shells=posix' 'platforms=any' \
+      "side_effect=$_pm_side" 'exports=phase_probe' 'load=modules/phase_probe.sh'
+    printf '%s' "$_pm_extra"
+  } >"$_pm_target"
+  unset _pm_side _pm_extra
+}
+_phase_meta phase-env 'phase=env'
+run_read "$_pm_target"
+assert_exit 'metadata accepts phase=env' 0 "$_status"
+assert_contains 'phase=env is emitted verbatim' "$_out" 'phase=env'
+_phase_meta phase-interactive 'phase=interactive'
+run_read "$_pm_target"
+assert_exit 'metadata accepts phase=interactive' 0 "$_status"
+assert_contains 'phase=interactive is emitted verbatim' "$_out" 'phase=interactive'
+_phase_meta phase-omitted
+run_read "$_pm_target"
+assert_exit 'metadata accepts a record without phase' 0 "$_status"
+assert_contains 'omitted phase defaults to env' "$_out" 'phase=env'
+for _phase_bad in bogus ENV interactive2 'env interactive'; do
+  _phase_meta phase-bad "phase=$_phase_bad"
+  run_read "$_pm_target"
+  assert_exit "metadata rejects phase: $_phase_bad" 1 "$_status"
+  assert_contains "phase diagnostic is explicit: $_phase_bad" "$_out" 'invalid phase'
+done
+_phase_meta phase-path-env 'phase=interactive' 'side_effect=path-env'
+run_read "$_pm_target"
+assert_exit 'metadata rejects phase=interactive with side_effect=path-env' 1 "$_status"
+assert_contains 'path-env phase rule diagnostic is explicit' "$_out" 'PATH mutation belongs to the env phase'
+_phase_meta phase-path-env-ok 'phase=env' 'side_effect=path-env'
+run_read "$_pm_target"
+assert_exit 'metadata accepts phase=env with side_effect=path-env' 0 "$_status"
+_phase_meta phase-path-env-ok2 'side_effect=path-env'
+run_read "$_pm_target"
+assert_exit 'metadata accepts omitted phase with side_effect=path-env (defaults to env)' 0 "$_status"
+unset _pm_target _pm_line _phase_bad
+
+_out=$(sp_metadata_validate_phase env 2>&1)
+_status=$?
+assert_exit 'validator accepts env' 0 "$_status"
+_out=$(sp_metadata_validate_phase interactive 2>&1)
+_status=$?
+assert_exit 'validator accepts interactive' 0 "$_status"
+_out=$(sp_metadata_validate_phase bogus 2>&1)
+_status=$?
+assert_exit 'validator rejects an unknown phase' 1 "$_status"
+assert_contains 'validator phase diagnostic is explicit' "$_out" 'invalid phase'
+
 printf '\n=== metadata-abi summary ===\n'
 printf 'Total: %d  Pass: %d  Fail: %d\n' "$_total" "$_pass" "$_fail"
 

@@ -142,7 +142,14 @@ _lint_case() {
   cp -R "$_proj" "$_lc_copy"
   (cd "$_lc_copy" && eval "$3")
   if _v "$_lc_copy" lint >"$_tmp/lc.out" 2>&1; then
-    fail "$1 (lint passed)"
+    case "$2" in
+    'valise lint: no problems')
+      pass "$1"
+      ;;
+    *)
+      fail "$1 (lint passed)"
+      ;;
+    esac
   elif grep -F -- "$2" "$_tmp/lc.out" >/dev/null; then
     pass "$1"
   else
@@ -168,6 +175,24 @@ _lint_case "lint names an unknown bundle root" 'bundle default variant default (
 _lint_case "lint fails a variant that excludes a required dependency" \
   'bundle default variant no-secrets (sh): variant exclusion breaks a required dependency: main requires secrets' \
   "sed 's/^requires=contrib_acme_path\$/requires=contrib_acme_path secrets/' module.d/main.meta >m && mv m module.d/main.meta"
+_lint_case "lint rejects an unknown phase value" \
+  'invalid phase: bogus' \
+  "sed 's/^side_effect=local-secret\$/side_effect=local-secret\\nphase=bogus/' module.d/secrets.meta >m && mv m module.d/secrets.meta"
+_lint_case "lint rejects raw PATH assignment in an env-phase body" \
+  'secrets: env-phase body assigns PATH directly' \
+  "printf 'PATH=\$HOME/.local/bin:\$PATH\\nexport PATH\\n' >>modules/secrets.sh"
+_lint_case "lint rejects export PATH prepend in an env-phase body" \
+  'env-phase body assigns PATH directly' \
+  "printf 'export PATH=\$HOME/bin:\$PATH\\n' >>modules/main.sh"
+_lint_case "lint diagnostic names valise_path_prepend for raw PATH writes" \
+  'valise_path_prepend' \
+  "printf 'PATH=\$HOME/bin:\$PATH\\n' >>modules/main.sh"
+_lint_case "lint accepts valise_path_prepend in an env-phase body" \
+  'valise lint: no problems' \
+  "printf 'valise_path_prepend \"\$HOME/.local/bin\"\\n' >>modules/main.sh"
+_lint_case "lint allows raw PATH writes in an interactive-phase body" \
+  'valise lint: no problems' \
+  "sed 's/^side_effect=read-only\$/side_effect=read-only\\nphase=interactive/' module.d/main.meta >m && mv m module.d/main.meta && printf 'PATH=\$HOME/bin:\$PATH\\n' >>modules/main.sh"
 
 # --- test ---
 

@@ -125,7 +125,7 @@ project_release_prefix() {
 
 # registry_generate <project-root> <output-file>
 # Write the module registry implied by the project's and the engine's
-# metadata. Columns: name version side_effect requires optional shells
+# metadata. Columns: name version side_effect phase requires optional shells
 # platforms exports load commands executables tests source.
 registry_generate() {
   _rg_root=$1
@@ -137,7 +137,7 @@ registry_generate() {
     export LC_ALL=C
     # shellcheck disable=SC1090
     . "$_rg_metadata"
-    printf 'name\tversion\tside_effect\trequires\toptional\tshells\tplatforms\texports\tload\tcommands\texecutables\ttests\tsource\n'
+    printf 'name\tversion\tside_effect\tphase\trequires\toptional\tshells\tplatforms\texports\tload\tcommands\texecutables\ttests\tsource\n'
     for _rg_meta in "$_rg_root"/module.d/*.meta "$_rg_root"/layers/*/module.d/*.meta "$_rg_engine"/module.d/*.meta; do
       [ -f "$_rg_meta" ] || continue
       case "$_rg_meta" in
@@ -177,13 +177,14 @@ registry_generate() {
         printf 'valise: error: %s: %s\n' "$_rg_rel" "${_rg_record:-invalid metadata}" >&2
         exit 1
       }
-      _rg_name= _rg_version= _rg_side_effect= _rg_requires= _rg_optional= _rg_shells=
+      _rg_name= _rg_version= _rg_side_effect= _rg_phase= _rg_requires= _rg_optional= _rg_shells=
       _rg_platforms= _rg_exports= _rg_load= _rg_commands= _rg_executables= _rg_tests=
       while IFS= read -r _rg_line; do
         case "$_rg_line" in
         name=*) _rg_name=${_rg_line#name=} ;;
         version=*) _rg_version=${_rg_line#version=} ;;
         side_effect=*) _rg_side_effect=${_rg_line#side_effect=} ;;
+        phase=*) _rg_phase=${_rg_line#phase=} ;;
         requires=*) _rg_requires=${_rg_line#requires=} ;;
         optional=*) _rg_optional=${_rg_line#optional=} ;;
         shells=*) _rg_shells=${_rg_line#shells=} ;;
@@ -234,8 +235,8 @@ EOF
           exit 1
         fi
       done
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$_rg_name" "$_rg_version" "$_rg_side_effect" "$_rg_requires" \
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$_rg_name" "$_rg_version" "$_rg_side_effect" "$_rg_phase" "$_rg_requires" \
         "$_rg_optional" "$_rg_shells" "$_rg_platforms" "$_rg_exports" \
         "$_rg_load" "$_rg_commands" "$_rg_executables" "$_rg_tests" "$_rg_source"
     done
@@ -419,11 +420,11 @@ project_preprocess() {
     }
     NR == 1 { next }
     {
-      id = $1 "@" $13
-      row[id] = 1; row_name[id] = $1; row_src[id] = $13
-      row_req[id] = $4; row_opt[id] = $5; row_load[id] = $9
-      row_platforms[id] = $7; row_side[id] = $3; row_exports[id] = $8
-      if (shell_ok($6)) avail[id] = 1
+      id = $1 "@" $14
+      row[id] = 1; row_name[id] = $1; row_src[id] = $14
+      row_req[id] = $5; row_opt[id] = $6; row_load[id] = $10
+      row_platforms[id] = $8; row_side[id] = $3; row_exports[id] = $9; row_phase[id] = $4
+      if (shell_ok($7)) avail[id] = 1
     }
     END {
       n = split(excludes, ex, " ")
@@ -462,7 +463,7 @@ project_preprocess() {
         }
         load = row_load[id]
         if (load != "") load = prefix_of(row_src[id]) load
-        printf "MOD:%s\t%s\t%s\t%s\t%s\t%s\t%s\n", id, req, load, row_platforms[id], row_side[id], row_exports[id], opt
+        printf "MOD:%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", id, req, load, row_platforms[id], row_side[id], row_exports[id], opt, row_phase[id]
       }
     }
   ' "$1"
@@ -1082,7 +1083,7 @@ cmd_module() {
       die "cannot create module list staging file"
     registry_generate "$_project_root" "$_module_list_tmp"
     _module_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
-    "$_module_awk" -F '\t' 'NR > 1 && $13 != "valise" { print $1 }' "$_module_list_tmp"
+    "$_module_awk" -F '\t' 'NR > 1 && $14 != "valise" { print $1 }' "$_module_list_tmp"
     _module_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
     "$_module_rm" -f "$_module_list_tmp" || die "cannot remove module list staging file"
     _module_list_tmp=""
@@ -1285,7 +1286,7 @@ project_build_commands() {
       _pbc_name=${_pbc_id%%@*}
       _pbc_source=${_pbc_id#*@}
       _pbc_row=$("$_pbc_awk" -F '\t' -v n="$_pbc_name" -v s="$_pbc_source" \
-        'NR > 1 && $1 == n && $13 == s { print $6 "\t" $10 "\t" $11; exit }' "$_pbc_registry")
+        'NR > 1 && $1 == n && $14 == s { print $7 "\t" $11 "\t" $12; exit }' "$_pbc_registry")
       _pbc_shells=${_pbc_row%%"	"*}
       _pbc_rest=${_pbc_row#*"	"}
       _pbc_cmds=${_pbc_rest%%"	"*}
@@ -1442,7 +1443,7 @@ project_build() {
     _pb_modules="${_pb_modules:+$_pb_modules }$_pb_id"
     _pb_name=${_pb_id%%@*}
     _pb_source=${_pb_id#*@}
-    _pb_load=$("$_pb_awk" -F '\t' -v n="$_pb_name" -v s="$_pb_source" 'NR > 1 && $1 == n && $13 == s { print $9; exit }' "$_pb_registry")
+    _pb_load=$("$_pb_awk" -F '\t' -v n="$_pb_name" -v s="$_pb_source" 'NR > 1 && $1 == n && $14 == s { print $10; exit }' "$_pb_registry")
     _pb_dir=$(project_source_dir "$_project_root" "$_pb_source") || die "unsupported registry source: $_pb_source"
     _pb_prefix=$(project_release_prefix "$_pb_source") || die "unsupported registry source: $_pb_source"
     _pb_pairs="$_pb_dir/module.d/$_pb_name.meta:${_pb_prefix}module.d/$_pb_name.meta"

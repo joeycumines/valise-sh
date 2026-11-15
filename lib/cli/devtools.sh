@@ -189,6 +189,21 @@ lint_report() {
   [ "$1" != FAIL ] || _lint_problems=$((_lint_problems + 1))
 }
 
+# _lint_path_scan <file> <module>: reject raw PATH assignments in an
+# env-phase module body. Covers 'PATH=...', 'export PATH=...', and
+# whitespace-prefixed variants; valise_path_prepend/append writes go through
+# the helper and are fine.
+_lint_path_scan() {
+  _lps_file=$1
+  _lps_mod=$2
+  [ -f "$_lps_file" ] || return 0
+  _lps_hits=$(grep -nE '(^|[;&|[:space:]])export[[:space:]]+PATH=|(^[[:space:]]*)PATH=' "$_lps_file" 2>/dev/null || :)
+  if [ -n "$_lps_hits" ]; then
+    lint_report FAIL "$_lps_mod: env-phase body assigns PATH directly (line $(printf '%s' "$_lps_hits" | head -n 1 | cut -d: -f1)); use valise_path_prepend/valise_path_append (requires=valise_path) so re-evaluation stays idempotent"
+  fi
+  unset _lps_file _lps_mod _lps_hits
+}
+
 # lint_parse <class> <file> <label>
 lint_parse() {
   if ! _lp_interp=$(devtool_interpreter "$1"); then
@@ -305,9 +320,9 @@ cmd_lint() {
   # Syntax of every body and test with each parser its shells name.
   # Tab is IFS whitespace, so read would merge empty columns; awk emits a
   # separator that no validated name or path contains.
-  "$_lint_awk" -F '\t' 'NR > 1 && $13 != "valise" { print $1 "|" $6 "|" $9 "|" $12 "|" $13 }' \
+  "$_lint_awk" -F '\t' 'NR > 1 && $14 != "valise" { print $1 "|" $7 "|" $10 "|" $13 "|" $14 "|" $4 }' \
     "$_lint_registry" >"$_dev_tmp/lint-rows" || die "cannot read the registry"
-  while IFS='|' read -r _lint_mname _lint_shells _lint_load _lint_tests _lint_src; do
+  while IFS='|' read -r _lint_mname _lint_shells _lint_load _lint_tests _lint_src _lint_phase; do
     if [ -n "$_lint_select" ]; then
       case " $_lint_select " in
       *" $_lint_mname "* | *" $_lint_mname@$_lint_src "*) ;;
@@ -330,11 +345,21 @@ cmd_lint() {
         lint_parse "$_lint_class" "$_lint_dir/$_lint_file" "${_lint_rel:+$_lint_rel/}$_lint_file"
       done
     done
+    # Env-phase bodies must not mutate PATH with raw assignments: the env plan
+    # is re-sourced at every startup entry point, so a raw 'PATH=...:$PATH'
+    # would duplicate entries on re-evaluation. PATH changes go through
+    # valise_path_prepend/append (requires=valise_path).
+    if [ -n "$_lint_load" ] && [ "$_lint_phase" = env ]; then
+      case "$_lint_src" in
+      valise) [ "$_lint_mname" = valise_path ] || _lint_path_scan "$_lint_dir/$_lint_load" "$_lint_mname" ;;
+      *) _lint_path_scan "$_lint_dir/$_lint_load" "$_lint_mname" ;;
+      esac
+    fi
   done <"$_dev_tmp/lint-rows"
   lint_report ok "$_lint_parsed syntax check(s)"
   if [ -n "$_lint_select" ]; then
     for _lint_want in $_lint_select; do
-      "$_lint_awk" -F '\t' -v w="$_lint_want" 'NR > 1 && $13 != "valise" && ($1 == w || $1 "@" $13 == w) { f = 1 } END { exit !f }' \
+      "$_lint_awk" -F '\t' -v w="$_lint_want" 'NR > 1 && $14 != "valise" && ($1 == w || $1 "@" $14 == w) { f = 1 } END { exit !f }' \
         "$_lint_registry" || lint_report FAIL "unknown module: $_lint_want"
     done
   fi
@@ -348,7 +373,7 @@ cmd_lint() {
   unset _lint_require _lint_select _lint_arg _lint_problems _lint_parsed _lint_missing _lint_awk _lint_registry \
     _lint_out _lint_layer _lint_name _lint_line _lint_bundles _lint_variants _lint_bundle _lint_variant _lint_excl \
     _lint_combo_ok _lint_shell _lint_roots _lint_mname _lint_shells _lint_load _lint_tests _lint_src \
-    _lint_dir _lint_rel _lint_file _lint_class _lint_want
+    _lint_dir _lint_rel _lint_file _lint_class _lint_want _lint_phase
 }
 
 # --- test ---
@@ -377,7 +402,7 @@ cmd_test() {
   _test_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   registry_generate "$_project_root" "$_dev_tmp/registry"
   for _test_want in $_test_select; do
-    "$_test_awk" -F '\t' -v w="$_test_want" 'NR > 1 && $13 != "valise" && ($1 == w || $1 "@" $13 == w) { f = 1 } END { exit !f }' \
+    "$_test_awk" -F '\t' -v w="$_test_want" 'NR > 1 && $14 != "valise" && ($1 == w || $1 "@" $14 == w) { f = 1 } END { exit !f }' \
       "$_dev_tmp/registry" || die "unknown module: $_test_want"
   done
   _test_pass=0
@@ -386,7 +411,7 @@ cmd_test() {
   _test_n=0
   _test_any=0
   _test_rows="$_dev_tmp/rows"
-  "$_test_awk" -F '\t' 'NR > 1 && $13 != "valise" && $12 != "" { print $1 "\t" $6 "\t" $12 "\t" $13 }' \
+  "$_test_awk" -F '\t' 'NR > 1 && $14 != "valise" && $13 != "" { print $1 "\t" $7 "\t" $13 "\t" $14 }' \
     "$_dev_tmp/registry" >"$_test_rows"
   while IFS="$(printf '\t')" read -r _dev_name _test_mshells _test_files _test_src; do
     if [ -n "$_test_select" ]; then

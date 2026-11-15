@@ -53,6 +53,19 @@ Choose `shells` by what the body needs:
 - `fish` for a native Fish body (`.fish`). A Fish module never runs a POSIX
   body, so a feature that needs both shells is two modules.
 
+Choose `phase` by when the body may run (see
+[module-abi.md](module-abi.md#phases)):
+
+- omit it (or write `phase=env`) for environment content: exported scalars,
+  PATH entries (always through `valise_path_prepend`/`valise_path_append`),
+  `umask`, and XDG defaults. The env plan is sourced at every startup entry
+  point and must stay silent and idempotent, so `valise lint` rejects raw
+  `PATH=` assignments in an env-phase body.
+- `phase=interactive` for aliases, functions, prompt, history, shell options,
+  completions, and keybindings — anything that only makes sense when `$-`
+  contains `i`. Gate TTY-only work (for example `stty`, `GPG_TTY`) behind
+  `sp_cap_is_tty` inside the interactive body.
+
 Zsh runs module functions with the user's options. A body that relies on
 word splitting of unquoted expansions behaves differently in zsh, where it
 is off by default; quote expansions, split explicitly, or leave zsh out of

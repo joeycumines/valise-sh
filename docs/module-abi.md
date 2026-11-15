@@ -35,6 +35,7 @@ Optional fields:
 | `executables` | Space-separated module-relative paths of scripts published as commands. |
 | `tests` | Space-separated module-relative test scripts that `valise test` runs. |
 | `version` | Optional module version used to reject version skew across roots. |
+| `phase` | Load phase: `env` (default when absent) or `interactive`. See [Phases](#phases). |
 
 ## Meta modules
 
@@ -292,6 +293,34 @@ build. `valise-release.conf` lists the published names in `commands=`.
 Installation puts a stub for each name on PATH; see
 [installation.md](installation.md#published-commands).
 
+## Phases
+
+The optional `phase` field names when a module's body may run:
+
+- `env` (the default when `phase` is omitted) — the module joins the env plan,
+  which is sourced at **every** startup entry point (`.profile`, `.zprofile`,
+  `.zshenv`, the `$ENV` shim, and the stage-1 of `.bashrc`/`.zshrc`), not only
+  in interactive shells. An env-phase body must therefore be silent, fast, and
+  idempotent: it is a convergent projection of the environment, re-evaluated in
+  every fresh shell so that an outer `path_helper` or `/etc/profile` cannot
+  leave stale PATH order behind.
+- `interactive` — the module joins the interactive plan, which is sourced only
+  when `$-` contains `i`. Use it for aliases, functions, prompt, history,
+  completions, and keybindings.
+
+One rule is enforced at parse time: `phase=interactive` combined with
+`side_effect=path-env` is rejected, because PATH mutation belongs to the env
+phase — an interactive-only PATH change would be missing exactly in the
+non-interactive contexts that need it.
+
+Within an `env`-phase body, raw PATH assignments (`PATH=...:$PATH`,
+`export PATH=...`) are rejected by `valise lint`. PATH changes go through
+`valise_path_prepend` / `valise_path_append` (declare `requires=valise_path`),
+which are idempotent under re-evaluation: sourcing the env plan twice, or in a
+nested shell, reaches the same fixed point instead of growing duplicate
+entries. The engine's own `valise_path` module is the exempt implementer of
+those helpers.
+
 ## Side-effect phases
 
 The ordinary source phase rejects `generated-file`, `update-network`, and
@@ -397,6 +426,9 @@ characters are invalid. Reading metadata must not source these paths.
 
 - `sp_metadata_read <metadata-file>` prints normalized fields for a valid record.
 - `sp_metadata_validate_identifier <identifier>` validates ABI identifiers.
+- `sp_metadata_validate_phase <phase>` validates `env`/`interactive`.
+- `sp_metadata_validate_phase_side_effect <phase> <side_effect>` rejects
+  `interactive` + `path-env`.
 - `sp_metadata_validate_source_side_effect <side_effect>` rejects phase-unsafe
   classes before ordinary startup can source a module body.
 

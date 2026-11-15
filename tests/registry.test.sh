@@ -81,9 +81,9 @@ fi
 # Project rows come first in module.d then layer order; the engine's own
 # modules follow under the source "valise", one row per engine metadata file.
 {
-  printf 'name\tversion\tside_effect\trequires\toptional\tshells\tplatforms\texports\tload\tcommands\texecutables\ttests\tsource\n'
-  printf 'root\t\tread-only\tcontrib_vendor_tool\t\tbash\tany\troot_ready\tmodules/root.sh\t\t\t\tmodule.d\n'
-  printf 'contrib_vendor_tool\t\tread-only\t\t\tbash\tany\tvendor_tool_ready\tmodules/contrib_vendor_tool.sh\t\t\t\tlayers/vendor/module.d\n'
+  printf 'name\tversion\tside_effect\tphase\trequires\toptional\tshells\tplatforms\texports\tload\tcommands\texecutables\ttests\tsource\n'
+  printf 'root\t\tread-only\tenv\tcontrib_vendor_tool\t\tbash\tany\troot_ready\tmodules/root.sh\t\t\t\tmodule.d\n'
+  printf 'contrib_vendor_tool\t\tread-only\tenv\t\t\tbash\tany\tvendor_tool_ready\tmodules/contrib_vendor_tool.sh\t\t\t\tlayers/vendor/module.d\n'
 } >"$_test_home/expected-head.tsv"
 if head -n 3 "$_registry" | cmp -s - "$_test_home/expected-head.tsv"; then
   pass "registry has the 0.3 columns and the project rows in source order"
@@ -95,7 +95,7 @@ _engine_meta_count=0
 for _engine_meta in "$_repo"/module.d/*.meta; do
   [ -f "$_engine_meta" ] && _engine_meta_count=$((_engine_meta_count + 1))
 done
-_engine_rows=$(awk -F '\t' 'NR > 3 && $13 == "valise" && $1 ~ /^valise_/' "$_registry" | wc -l | tr -d ' ')
+_engine_rows=$(awk -F '\t' 'NR > 3 && $14 == "valise" && $1 ~ /^valise_/' "$_registry" | wc -l | tr -d ' ')
 _total_rows=$(awk 'END { print NR }' "$_registry")
 if [ "$_engine_meta_count" -gt 0 ] && [ "$_engine_rows" -eq "$_engine_meta_count" ] &&
   [ "$_total_rows" -eq $((3 + _engine_meta_count)) ]; then
@@ -149,7 +149,7 @@ fi
 # Adding a module shows up at the end of the module.d rows.
 _meta "$_project/module.d/zeta.meta" zeta '' zeta_ready modules/zeta.sh
 printf '%s\n' 'zeta_ready() { :; }' >"$_project/modules/zeta.sh"
-if (cd "$_project" && "$_valise" registry) 2>/dev/null | awk -F '\t' 'NR == 3 { exit !($1 == "zeta" && $13 == "module.d") }'; then
+if (cd "$_project" && "$_valise" registry) 2>/dev/null | awk -F '\t' 'NR == 3 { exit !($1 == "zeta" && $14 == "module.d") }'; then
   pass "a new module appears in the registry without any regeneration step"
 else
   fail "a new module appears in the registry without any regeneration step"

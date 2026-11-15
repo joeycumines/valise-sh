@@ -253,6 +253,32 @@ sp_metadata_validate_side_effect() {
   esac
 }
 
+# sp_metadata_validate_phase <phase>
+# The load phase of a module: env (default, allowed at every startup entry
+# point) or interactive (only when the shell is interactive).
+sp_metadata_validate_phase() {
+  case "$1" in
+  env | interactive) return 0 ;;
+  *)
+    sp_metadata_error "invalid phase: $1"
+    return 1
+    ;;
+  esac
+}
+
+# sp_metadata_validate_phase_side_effect <phase> <side_effect>
+# PATH/env mutation belongs to the env phase: an interactive-phase module
+# with side_effect=path-env would reorder PATH only in interactive shells and
+# never in the contexts that actually need it.
+sp_metadata_validate_phase_side_effect() {
+  sp_metadata_validate_phase "$1" || return 1
+  if [ "$1" = interactive ] && [ "$2" = path-env ]; then
+    sp_metadata_error 'invalid phase: interactive with side_effect=path-env (PATH mutation belongs to the env phase)'
+    return 1
+  fi
+  return 0
+}
+
 sp_metadata_validate_source_side_effect() {
   sp_metadata_validate_side_effect "$1" || return 1
   case "$1" in
@@ -412,6 +438,7 @@ sp_metadata_read() (
   _spm_shells=
   _spm_platforms=
   _spm_side_effect=
+  _spm_phase=
   _spm_exports=
   _spm_commands=
   _spm_executables=
@@ -446,6 +473,7 @@ sp_metadata_read() (
     shells) _spm_shells=$_spm_value ;;
     platforms) _spm_platforms=$_spm_value ;;
     side_effect) _spm_side_effect=$_spm_value ;;
+    phase) _spm_phase=$_spm_value ;;
     exports) _spm_exports=$_spm_value ;;
     commands) _spm_commands=$_spm_value ;;
     executables) _spm_executables=$_spm_value ;;
@@ -482,6 +510,7 @@ sp_metadata_read() (
   sp_metadata_validate_shell_list "$_spm_shells" || return 1
   sp_metadata_validate_platform_list "$_spm_platforms" || return 1
   sp_metadata_validate_side_effect "$_spm_side_effect" || return 1
+  sp_metadata_validate_phase_side_effect "${_spm_phase:-env}" "$_spm_side_effect" || return 1
   sp_metadata_validate_identifier_list "$_spm_exports" export || return 1
   sp_metadata_validate_commands "$_spm_commands" "$_spm_exports" || return 1
   sp_metadata_validate_path_list "$_spm_executables" executable || return 1
@@ -495,6 +524,7 @@ sp_metadata_read() (
   printf 'shells=%s\n' "$_spm_shells"
   printf 'platforms=%s\n' "$_spm_platforms"
   printf 'side_effect=%s\n' "$_spm_side_effect"
+  printf 'phase=%s\n' "${_spm_phase:-env}"
   printf 'exports=%s\n' "$_spm_exports"
   printf 'commands=%s\n' "$_spm_commands"
   printf 'executables=%s\n' "$_spm_executables"

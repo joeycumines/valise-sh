@@ -159,6 +159,27 @@ function sp_fish_metadata_validate_version --description 'Validate an optional m
     return 0
 end
 
+function sp_fish_metadata_validate_phase --description 'Validate phase value (env|interactive)'
+    switch "$argv[1]"
+        case env interactive
+            return 0
+        case '*'
+            sp_fish_metadata_error "invalid phase: $argv[1]"
+            return 1
+    end
+end
+
+function sp_fish_metadata_validate_phase_side_effect --description 'Reject interactive phase with path-env side effect'
+    if not sp_fish_metadata_validate_phase "$argv[1]"
+        return 1
+    end
+    if test "$argv[1]" = interactive; and test "$argv[2]" = path-env
+        sp_fish_metadata_error 'invalid phase: interactive with side_effect=path-env (PATH mutation belongs to the env phase)'
+        return 1
+    end
+    return 0
+end
+
 function sp_fish_metadata_validate_source_side_effect --description 'Reject side effects forbidden during ordinary source'
     if not sp_fish_metadata_validate_side_effect "$argv[1]"
         return 1
@@ -189,6 +210,7 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
     set -l m_shells ''
     set -l m_platforms ''
     set -l m_side_effect ''
+    set -l m_phase ''
     set -l m_exports ''
     set -l m_commands ''
     set -l m_executables ''
@@ -221,6 +243,7 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
             case shells; set m_shells $val
             case platforms; set m_platforms $val
             case side_effect; set m_side_effect $val
+            case phase; set m_phase $val
             case exports; set m_exports $val
             case commands; set m_commands $val
             case executables; set m_executables $val
@@ -285,6 +308,9 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
     if not sp_fish_metadata_validate_side_effect "$m_side_effect"
         return 1
     end
+    if not sp_fish_metadata_validate_phase_side_effect (test -z "$m_phase"; and echo env; or echo $m_phase) "$m_side_effect"
+        return 1
+    end
     if not sp_fish_metadata_validate_identifier_list "$m_exports" export
         return 1
     end
@@ -333,6 +359,7 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
     echo "shells=$m_shells"
     echo "platforms=$m_platforms"
     echo "side_effect=$m_side_effect"
+    if test -z "$m_phase"; echo "phase=env"; else; echo "phase=$m_phase"; end
     echo "exports=$m_exports"
     echo "commands=$m_commands"
     echo "executables=$m_executables"
