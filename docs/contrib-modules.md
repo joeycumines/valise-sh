@@ -63,8 +63,11 @@ Choose `phase` by when the body may run (see
   `PATH=` assignments in an env-phase body.
 - `phase=interactive` for aliases, functions, prompt, history, shell options,
   completions, and keybindings — anything that only makes sense when `$-`
-  contains `i`. Gate TTY-only work (for example `stty`, `GPG_TTY`) behind
-  `sp_cap_is_tty` inside the interactive body.
+  contains `i`. The block's interactive stage is itself gated on `$-`, and
+  `sp_cap_is_interactive` re-checks it inside a body. Gate TTY-only work
+  (for example `stty`, `GPG_TTY`) behind `sp_cap_is_tty` inside the
+  interactive body, so `ssh host cmd` (interactive flag absent, stdin a
+  pipe) never touches the terminal.
 
 Zsh runs module functions with the user's options. A body that relies on
 word splitting of unquoted expansions behaves differently in zsh, where it

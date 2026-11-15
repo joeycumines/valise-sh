@@ -142,6 +142,28 @@ sp_cap_command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+# sp_cap_is_interactive: succeeds when the running shell is interactive,
+# i.e. $- contains i. Works in sh/dash/ash/bash/zsh/ksh because all of them
+# expose $- as a POSIX special parameter. Callers gate interactive-only work
+# (aliases, prompts, completions) behind this so a non-interactive load
+# (ssh host-cmd, scp, cron) stays silent and cheap.
+sp_cap_is_interactive() {
+  [ "$#" -eq 0 ] || return 1
+  case $- in
+  *i*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+# sp_cap_is_tty: succeeds when standard input is a terminal. Uses the POSIX
+# 'test -t' via '['; every shell in manifests/parser-support.tsv implements
+# [ -t 0 ] reliably enough for gating TTY-bound setup (GPG_TTY, stty). When
+# stdin is a pipe or /dev/null (scripts, ssh host-cmd), returns 1.
+sp_cap_is_tty() {
+  [ "$#" -eq 0 ] || return 1
+  [ -t 0 ]
+}
+
 sp_cap_command_path() {
   [ "$#" -eq 1 ] && [ -n "$1" ] || return 1
   case "$1" in */* | -*) return 1 ;; esac
