@@ -203,6 +203,33 @@ if command -v plutil >/dev/null 2>&1; then
 else
   skip "env export launchd plist passes plutil -lint (plutil unavailable)"
 fi
+# F6: XML-special characters in values must be escaped exactly once — the
+# plist string must contain &amp; (not &amp;amp;) for a literal '&'. The value
+# is assigned quoted in the module body so the shell parses it.
+if printf 'XMLV="a<&>\\"b"\nexport XMLV\n' >>"$_proj/modules/main.sh" &&
+  _v "$_proj" apply >/dev/null 2>&1 &&
+  _v "$_proj" env export launchd >"$_tmp/env-export-ld-xml.out" 2>&1; then
+  if grep -q 'launchctl setenv XMLV a&lt;&amp;&gt;&quot;b' "$_tmp/env-export-ld-xml.out" &&
+    ! grep -q '&amp;amp;\|&amp;lt;\|&amp;gt;\|&amp;quot;' "$_tmp/env-export-ld-xml.out"; then
+    pass "env export launchd escapes XML-special value chars exactly once"
+  else
+    fail "env export launchd double-escapes XML-special value chars"
+    grep 'XMLV' "$_tmp/env-export-ld-xml.out" >&2
+  fi
+  if command -v plutil >/dev/null 2>&1; then
+    if plutil -lint "$_tmp/env-export-ld-xml.out" >/dev/null 2>&1; then
+      pass "env export launchd plist with XML-special value passes plutil -lint"
+    else
+      fail "env export launchd plist with XML-special value fails plutil -lint"
+      cat "$_tmp/env-export-ld-xml.out" >&2
+    fi
+  else
+    skip "env export launchd plist with XML-special value passes plutil -lint (plutil unavailable)"
+  fi
+else
+  fail "env export launchd with an XML-special value did not run"
+  cat "$_tmp/env-export-ld-xml.out" >&2 2>/dev/null || :
+fi
 if _v "$_proj" env export bogus >/dev/null 2>"$_tmp/env-export-bogus.err"; then
   fail "env export rejects an unknown format"
 elif grep -F 'usage: valise env export' "$_tmp/env-export-bogus.err" >/dev/null; then
@@ -242,6 +269,50 @@ elif [ "$(uname -s)" = Darwin ]; then
   ls -l "$_gui_home/Library/LaunchAgents" >&2 2>/dev/null || :
 else
   skip "gui_env=launchd writes the LaunchAgent plist on apply (not darwin; bridge skipped by design)"
+fi
+# F1/F3: a user-owned file at the bridge path must never be overwritten by
+# apply nor removed by uninstall. Plant a foreign plist, re-apply, and check.
+if [ "$(uname -s)" = Darwin ]; then
+  _foreign_home="$_tmp/home-foreign"
+  mkdir -p "$_foreign_home/Library/LaunchAgents"
+  printf 'foreign user file\n' >"$_foreign_home/Library/LaunchAgents/sh.valise.env.plist"
+  _foreign_proj="$_tmp/proj-foreign"
+  cp -R "$_proj" "$_foreign_proj"
+  printf 'gui_env=launchd\n' >>"$_foreign_proj/valise.conf"
+  env -i HOME="$_foreign_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_foreign_home/.local/share" \
+    XDG_CONFIG_HOME="$_foreign_home/.config" XDG_STATE_HOME="$_foreign_home/.local/state" SHELL=/bin/bash \
+    TMPDIR="$_tmp" "$_valise" -C "$_foreign_proj" apply >"$_tmp/apply-foreign.out" 2>&1 || :
+  if [ -f "$_foreign_home/Library/LaunchAgents/sh.valise.env.plist" ] &&
+    grep -q 'foreign user file' "$_foreign_home/Library/LaunchAgents/sh.valise.env.plist" 2>/dev/null &&
+    grep -q 'not the valise GUI env bridge' "$_tmp/apply-foreign.out"; then
+    pass "apply leaves a user-owned file at the bridge path untouched (warns)"
+  else
+    fail "apply clobbered or misreported a user-owned bridge file"
+    ls -l "$_foreign_home/Library/LaunchAgents" >&2 2>/dev/null || :
+    cat "$_tmp/apply-foreign.out" >&2
+  fi
+  env -i HOME="$_foreign_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_foreign_home/.local/share" \
+    XDG_CONFIG_HOME="$_foreign_home/.config" XDG_STATE_HOME="$_foreign_home/.local/state" SHELL=/bin/bash \
+    TMPDIR="$_tmp" "$_valise" -C "$_foreign_proj" uninstall >"$_tmp/un-foreign.out" 2>&1 || :
+  if [ -f "$_foreign_home/Library/LaunchAgents/sh.valise.env.plist" ] &&
+    grep -q 'foreign user file' "$_foreign_home/Library/LaunchAgents/sh.valise.env.plist" 2>/dev/null; then
+    pass "uninstall leaves a user-owned file at the bridge path untouched"
+  else
+    fail "uninstall removed a user-owned file at the bridge path"
+    cat "$_tmp/un-foreign.out" >&2
+  fi
+else
+  skip "apply/uninstall leave a user-owned bridge file untouched (not darwin)"
+  skip "uninstall leaves a user-owned file at the bridge path untouched (not darwin)"
+fi
+# F5: extra arguments to env export are rejected.
+if _v "$_proj" env export launchd extra >/dev/null 2>"$_tmp/env-export-extra.err"; then
+  fail "env export rejects extra arguments"
+elif grep -F 'usage: valise env export' "$_tmp/env-export-extra.err" >/dev/null; then
+  pass "env export rejects extra arguments"
+else
+  fail "env export did not reject extra arguments"
+  cat "$_tmp/env-export-extra.err" >&2
 fi
 if [ -f "$_gui_home/Library/LaunchAgents/sh.valise.env.plist" ] &&
   env -i HOME="$_gui_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_gui_home/.local/share" \

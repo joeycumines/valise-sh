@@ -32,6 +32,18 @@ gui_env_file() {
   esac
 }
 
+# bridge_is_valise_owned <mode> <file>: true when the bridge file carries the
+# valise ownership marker. Both the write path (before replacing) and the
+# uninstall path (before removing) use it, so a user-owned file at the bridge
+# path is never overwritten or deleted.
+bridge_is_valise_owned() {
+  case "${1:-}" in
+  systemd) [ -f "$2" ] && head -n 1 "$2" 2>/dev/null | grep -Fq '# written by valise (gui_env=systemd)' ;;
+  launchd) [ -f "$2" ] && grep -q '<string>sh.valise.env</string>' "$2" 2>/dev/null ;;
+  *) return 1 ;;
+  esac
+}
+
 # write_gui_env_bridge: when the project's valise.conf sets gui_env=systemd
 # (Linux with a systemd user session) or gui_env=launchd (macOS), write the
 # matching bridge file from the active release's env plan. Off (the default)
@@ -107,15 +119,27 @@ write_gui_env_bridge() {
     unset _gue_mode _gue_root _gue_target _gue_shell
     return 0
   }
+  # Never clobber a user-owned file at the bridge path: replace only when the
+  # target is absent, a symlink (mv -f replaces the link itself, never its
+  # referent), or a valise-owned file (marker present — same check uninstall
+  # uses to decide removal).
+  if [ -e "$_gue_target" ] && [ ! -L "$_gue_target" ] && ! bridge_is_valise_owned "$_gue_mode" "$_gue_target"; then
+    info "warning: leaving $_gue_target: it is not the valise GUI env bridge"
+    unset _gue_mode _gue_root _gue_target _gue_shell _gue_capture
+    return 0
+  fi
   _gue_parent=$(path_parent "$_gue_target")
   _gue_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
   [ -d "$_gue_parent" ] || "$_gue_mkdir" -p "$_gue_parent" || die "cannot create bridge parent: $_gue_parent"
   _gue_parent=$(cd "$_gue_parent" 2>/dev/null && pwd -P) || die "cannot resolve bridge parent: $_gue_parent"
+  # Publish into the canonical parent path so a symlinked parent directory
+  # cannot strand the staging file, and the mv renames within one filesystem.
+  _gue_target="$_gue_parent/${_gue_target##*/}"
   _gue_tmp=$(trusted_mktemp_at "$_gue_parent" file "$_gue_parent/.valise-gui.XXXXXX") ||
     die "cannot create GUI bridge staging file"
   case "$_gue_mode" in
-  systemd) env_export_emit environment.d "$_gue_capture" >"$_gue_tmp" || die "cannot render environment.d" ;;
-  launchd) env_export_emit launchd "$_gue_capture" >"$_gue_tmp" || die "cannot render the LaunchAgent plist" ;;
+  systemd) env_export_emit environment.d "$_gue_capture" >"$_gue_tmp" || { rm -f "$_gue_tmp" 2>/dev/null || :; die "cannot render environment.d"; } ;;
+  launchd) env_export_emit launchd "$_gue_capture" >"$_gue_tmp" || { rm -f "$_gue_tmp" 2>/dev/null || :; die "cannot render the LaunchAgent plist"; } ;;
   esac
   _gue_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
   _gue_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
@@ -547,15 +571,14 @@ cmd_uninstall() {
       info "warning: leaving $_un_shim: it is not a regular file"
     fi
     # Remove the GUI env bridge (environment.d / LaunchAgent) valise wrote.
+    # Ownership is the same marker the write path checks, so a user-owned file
+    # at the bridge path is never deleted.
     for _un_mode in systemd launchd; do
       _un_gui=$(gui_env_file "$_un_mode" 2>/dev/null) || continue
       if [ -f "$_un_gui" ] && [ ! -L "$_un_gui" ]; then
-        if [ "$_un_mode" = systemd ] && grep -q 'valise' "$_un_gui" 2>/dev/null; then
-          "$_un_rm" -f "$_un_gui" || die "cannot remove the environment.d bridge: $_un_gui"
-          info "removed the environment.d bridge: $_un_gui"
-        elif [ "$_un_mode" = launchd ] && grep -q 'sh.valise.env' "$_un_gui" 2>/dev/null; then
-          "$_un_rm" -f "$_un_gui" || die "cannot remove the LaunchAgent: $_un_gui"
-          info "removed the LaunchAgent: $_un_gui"
+        if bridge_is_valise_owned "$_un_mode" "$_un_gui"; then
+          "$_un_rm" -f "$_un_gui" || die "cannot remove the $_un_mode bridge: $_un_gui"
+          info "removed the $_un_mode bridge: $_un_gui"
         else
           info "warning: leaving $_un_gui: it is not the valise GUI env bridge"
         fi

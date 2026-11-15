@@ -221,17 +221,17 @@ env_export_emit() {
       BEGIN { cmd = "" }
       /^[A-Za-z_][A-Za-z0-9_]*=/ {
         key = $1; sub(/^[^=]*=/, ""); val = $0
+        # XML-escape the pair exactly once; the joined command is already
+        # escaped, so END must not re-escape it (double-escaping corrupts
+        # values containing & < > ").
         esc = key " " val
         gsub(/&/, "\\&amp;", esc); gsub(/</, "\\&lt;", esc); gsub(/>/, "\\&gt;", esc)
+        gsub(/"/, "\\&quot;", esc)
         if (cmd == "") cmd = "launchctl setenv " esc
         else cmd = cmd "; launchctl setenv " esc
       }
       END {
-        if (cmd != "") {
-          gsub(/&/, "\\&amp;", cmd); gsub(/</, "\\&lt;", cmd); gsub(/>/, "\\&gt;", cmd)
-          gsub(/"/, "\\&quot;", cmd)
-          printf "    <string>%s</string>\n", cmd
-        }
+        if (cmd != "") printf "    <string>%s</string>\n", cmd
       }
     '
     printf '%s\n' '  </array>' \
@@ -264,6 +264,7 @@ cmd_env() {
     environment.d|launchd|wsl) ;;
     *) die "usage: valise env export <environment.d|launchd|wsl>" ;;
     esac
+    [ $# -eq 1 ] || die "usage: valise env export <environment.d|launchd|wsl>"
     _ee_active=$(active_release_dir 2>/dev/null) || die "no active release: run valise install first"
     _ee_shell=sh
     case "${SHELL:-}" in
