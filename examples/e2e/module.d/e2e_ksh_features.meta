@@ -6,3 +6,4 @@ platforms=any
 side_effect=read-only
 exports=e2e_ksh_loaded
 load=modules/e2e/ksh_features.sh
+phase=interactive

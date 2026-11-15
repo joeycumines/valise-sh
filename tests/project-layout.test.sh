@@ -288,7 +288,8 @@ if HOME="$_home" _BLOCK=$_block _ACTIVE=$_active _TARGET=$_target /bin/sh -c '
   command -v greet >/dev/null 2>&1 && exit 3
   ln -s "$_TARGET" "$_ACTIVE"
   eval "$_BLOCK"
-  [ "${_valise_profile_loaded:-}" = 1 ] || exit 4
+  [ -n "${_valise_profile_loaded:-}" ] || exit 4
+  [ "${_valise_profile_loaded}" = "${_TARGET##*/}" ] || exit 5
   greet
 ' >"$_tmp/retry.out" 2>"$_tmp/retry.err" && grep -Fx 'hello from greet' "$_tmp/retry.out" >/dev/null; then
   pass "a startup file read while no release is active does not block a later load"

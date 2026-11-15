@@ -5,33 +5,54 @@
 
 # Emit the POSIX integration block for the active release.
 #
-# It works in every POSIX shell. A release carries plans/<shell>.sh for the
-# shell classes its bundle covers; a shell class with no plan loads nothing.
-# The guard makes several startup files safe: a login shell that reads more
-# than one of them loads the profile once. It is set only after a plan was sourced, so a shell started
-# before the first install, or while the release was missing, tries again from
-# the next startup file. A plan that failed is not re-run in the same shell;
-# VALISE_RELOAD=1 forces another attempt. The shell is named by the first of
-# KSH_VERSION, ZSH_VERSION and BASH_VERSION that is set; any other shell uses
-# the generic sh plan.
+# It works in every POSIX shell. A release carries plans/<shell>.sh (the env
+# plan) and, when the bundle has interactive-phase modules,
+# plans/<shell>-interactive.sh; a shell class with no plan loads nothing.
+#
+# The block is two-stage. Stage 1 sources the env plan at EVERY startup file
+# the shell reads, because the env plan is a convergent projection: re-running
+# it in a fresh nested shell (a new tmux pane, a new login) is what repairs
+# PATH reordering done by /etc/profile or macOS path_helper. The guard is
+# keyed by RELEASE ID, not by session: _valise_profile_loaded records the
+# release directory name it loaded, so the same shell with the same release
+# is a no-op, a switched release forces a reload, and a fresh nested shell
+# (new process, guard unset) always re-runs the env plan. It is set only
+# after a plan was sourced, so a shell started before the first install, or
+# while the release was missing, tries again from the next startup file. A
+# plan that failed is not re-run in the same shell; VALISE_RELOAD=1 forces
+# another attempt. Stage 2 sources the interactive plan only when the shell
+# is interactive (case $- in *i*); it must stay silent too, so ssh host-cmd
+# sessions (which read .bashrc non-interactively) are safe. The shell class
+# is named by the first of KSH_VERSION, ZSH_VERSION and BASH_VERSION that is
+# set; any other shell uses the generic sh plan.
 print_posix_integration() {
   _pix_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
   printf '%s\n' \
     '# BEGIN valise managed block' \
     "_valise_active_link=$_pix_active_literal" \
-    'if [ -z "${_valise_profile_loaded:-}" ] || [ "${VALISE_RELOAD:-}" = 1 ]; then' \
-    '  if [ -n "${KSH_VERSION-}" ]; then _valise_plan=ksh; elif [ -n "${ZSH_VERSION-}" ]; then _valise_plan=zsh; elif [ -n "${BASH_VERSION-}" ]; then _valise_plan=bash; else _valise_plan=sh; fi' \
-    '  _valise_active=$(cd "$_valise_active_link" 2>/dev/null && pwd -P)' \
-    '  if [ -n "$_valise_active" ]; then' \
+    'if [ -n "${KSH_VERSION-}" ]; then _valise_plan=ksh; elif [ -n "${ZSH_VERSION-}" ]; then _valise_plan=zsh; elif [ -n "${BASH_VERSION-}" ]; then _valise_plan=bash; else _valise_plan=sh; fi' \
+    '_valise_active=$(cd "$_valise_active_link" 2>/dev/null && pwd -P)' \
+    'if [ -n "$_valise_active" ]; then' \
+    '  _valise_release_id=${_valise_active##*/}' \
+    '  if [ -z "${_valise_profile_loaded:-}" ] || [ "${_valise_profile_loaded:-}" != "$_valise_release_id" ] || [ "${VALISE_RELOAD:-}" = 1 ]; then' \
     '    if [ -f "$_valise_active/plans/$_valise_plan.sh" ]; then' \
-    '      _valise_profile_loaded=1' \
+    '      _valise_profile_loaded=$_valise_release_id' \
     '      VALISE_MODULE_ROOT="$_valise_active"' \
     '      . "$_valise_active/plans/$_valise_plan.sh"' \
     '      unset VALISE_MODULE_ROOT' \
     '    fi' \
     '  fi' \
-    '  unset _valise_active _valise_plan' \
+    '  case $- in *i*)' \
+    '    if [ -f "$_valise_active/plans/$_valise_plan-interactive.sh" ]; then' \
+    '      VALISE_MODULE_ROOT="$_valise_active"' \
+    '      . "$_valise_active/plans/$_valise_plan-interactive.sh"' \
+    '      unset VALISE_MODULE_ROOT' \
+    '    fi' \
+    '    ;;' \
+    '  esac' \
+    '  unset _valise_release_id' \
     'fi' \
+    'unset _valise_active _valise_plan' \
     'unset _valise_active_link' \
     '# END valise managed block'
   unset _pix_active_literal

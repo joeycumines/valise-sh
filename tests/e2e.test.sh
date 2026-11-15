@@ -73,9 +73,15 @@ startup_file_for() {
 # The exports the default bundle loads in a shell on a platform (uname -s),
 # and the exports it must not load there. Printed as two lines:
 # "expect <names...>" and "absent <names...>".
+#
+# The non-interactive probe sources the startup file with shell -c, so the
+# interactive-phase modules (aliases, completions, ksh features) must be
+# ABSENT there; the interactive probe (shell -i -c) expects them PRESENT.
+# expected_exports_for therefore takes an interactivity flag.
 expected_exports_for() {
   _eef_shell=$1
   _eef_os=$2
+  _eef_interactive=${3:-0}
   case "$_eef_shell" in
     fish)
       printf '%s\n' 'expect e2e_fish_loaded' 'absent e2e_env_ready'
@@ -85,14 +91,20 @@ expected_exports_for() {
   _eef_expect='e2e_env_ready e2e_config_loaded e2e_net_available e2e_layer_probe_ok'
   _eef_absent='e2e_fish_loaded'
   case "$_eef_shell" in
-    bash) _eef_expect="$_eef_expect e2e_show_aliases e2e_bash_completions_loaded"
+    bash) _eef_int='e2e_show_aliases e2e_bash_completions_loaded'
       _eef_absent="$_eef_absent e2e_zsh_completions_loaded e2e_ksh_loaded" ;;
-    zsh) _eef_expect="$_eef_expect e2e_show_aliases e2e_zsh_completions_loaded"
+    zsh) _eef_int='e2e_show_aliases e2e_zsh_completions_loaded'
       _eef_absent="$_eef_absent e2e_bash_completions_loaded e2e_ksh_loaded" ;;
-    ksh) _eef_expect="$_eef_expect e2e_ksh_loaded"
+    ksh) _eef_int='e2e_ksh_loaded'
       _eef_absent="$_eef_absent e2e_show_aliases e2e_bash_completions_loaded e2e_zsh_completions_loaded" ;;
-    *) _eef_absent="$_eef_absent e2e_show_aliases e2e_bash_completions_loaded e2e_zsh_completions_loaded e2e_ksh_loaded" ;;
+    *) _eef_int='e2e_show_aliases e2e_bash_completions_loaded e2e_zsh_completions_loaded e2e_ksh_loaded'
+      _eef_absent="$_eef_absent $_eef_int" ;;
   esac
+  if [ "$_eef_interactive" = 1 ]; then
+    _eef_expect="$_eef_expect $_eef_int"
+  else
+    _eef_absent="$_eef_absent $_eef_int"
+  fi
   case "$_eef_os" in
     Darwin) _eef_expect="$_eef_expect e2e_darwin_tools_ready"
       _eef_absent="$_eef_absent e2e_linux_tools_ready e2e_bsd_tools_ready" ;;
@@ -207,7 +219,45 @@ run_lane() {
 
   _class=$_shell_name
   [ "$_shell_name" = fish ] || _class=$("$_shell_path" -c "$_class_probe" 2>/dev/null) || _class=$_shell_name
-  _expected=$(expected_exports_for "$_class" "$(uname -s)")
+  # The bundle's interactive-phase modules (aliases, completions, ksh
+  # features) ship in plans/<class>-interactive.sh and must load only in an
+  # interactive shell; the env plan must not contain them. The sh lane runs
+  # on /bin/sh, which on macOS is bash, so its detected class is bash and the
+  # class plans are what the managed block selects there.
+  if [ "$_shell_name" != fish ]; then
+    _int_plan="$E2E_RELEASE/plans/$_class-interactive.sh"
+    if [ -f "$_int_plan" ]; then
+      # The interactive plan's # order= lists only interactive modules; env
+      # modules may appear only as dependency names inside the unavailable-
+      # module diagnostics, never as case labels or load paths.
+      if grep -q 'phase=interactive' "$_int_plan" &&
+        ! grep -qE '^[[:space:]]*(e2e_env_setup|e2e_generated_config|e2e_optional_network|e2e_layer_probe|e2e_platform_tools)@' "$_int_plan" &&
+        ! grep -q 'modules/e2e/env_setup.sh\|modules/e2e/generated_config.sh' "$_int_plan"; then
+        pass "$_lane/$_shell_name: the interactive plan carries only interactive-phase modules"
+      else
+        fail "$_lane/$_shell_name: the interactive plan is not phase-pure"
+        head -6 "$_int_plan" >&2
+      fi
+    else
+      case "$_class" in
+        bash|zsh|ksh)
+          fail "$_lane/$_shell_name: no interactive plan for a bundle that has interactive modules"
+          ;;
+        *)
+          pass "$_lane/$_shell_name: no interactive plan when the closure has no interactive modules"
+          ;;
+      esac
+    fi
+    if ! grep -q 'e2e_aliases@\|e2e_completions_bash@\|e2e_completions_zsh@\|e2e_ksh_features@' "$E2E_RELEASE/plans/$_class.sh" 2>/dev/null; then
+      pass "$_lane/$_shell_name: the env plan contains no interactive-phase module"
+    else
+      fail "$_lane/$_shell_name: the env plan leaks an interactive-phase module"
+      grep -n 'e2e_aliases@\|e2e_completions_bash@\|e2e_completions_zsh@\|e2e_ksh_features@' "$E2E_RELEASE/plans/$_class.sh" >&2
+    fi
+  fi
+  # The main load probe is non-interactive (shell -c), so interactive-phase
+  # exports are expected absent there.
+  _expected=$(expected_exports_for "$_class" "$(uname -s)" 0)
   _expect_line=$(printf '%s\n' "$_expected" | sed -n 1p)
   _absent_line=$(printf '%s\n' "$_expected" | sed -n 2p)
   if [ "$_shell_name" = fish ]; then
@@ -252,6 +302,72 @@ run_lane() {
   else
     fail "$_lane/$_shell_name: second install was not idempotent"
     cat "$_tmp_home/install2.out" >&2
+  fi
+
+  # Two-stage block behavior, host lanes only (POSIX shells): a
+  # non-interactive read of the startup file (as ssh host-cmd does) loads
+  # the env plan, loads no interactive module, and prints nothing; an
+  # interactive shell loads both. Re-reading the startup file in the same
+  # shell is a no-op for the env plan (release-id guard), and a nested
+  # shell re-runs the env plan, repairing a simulated path_helper reorder.
+  if [ "$_shell_name" != fish ]; then
+    _snippet="$_tmp_home/$(startup_file_for "$_shell_name")"
+    _int_names=''
+    case "$_class" in
+      bash) _int_names='e2e_show_aliases e2e_bash_completions_loaded' ;;
+      zsh)  _int_names='e2e_show_aliases e2e_zsh_completions_loaded' ;;
+      ksh)  _int_names='e2e_ksh_loaded' ;;
+    esac
+    if [ -n "$_int_names" ]; then
+      # shellcheck disable=SC2086
+      env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
+        "$_shell_path" -c ". '$_snippet'; if command -v e2e_env_ready >/dev/null; then printf 'env=yes'; else printf 'env=no'; fi; for _n in $_int_names; do command -v \"\$_n\" >/dev/null 2>&1 && printf ' int=%s' \"\$_n\"; done; printf '\n'" \
+        >"$_tmp_home/ni.out" 2>"$_tmp_home/ni.err"
+      if grep -q 'env=yes' "$_tmp_home/ni.out" && \
+        ! grep -q 'int=' "$_tmp_home/ni.out" && \
+        [ ! -s "$_tmp_home/ni.err" ]; then
+        pass "$_lane/$_shell_name: non-interactive startup load is env-only and silent"
+      else
+        fail "$_lane/$_shell_name: non-interactive startup load is not env-only/silent"
+        cat "$_tmp_home/ni.out" "$_tmp_home/ni.err" >&2
+      fi
+      # shellcheck disable=SC2086
+      env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
+        "$_shell_path" -i -c ". '$_snippet'; _ok=1; for _n in $_int_names; do command -v \"\$_n\" >/dev/null 2>&1 || _ok=0; done; [ \"\$_ok\" -eq 1 ] && command -v e2e_env_ready >/dev/null && printf 'both=yes\n'" \
+        >"$_tmp_home/int.out" 2>/dev/null </dev/null
+      if grep -q 'both=yes' "$_tmp_home/int.out"; then
+        pass "$_lane/$_shell_name: interactive startup loads env and interactive plans"
+      else
+        fail "$_lane/$_shell_name: interactive startup did not load the interactive plan"
+        cat "$_tmp_home/int.out" >&2
+      fi
+      # Same shell, second read: the env plan must not re-run (guard holds
+      # the release id), proven by a load-counting probe through VALISE_RELOAD.
+      env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
+        "$_shell_path" -c ". '$_snippet'; _g1=\${_valise_profile_loaded:-}; . '$_snippet'; [ -n \"\$_g1\" ] && [ \"\$_g1\" = \"\${_valise_profile_loaded:-}\" ] && printf 'guard=yes\n'" \
+        >"$_tmp_home/guard.out" 2>"$_tmp_home/guard.err"
+      if grep -q 'guard=yes' "$_tmp_home/guard.out"; then
+        pass "$_lane/$_shell_name: same-shell re-read keeps the release-id guard"
+      else
+        fail "$_lane/$_shell_name: same-shell re-read lost the release-id guard"
+        cat "$_tmp_home/guard.out" "$_tmp_home/guard.err" >&2
+      fi
+      # Nested fresh shell with a reordered PATH: the env plan re-runs and
+      # restores the compiled PATH front (convergent projection). The e2e
+      # bundle's env phase prepends nothing by itself, so assert convergence:
+      # after the nested shell re-runs the env plan, sourcing the plan again
+      # changes nothing (fixed point) and the reordered helper stays behind
+      # the entries the plan asserts.
+      env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
+        "$_shell_path" -c ". '$_snippet'; PATH=\"/usr/bin:/bin:/reordered/helper:\$PATH\"; export PATH; env -i HOME=\"\$HOME\" XDG_CONFIG_HOME=\"\$XDG_CONFIG_HOME\" PATH=\"\$PATH\" '$_shell_path' -c '. \"\$HOME/'"$(startup_file_for "$_shell_name")"'\"; p1=\$PATH; VALISE_RELOAD=1 . \"\$HOME/'"$(startup_file_for "$_shell_name")"'\"; p2=\$PATH; [ \"\$p1\" = \"\$p2\" ] && printf \"fixed=yes path=%s\n\" \"\$p2\" || printf \"fixed=no p1=%s p2=%s\n\" \"\$p1\" \"\$p2\"'" \
+        >"$_tmp_home/nested.out" 2>"$_tmp_home/nested.err"
+      if grep -q 'fixed=yes' "$_tmp_home/nested.out"; then
+        pass "$_lane/$_shell_name: nested shell re-runs the env plan to a fixed point"
+      else
+        fail "$_lane/$_shell_name: nested shell did not reach the env fixed point"
+        cat "$_tmp_home/nested.out" "$_tmp_home/nested.err" >&2
+      fi
+    fi
   fi
 
   _cleanup_home "$_tmp_home"
@@ -333,7 +449,7 @@ run_lima_lane() {
     _lima_class_q=$(printf '%s' "$_class_probe" | sed "s/'/'\\\\''/g")
     _lima_class=$(printf '%s\n' "$_lima_run -c '$_lima_class_q'" | limactl shell "$_instance" /bin/sh -s 2>/dev/null | tail -n 1) || _lima_class=sh
   fi
-  _expected=$(expected_exports_for "$_lima_class" "$_lima_os")
+  _expected=$(expected_exports_for "$_lima_class" "$_lima_os" 0)
   _expect_line=$(printf '%s\n' "$_expected" | sed -n 1p)
   _absent_line=$(printf '%s\n' "$_expected" | sed -n 2p)
   _lima_names="${_expect_line#expect } ${_absent_line#absent }"
