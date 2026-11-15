@@ -289,6 +289,9 @@ it does not update the CLI itself.
 - the command stubs valise owns, except a stub that was edited after valise
   wrote it
 - the active link, the previous-release record, and the installed releases
+- the GUI environment bridge, when the project set `gui_env`: the
+  `environment.d/10-valise.conf` file or the `sh.valise.env.plist` LaunchAgent
+  valise wrote (see [projects.md](projects.md))
 
 It checks every startup file for paired markers before it changes anything.
 A symlinked startup file and lines that load valise outside a managed block

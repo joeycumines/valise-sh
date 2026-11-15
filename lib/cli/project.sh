@@ -63,6 +63,7 @@ project_config_load() {
   _project_bundle=default
   _project_requires=
   _project_lint_forbid=
+  _project_gui_env=off
   _pc_seen=" "
   while IFS= read -r _pc_line || [ -n "$_pc_line" ]; do
     case "$_pc_line" in
@@ -80,7 +81,13 @@ project_config_load() {
     bundle) _project_bundle=${_pc_line#*=} ;;
     requires_valise) _project_requires=${_pc_line#*=} ;;
     lint_layer_forbid) _project_lint_forbid=${_pc_line#*=} ;;
-    *) die "valise.conf: unknown key: $_pc_key (known: variant, bundle, requires_valise, lint_layer_forbid)" ;;
+    gui_env)
+      _project_gui_env=${_pc_line#*=}
+      case "$_project_gui_env" in
+      off|systemd|launchd) ;;
+      *) die "valise.conf: gui_env must be off, systemd, or launchd: $_project_gui_env" ;;
+      esac ;;
+    *) die "valise.conf: unknown key: $_pc_key (known: variant, bundle, requires_valise, lint_layer_forbid, gui_env)" ;;
     esac
   done <"$_project_root/valise.conf"
   [ -n "$_project_variant" ] || die "valise.conf: variant must not be empty"
@@ -1556,6 +1563,10 @@ cmd_apply() {
   _apply_build_out=$_project_root/build/release
   project_build "$_apply_variant" "$_apply_bundle" "$_apply_build_out" 1
   _apply_old_pwd=$(pwd -P) || die "cannot resolve current directory"
+  # install chdirs into the release tree; remember the project cwd so the GUI
+  # env bridge can still read this project's valise.conf (gui_env) there.
+  VALISE_PROJECT_CWD=$_apply_old_pwd
+  export VALISE_PROJECT_CWD
   cd "$_apply_build_out" || die "cannot enter build output: $_apply_build_out"
   if [ "$_apply_dry_run" -eq 1 ]; then
     # Only build/ has changed; describe the install without performing it.
@@ -1563,6 +1574,7 @@ cmd_apply() {
     [ -z "$_apply_install_arg" ] || _apply_integration=0
     install_preview "$_apply_integration"
     cd "$_apply_old_pwd" || die "cannot restore project directory: $_apply_old_pwd"
+    unset VALISE_PROJECT_CWD
     unset _apply_arg _apply_variant _apply_bundle _apply_install_arg _apply_build_out _apply_old_pwd \
       _apply_dry_run _apply_integration
     return 0
@@ -1571,6 +1583,7 @@ cmd_apply() {
   cd "$_apply_old_pwd" || die "cannot restore project directory: $_apply_old_pwd"
   cmd_verify_active
   info "applied project: $_project_root"
+  unset VALISE_PROJECT_CWD
   unset _apply_arg _apply_variant _apply_bundle _apply_install_arg _apply_build_out _apply_old_pwd _apply_dry_run
 }
 

@@ -157,9 +157,125 @@ devtool_exec() {
 
 # --- env ---
 
+# env_export_capture <shell>: run the active release's env plan for <shell>
+# in a clean quarantined environment and print the exported scalar KEY=VALUE
+# pairs that differ from a baseline clean env. Only simple identifier names
+# are captured; functions and special vars are not representable in the
+# output formats and are skipped.
+env_export_capture() {
+  _eec_shell=$1
+  _eec_active=$(active_release_dir) || return 1
+  _eec_plan="$_eec_active/plans/$_eec_shell.sh"
+  [ -f "$_eec_plan" ] || _eec_plan="$_eec_active/plans/sh.sh"
+  [ -f "$_eec_plan" ] || return 1
+  _eec_scratch=$(trusted_mktemp dir "${TMPDIR:-/tmp}/valise-env-export.XXXXXX") || return 1
+  _eec_probe='_p=$1; _home=$2; _sh=$3; _root=$4
+_b=$(mktemp); _a=$(mktemp)
+env -i PATH=/usr/bin:/bin sh -c "env" 2>/dev/null | LC_ALL=C sort >"$_b"
+env -i HOME="$_home" PATH=/usr/bin:/bin VALISE_MODULE_ROOT="$_root" "$_sh" -c ". \"$_p\"; env" 2>/dev/null | LC_ALL=C sort >"$_a"
+comm -13 "$_b" "$_a" | grep -vE "^(_=|HOME=|PATH=|PWD=|SHLVL=|OLDPWD=|VALISE_MODULE_ROOT=)"
+rm -f "$_b" "$_a"'
+  env -i HOME="$_eec_scratch" PATH=/usr/bin:/bin \
+    sh -c "$_eec_probe" sh "$_eec_plan" "$_eec_scratch" "$_eec_shell" "$_eec_active" 2>/dev/null | \
+    awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ { print }'
+  _eec_rm=$(trusted_utility_path rm 2>/dev/null || :)
+  [ -z "$_eec_rm" ] || "$_eec_rm" -rf "$_eec_scratch" 2>/dev/null || :
+  unset _eec_shell _eec_active _eec_plan _eec_scratch _eec_probe _eec_rm
+  return 0
+}
+
+# env_export_emit <format> <capture-lines>: render captured KEY=VALUE pairs in
+# the requested GUI-bridge format.
+env_export_emit() {
+  _eee_format=$1
+  _eee_capture=$2
+  case "$_eee_format" in
+  environment.d)
+    # environment.d values are double-quoted when they contain whitespace or
+    # shell metacharacters; plain values stay bare. The leading comment marks
+    # the file as valise-owned so uninstall only removes its own bridge.
+    printf '%s\n' '# written by valise (gui_env=systemd); do not edit'
+    printf '%s\n' "$_eee_capture" | awk -F= '
+      /^[A-Za-z_][A-Za-z0-9_]*=/ {
+        key = $1
+        sub(/^[^=]*=/, "")
+        val = $0
+        if (val ~ /[[:space:]"'"'"'\\$`!*?\[\]{}()<>|;&]/) {
+          gsub(/\\/, "\\\\", val); gsub(/"/, "\\\"", val)
+          printf "%s=\"%s\"\n", key, val
+        } else {
+          printf "%s=%s\n", key, val
+        }
+      }
+    '
+    ;;
+  launchd)
+    # A LaunchAgent whose program runs one launchctl setenv per variable.
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+      '<plist version="1.0">' '<dict>' \
+      '  <key>Label</key><string>sh.valise.env</string>' \
+      '  <key>ProgramArguments</key><array>' \
+      '    <string>/bin/sh</string><string>-c</string>'
+    printf '%s\n' "$_eee_capture" | awk -F= '
+      BEGIN { cmd = "" }
+      /^[A-Za-z_][A-Za-z0-9_]*=/ {
+        key = $1; sub(/^[^=]*=/, ""); val = $0
+        esc = key " " val
+        gsub(/&/, "\\&amp;", esc); gsub(/</, "\\&lt;", esc); gsub(/>/, "\\&gt;", esc)
+        if (cmd == "") cmd = "launchctl setenv " esc
+        else cmd = cmd "; launchctl setenv " esc
+      }
+      END {
+        if (cmd != "") {
+          gsub(/&/, "\\&amp;", cmd); gsub(/</, "\\&lt;", cmd); gsub(/>/, "\\&gt;", cmd)
+          gsub(/"/, "\\&quot;", cmd)
+          printf "    <string>%s</string>\n", cmd
+        }
+      }
+    '
+    printf '%s\n' '  </array>' \
+      '  <key>RunAtLoad</key><true/>' \
+      '</dict></plist>'
+    ;;
+  wsl)
+    # WSLENV carries names with flags, not values; PATH-like vars get /p
+    # (persist into Win32), everything else /l (WSL-only).
+    printf '%s\n' "$_eee_capture" | awk -F= '
+      /^[A-Za-z_][A-Za-z0-9_]*=/ {
+        key = $1
+        flag = (key ~ /PATH/) ? "/p" : "/l"
+        printf "%s%s\n", key, flag
+      }
+    '
+    ;;
+  *) return 1 ;;
+  esac
+  unset _eee_format _eee_capture
+}
+
 cmd_env() {
   case "${1:-}" in
   --help | -h) usage_env; return 0 ;;
+  export)
+    shift
+    _ee_format=${1:-}
+    case "$_ee_format" in
+    environment.d|launchd|wsl) ;;
+    *) die "usage: valise env export <environment.d|launchd|wsl>" ;;
+    esac
+    _ee_active=$(active_release_dir 2>/dev/null) || die "no active release: run valise install first"
+    _ee_shell=sh
+    case "${SHELL:-}" in
+    */zsh|zsh) _ee_shell=zsh ;;
+    */ksh|ksh) _ee_shell=ksh ;;
+    */bash|bash) _ee_shell=bash ;;
+    esac
+    _ee_capture=$(env_export_capture "$_ee_shell") || die "cannot capture the env plan for shell $_ee_shell"
+    env_export_emit "$_ee_format" "$_ee_capture"
+    unset _ee_format _ee_active _ee_shell _ee_capture
+    return 0
+    ;;
   '') ;;
   *) die "unknown env option: $1" ;;
   esac

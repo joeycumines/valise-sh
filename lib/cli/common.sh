@@ -165,6 +165,23 @@ trusted_uname() {
   fi
 }
 
+# cli_os_name: darwin/linux/bsd/... without sourcing the engine's
+# capabilities.sh (the CLI is standalone POSIX). Mirrors sp_cap_os's mapping.
+cli_os_name() {
+  _con_uname=$(trusted_uname -s 2>/dev/null) || _con_uname=unknown
+  case "$_con_uname" in
+  Darwin) _con_os=darwin ;;
+  Linux) _con_os=linux ;;
+  FreeBSD) _con_os=freebsd ;;
+  OpenBSD) _con_os=openbsd ;;
+  NetBSD) _con_os=netbsd ;;
+  *BSD) _con_os=bsd ;;
+  *) _con_os=unknown ;;
+  esac
+  printf '%s\n' "$_con_os"
+  unset _con_uname _con_os
+}
+
 # Resolve only platform-owned utility paths for integrity operations. These
 # checks must not be redirected by a caller-controlled PATH.
 trusted_utility_path() {

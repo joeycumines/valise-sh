@@ -3,6 +3,30 @@
 Notable user-facing changes are recorded here. Versions before 1.0 may include
 module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 
+## [Unreleased]
+
+### Added
+
+- Phase-separated plans and a two-stage managed block. Module metadata accepts
+  `phase=env|interactive` (default `env`); the compiler emits `plans/<shell>.sh`
+  for the env phase and `plans/<shell>-interactive.sh` for interactive modules.
+  The managed block sources the env plan at every startup entry point behind a
+  release-id-keyed guard and sources the interactive plan only when `$-`
+  contains `i`. The block is written to `~/.zshenv` as well as `~/.zprofile`,
+  and `sh`/`ksh` login shells get `ENV` pointed at a valise-owned shim so
+  interactive POSIX subshells load valise too. `valise doctor` flags legacy
+  single-stage blocks as upgradeable.
+- `valise env export <environment.d|launchd|wsl>` renders the active release's
+  env plan as GUI-session bridge content: `environment.d` `KEY=VALUE` lines,
+  a `launchctl setenv` LaunchAgent plist, or WSL `WSLENV` flag lines. The
+  `valise.conf` key `gui_env=off|systemd|launchd` (default `off`) makes
+  `valise apply`/`install` write that bridge file itself
+  (`environment.d/10-valise.conf` on Linux with a systemd user session,
+  `~/Library/LaunchAgents/sh.valise.env.plist` on macOS), and `valise uninstall`
+  removes it. `valise doctor` warns when the platform has a GUI session but no
+  bridge file.
+- `sp_cap_is_interactive` and `sp_cap_is_tty` in the capability library.
+
 ## [0.3.0] - 2026-11-06
 
 0.3.0 changes the project layout, the metadata, and the release format. A

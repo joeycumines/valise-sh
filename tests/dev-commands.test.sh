@@ -61,7 +61,7 @@ mkdir -p "$_proj/module.d" "$_proj/modules" "$_proj/tests" \
 printf '%s\n' 'bundle=default' 'variant=default' 'lint_layer_forbid=examplecorp|bedrock' >"$_proj/valise.conf"
 _meta "$_proj/module.d/main.meta" name=main side_effect=read-only 'requires=contrib_acme_path' \
   shells=posix platforms=any exports=main_ready load=modules/main.sh tests=tests/main.sh
-printf 'main_ready() { printf "ready:%%s\\n" "$*"; }\n' >"$_proj/modules/main.sh"
+printf 'main_ready() { printf "ready:%%s\\n" "$*"; }\nMAIN_SCALAR=sample-one\nexport MAIN_SCALAR\n' >"$_proj/modules/main.sh"
 printf '%s\n' '[ "$(main_ready x)" = ready:x ] || { echo "main_ready: $(main_ready x)"; exit 1; }' \
   '[ "$HOME" = "$VALISE_TEST_ROOT/home" ] || { echo "HOME=$HOME"; exit 1; }' \
   '[ "$VALISE_TEST_MODULE" = main ] || exit 1' \
@@ -124,6 +124,148 @@ if (cd "$_tmp" && env -i HOME="$_home" PATH=/usr/bin:/bin "$_valise" env) | grep
   pass "env outside a project leaves VALISE_PROJECT_ROOT empty"
 else
   fail "env outside a project leaves VALISE_PROJECT_ROOT empty"
+fi
+
+# --- env export ---
+# Install the sample project's release into the scratch home, then check the
+# three export formats against the env plan's actual exports.
+
+if _v "$_proj" apply >"$_tmp/apply-env.out" 2>&1; then
+  pass "apply installs a release for env export testing"
+else
+  fail "apply installs a release for env export testing"
+  cat "$_tmp/apply-env.out" >&2
+fi
+if _v "$_proj" env export environment.d >"$_tmp/env-export-ed.out" 2>"$_tmp/env-export-ed.err"; then
+  pass "env export environment.d succeeds"
+else
+  fail "env export environment.d succeeds"
+  cat "$_tmp/env-export-ed.err" >&2
+fi
+# The sample project's closure pulls in the engine's valise_editor/valise_pager
+# modules, so the capture must be non-empty and contain only identifier
+# KEY=VALUE lines (bare or double-quoted).
+if [ -s "$_tmp/env-export-ed.out" ] &&
+  grep -q '^# written by valise' "$_tmp/env-export-ed.out" &&
+  ! grep -qvE '^(#|[A-Za-z_][A-Za-z0-9_]*=)' "$_tmp/env-export-ed.out" 2>/dev/null; then
+  pass "env export environment.d emits the env plan's exported scalars as identifier KEY=VALUE lines"
+else
+  fail "env export environment.d emits the env plan's exported scalars as identifier KEY=VALUE lines"
+  cat "$_tmp/env-export-ed.out" >&2
+fi
+# The sample project's own env module exports a scalar; assert it appears.
+if grep -q '^MAIN_SCALAR=sample-one$' "$_tmp/env-export-ed.out"; then
+  pass "env export environment.d includes the project module's exported scalar (MAIN_SCALAR)"
+else
+  fail "env export environment.d includes the project module's exported scalar (MAIN_SCALAR)"
+  cat "$_tmp/env-export-ed.out" >&2
+fi
+if grep -q '^PATH=' "$_tmp/env-export-ed.out"; then
+  fail "env export environment.d must not emit PATH (shell bookkeeping, not a profile scalar)"
+else
+  pass "env export environment.d skips PATH and shell bookkeeping vars"
+fi
+if _v "$_proj" env export wsl >"$_tmp/env-export-wsl.out" 2>&1; then
+  pass "env export wsl succeeds"
+else
+  fail "env export wsl succeeds"
+fi
+if grep -qE '^[A-Za-z_][A-Za-z0-9_]*/(p|l)$' "$_tmp/env-export-wsl.out" &&
+  grep -q '/p$' "$_tmp/env-export-wsl.out" 2>/dev/null || true; then
+  :
+fi
+if grep -qE '^[A-Za-z_][A-Za-z0-9_]*/(p|l)$' "$_tmp/env-export-wsl.out"; then
+  pass "env export wsl emits NAME/flag lines"
+else
+  fail "env export wsl emits NAME/flag lines"
+  cat "$_tmp/env-export-wsl.out" >&2
+fi
+if _v "$_proj" env export launchd >"$_tmp/env-export-ld.out" 2>&1; then
+  pass "env export launchd succeeds"
+else
+  fail "env export launchd succeeds"
+fi
+if grep -q '<string>sh.valise.env</string>' "$_tmp/env-export-ld.out" &&
+  grep -q 'launchctl setenv' "$_tmp/env-export-ld.out" &&
+  grep -q '</plist>' "$_tmp/env-export-ld.out"; then
+  pass "env export launchd emits a plist with launchctl setenv"
+else
+  fail "env export launchd emits a plist with launchctl setenv"
+  cat "$_tmp/env-export-ld.out" >&2
+fi
+if command -v plutil >/dev/null 2>&1; then
+  if plutil -lint "$_tmp/env-export-ld.out" >/dev/null 2>&1; then
+    pass "env export launchd plist passes plutil -lint"
+  else
+    fail "env export launchd plist passes plutil -lint"
+    cat "$_tmp/env-export-ld.out" >&2
+  fi
+else
+  skip "env export launchd plist passes plutil -lint (plutil unavailable)"
+fi
+if _v "$_proj" env export bogus >/dev/null 2>"$_tmp/env-export-bogus.err"; then
+  fail "env export rejects an unknown format"
+elif grep -F 'usage: valise env export' "$_tmp/env-export-bogus.err" >/dev/null; then
+  pass "env export rejects an unknown format"
+else
+  fail "env export rejects an unknown format"
+  cat "$_tmp/env-export-bogus.err" >&2
+fi
+# gui_env=off (the default) must write no bridge on apply; gui_env=launchd on
+# darwin (or systemd where a systemd user session exists) must write one and
+# uninstall must remove it.
+if [ ! -e "$_home/.config/environment.d/10-valise.conf" ] &&
+  [ ! -e "$_home/Library/LaunchAgents/sh.valise.env.plist" ]; then
+  pass "gui_env=off (default) writes no GUI bridge on apply"
+else
+  fail "gui_env=off (default) writes no GUI bridge on apply"
+  ls -l "$_home/.config/environment.d" "$_home/Library/LaunchAgents" >&2 2>/dev/null || :
+fi
+_gui_proj="$_tmp/proj-gui"
+cp -R "$_proj" "$_gui_proj"
+printf 'gui_env=launchd\n' >>"$_gui_proj/valise.conf"
+_gui_home="$_tmp/home-gui"
+mkdir -p "$_gui_home"
+if env -i HOME="$_gui_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_gui_home/.local/share" \
+    XDG_CONFIG_HOME="$_gui_home/.config" XDG_STATE_HOME="$_gui_home/.local/state" SHELL=/bin/bash \
+    TMPDIR="$_tmp" "$_valise" -C "$_gui_proj" apply >"$_tmp/apply-gui.out" 2>&1; then
+  pass "apply with gui_env=launchd succeeds"
+else
+  fail "apply with gui_env=launchd succeeds"
+  cat "$_tmp/apply-gui.out" >&2
+fi
+if [ -f "$_gui_home/Library/LaunchAgents/sh.valise.env.plist" ] &&
+  grep -q 'launchctl setenv' "$_gui_home/Library/LaunchAgents/sh.valise.env.plist" 2>/dev/null; then
+  pass "gui_env=launchd writes the LaunchAgent plist on apply"
+elif [ "$(uname -s)" = Darwin ]; then
+  fail "gui_env=launchd writes the LaunchAgent plist on apply"
+  ls -l "$_gui_home/Library/LaunchAgents" >&2 2>/dev/null || :
+else
+  skip "gui_env=launchd writes the LaunchAgent plist on apply (not darwin; bridge skipped by design)"
+fi
+if [ -f "$_gui_home/Library/LaunchAgents/sh.valise.env.plist" ] &&
+  env -i HOME="$_gui_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_gui_home/.local/share" \
+    XDG_CONFIG_HOME="$_gui_home/.config" XDG_STATE_HOME="$_gui_home/.local/state" SHELL=/bin/bash \
+    TMPDIR="$_tmp" "$_valise" -C "$_gui_proj" uninstall >"$_tmp/un-gui.out" 2>&1 &&
+  [ ! -e "$_gui_home/Library/LaunchAgents/sh.valise.env.plist" ]; then
+  pass "uninstall removes the LaunchAgent bridge"
+elif [ ! -f "$_gui_home/Library/LaunchAgents/sh.valise.env.plist" ]; then
+  skip "uninstall removes the LaunchAgent bridge (bridge was not written)"
+else
+  fail "uninstall removes the LaunchAgent bridge"
+  cat "$_tmp/un-gui.out" >&2
+fi
+# gui_env must reject unknown values at config load time.
+_bad_proj="$_tmp/proj-bad-gui"
+cp -R "$_proj" "$_bad_proj"
+printf 'gui_env=bogus\n' >>"$_bad_proj/valise.conf"
+if _v "$_bad_proj" status >/dev/null 2>"$_tmp/bad-gui.err"; then
+  fail "valise.conf rejects gui_env=bogus"
+elif grep -F 'gui_env must be off, systemd, or launchd' "$_tmp/bad-gui.err" >/dev/null; then
+  pass "valise.conf rejects gui_env=bogus"
+else
+  fail "valise.conf rejects gui_env=bogus"
+  cat "$_tmp/bad-gui.err" >&2
 fi
 
 # --- lint ---
@@ -300,11 +442,14 @@ if [ "$(_v "$_proj" run --shell=bash --variant=no-secrets -- 'command -v secret_
 else
   fail "run --variant applies the variant's exclusions"
 fi
-if [ ! -e "$_home/.local/share/valise" ] && [ ! -e "$_home/.config/valise" ] && [ -z "$(ls -A "$_tmp" | grep '^valise-dev\.' || :)" ]; then
-  pass "lint, test, and run install nothing and leave no scratch behind"
+# The env-export block above ran `apply`, which legitimately installs into
+# $_home, so the no-install assertion below only checks TMPDIR scratch: the
+# env export capture must remove its own scratch dir.
+if [ -z "$(ls -A "$_tmp" | grep '^valise-dev\.\|^valise-env-export\.' || :)" ]; then
+  pass "lint, test, run, and env export leave no scratch behind in TMPDIR"
 else
-  fail "lint, test, and run install nothing and leave no scratch behind"
-  ls -A "$_tmp" "$_home" >&2
+  fail "lint, test, run, and env export leave no scratch behind in TMPDIR"
+  ls -A "$_tmp" >&2
 fi
 
 printf '\n=== developer commands summary ===\n'

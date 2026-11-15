@@ -898,6 +898,7 @@ cmd_install() {
   if [ "$_install_integration" -eq 1 ]; then
     write_posix_integration
     reconcile_commands "$_target_dir"
+    write_gui_env_bridge || die "cannot write the GUI environment bridge"
   fi
 
   _install_txn=0

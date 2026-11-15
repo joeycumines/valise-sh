@@ -143,12 +143,20 @@ usage_run() {
 
 usage_env() {
   printf '%s\n' \
-    "usage: valise env" \
+    "usage: valise env [export <format>]" \
     "" \
-    "Print KEY=value lines, shell-quoted, for VALISE_VERSION, VALISE_ENGINE_ROOT," \
-    "VALISE_PROJECT_ROOT (empty outside a project), VALISE_DATA_DIR," \
+    "With no arguments, print KEY=value lines, shell-quoted, for VALISE_VERSION," \
+    "VALISE_ENGINE_ROOT, VALISE_PROJECT_ROOT (empty outside a project), VALISE_DATA_DIR," \
     "VALISE_CONFIG_DIR, VALISE_STATE_DIR, VALISE_RELEASES_DIR, VALISE_ACTIVE_LINK," \
-    "and VALISE_BIN_DIR."
+    "and VALISE_BIN_DIR." \
+    "" \
+    "'valise env export <format>' prints the environment the active release's env" \
+    "plan produces, in a GUI-session-bridging format (format: environment.d," \
+    "launchd, or wsl). The capture runs the env plan in a clean quarantined" \
+    "subshell and diffs the exported scalar environment against a baseline." \
+    "environment.d emits KEY=VALUE lines for ~/.config/environment.d/," \
+    "launchd emits a ~/Library/LaunchAgents plist running launchctl setenv per" \
+    "variable, and wsl emits WSLENV name/flag lines."
 }
 
 usage_uninstall() {

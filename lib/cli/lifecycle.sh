@@ -21,6 +21,114 @@ previous_record_path() {
   printf '%s\n' "$VALISE_XDG_STATE/previous"
 }
 
+# The GUI-session environment bridge files install may write, per gui_env:
+#   systemd -> ${XDG_CONFIG_HOME:-$HOME/.config}/environment.d/10-valise.conf
+#   launchd -> $HOME/Library/LaunchAgents/sh.valise.env.plist
+gui_env_file() {
+  case "${1:-}" in
+  systemd) printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/environment.d/10-valise.conf" ;;
+  launchd) printf '%s\n' "$HOME/Library/LaunchAgents/sh.valise.env.plist" ;;
+  *) return 1 ;;
+  esac
+}
+
+# write_gui_env_bridge: when the project's valise.conf sets gui_env=systemd
+# (Linux with a systemd user session) or gui_env=launchd (macOS), write the
+# matching bridge file from the active release's env plan. Off (the default)
+# writes nothing. The bridge is a valise-owned file: uninstall removes it.
+write_gui_env_bridge() {
+  _gue_mode=off
+  _gue_root=
+  _gue_target=
+  _gue_shell=sh
+  # Read gui_env from the project's valise.conf. project_find_root uses the
+  # current directory, which during install is the release tree, so walk up
+  # from the saved working directory instead.
+  _gue_cwd=${VALISE_PROJECT_CWD:-}
+  if [ -z "$_gue_cwd" ]; then
+    _gue_cwd=$(pwd -P 2>/dev/null) || _gue_cwd=
+  fi
+  _gue_dir=$_gue_cwd
+  while [ -n "$_gue_dir" ] && [ "$_gue_dir" != / ]; do
+    if [ -f "$_gue_dir/valise.conf" ] && [ ! -L "$_gue_dir/valise.conf" ]; then
+      _gue_root=$_gue_dir
+      break
+    fi
+    _gue_dir=$(path_parent "$_gue_dir")
+  done
+  if [ -n "$_gue_root" ]; then
+    _gue_mode=$(awk -F= '$1 == "gui_env" { sub(/^[^=]*=/, ""); print; found = 1; exit } END { exit found ? 0 : 1 }' "$_gue_root/valise.conf" 2>/dev/null) || _gue_mode=off
+    _gue_mode=$(printf '%s' "$_gue_mode" | tr -d ' \t\r\n')
+  fi
+  unset _gue_cwd _gue_dir
+  case "$_gue_mode" in
+  off) unset _gue_mode _gue_root _gue_target _gue_shell; return 0 ;;
+  systemd)
+    case $(cli_os_name) in
+    linux) ;;
+    *) info "gui_env=systemd but the platform is not Linux; skipping the environment.d bridge"
+       unset _gue_mode _gue_root _gue_target _gue_shell; return 0 ;;
+    esac
+    [ -d "$HOME/.config/systemd/user" ] || [ -d "/run/user/$(id -u 2>/dev/null || printf '%s' 0)/systemd" ] 2>/dev/null || {
+      info "gui_env=systemd but no systemd user session is detected; skipping the environment.d bridge"
+      unset _gue_mode _gue_root _gue_target _gue_shell
+      return 0
+    }
+    _gue_target=$(gui_env_file systemd) || { unset _gue_mode _gue_root _gue_target _gue_shell; return 0; }
+    _gue_shell=sh
+    case "${SHELL:-}" in
+    */zsh|zsh) _gue_shell=zsh ;;
+    */ksh|ksh) _gue_shell=ksh ;;
+    */bash|bash) _gue_shell=bash ;;
+    esac
+    ;;
+  launchd)
+    case $(cli_os_name) in
+    darwin) ;;
+    *) info "gui_env=launchd but the platform is not macOS; skipping the LaunchAgent bridge"
+       unset _gue_mode _gue_root _gue_target _gue_shell; return 0 ;;
+    esac
+    _gue_target=$(gui_env_file launchd) || { unset _gue_mode _gue_root _gue_target _gue_shell; return 0; }
+    [ -n "$_gue_target" ] || {
+      info "gui_env=launchd but HOME is unset; skipping the LaunchAgent bridge"
+      unset _gue_mode _gue_root _gue_target _gue_shell
+      return 0
+    }
+    _gue_shell=sh
+    case "${SHELL:-}" in
+    */zsh|zsh) _gue_shell=zsh ;;
+    */ksh|ksh) _gue_shell=ksh ;;
+    */bash|bash) _gue_shell=bash ;;
+    esac
+    ;;
+  esac
+  _gue_capture=$(env_export_capture "$_gue_shell") || {
+    info "warning: cannot capture the env plan for shell $_gue_shell; skipping the GUI env bridge"
+    unset _gue_mode _gue_root _gue_target _gue_shell
+    return 0
+  }
+  _gue_parent=$(path_parent "$_gue_target")
+  _gue_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  [ -d "$_gue_parent" ] || "$_gue_mkdir" -p "$_gue_parent" || die "cannot create bridge parent: $_gue_parent"
+  _gue_parent=$(cd "$_gue_parent" 2>/dev/null && pwd -P) || die "cannot resolve bridge parent: $_gue_parent"
+  _gue_tmp=$(trusted_mktemp_at "$_gue_parent" file "$_gue_parent/.valise-gui.XXXXXX") ||
+    die "cannot create GUI bridge staging file"
+  case "$_gue_mode" in
+  systemd) env_export_emit environment.d "$_gue_capture" >"$_gue_tmp" || die "cannot render environment.d" ;;
+  launchd) env_export_emit launchd "$_gue_capture" >"$_gue_tmp" || die "cannot render the LaunchAgent plist" ;;
+  esac
+  _gue_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+  _gue_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
+  "$_gue_chmod" 0644 "$_gue_tmp" && "$_gue_mv" -f "$_gue_tmp" "$_gue_target" || {
+    _gue_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
+    "$_gue_rm" -f "$_gue_tmp" 2>/dev/null || :
+    die "cannot publish the GUI env bridge: $_gue_target"
+  }
+  info "GUI env bridge written ($_gue_mode): $_gue_target"
+  unset _gue_mode _gue_root _gue_target _gue_shell _gue_capture _gue_parent _gue_mkdir _gue_tmp _gue_chmod _gue_mv _gue_rm
+}
+
+
 # Startup files install created from nothing, one path per line. Uninstall
 # deletes such a file when removing the block leaves it empty.
 startup_created_path() {
@@ -438,6 +546,21 @@ cmd_uninstall() {
     elif [ -e "$_un_shim" ] || [ -L "$_un_shim" ]; then
       info "warning: leaving $_un_shim: it is not a regular file"
     fi
+    # Remove the GUI env bridge (environment.d / LaunchAgent) valise wrote.
+    for _un_mode in systemd launchd; do
+      _un_gui=$(gui_env_file "$_un_mode" 2>/dev/null) || continue
+      if [ -f "$_un_gui" ] && [ ! -L "$_un_gui" ]; then
+        if [ "$_un_mode" = systemd ] && grep -q 'valise' "$_un_gui" 2>/dev/null; then
+          "$_un_rm" -f "$_un_gui" || die "cannot remove the environment.d bridge: $_un_gui"
+          info "removed the environment.d bridge: $_un_gui"
+        elif [ "$_un_mode" = launchd ] && grep -q 'sh.valise.env' "$_un_gui" 2>/dev/null; then
+          "$_un_rm" -f "$_un_gui" || die "cannot remove the LaunchAgent: $_un_gui"
+          info "removed the LaunchAgent: $_un_gui"
+        else
+          info "warning: leaving $_un_gui: it is not the valise GUI env bridge"
+        fi
+      fi
+    done
     _un_lines=$(integration_unmanaged_report) || {
       info "warning: these lines load valise outside a managed block; remove them yourself:"
       printf '%s\n' "$_un_lines"
@@ -473,7 +596,7 @@ cmd_uninstall() {
   "$_un_rmdir" "$VALISE_XDG_STATE" 2>/dev/null || :
   info "valise integration removed; the valise CLI itself is still installed"
   unset _un_keep _un_arg _un_rm _un_rmdir _un_mkdir _un_home _un_name _un_file _un_hook _un_first \
-    _un_lines _un_record _un_shim
+    _un_lines _un_record _un_shim _un_mode _un_gui
 }
 
 # --- Install preview ---

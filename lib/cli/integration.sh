@@ -433,6 +433,23 @@ cmd_doctor() {
           printf '  warn: no valise managed block in ~/.zshenv; non-login zsh (zsh -c) will not load the env plan\n'
         fi
       fi
+      # GUI-session bridge diagnostics: on platforms where GUI apps never read
+      # a startup file, only the environment.d (systemd) or LaunchAgent
+      # (launchd) bridge can carry the env plan into the session.
+      case $(cli_os_name) in
+      linux)
+        if [ -d "$HOME/.config/systemd/user" ] || [ -d "/run/user/$(id -u 2>/dev/null || printf '%s' 0)/systemd" ] 2>/dev/null; then
+          if [ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/environment.d/10-valise.conf" ]; then
+            printf '  warn: systemd user session detected but no environment.d/10-valise.conf; GUI apps will not see the profile env (set gui_env=systemd in valise.conf)\n'
+          fi
+        fi
+        ;;
+      darwin)
+        if [ ! -f "$HOME/Library/LaunchAgents/sh.valise.env.plist" ]; then
+          printf '  warn: macOS detected but no ~/Library/LaunchAgents/sh.valise.env.plist; GUI apps will not see the profile env (set gui_env=launchd in valise.conf)\n'
+        fi
+        ;;
+      esac
     else
       printf '  info: skipping the shell integration check\n'
     fi

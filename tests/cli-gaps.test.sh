@@ -268,6 +268,41 @@ if _env; then
   else
     skip "doctor warns when zsh is installed but ~/.zshenv has no block (no zsh)"
   fi
+
+  # (d) GUI-session bridge: on macOS without the LaunchAgent plist, doctor
+  # warns that GUI apps will not see the profile env.
+  case "$(uname -s)" in
+  Darwin)
+    if [ ! -f "$HOME/Library/LaunchAgents/sh.valise.env.plist" ]; then
+      env SHELL=/bin/sh "$_valise" doctor >"$_test_root/doctor-gui.out" 2>&1 || :
+      if grep -F 'no ~/Library/LaunchAgents/sh.valise.env.plist' "$_test_root/doctor-gui.out" >/dev/null 2>&1; then
+        pass "doctor warns when no LaunchAgent bridge exists on macOS"
+      else
+        fail "doctor did not warn about the missing LaunchAgent bridge"
+        cat "$_test_root/doctor-gui.out" >&2
+      fi
+    else
+      skip "doctor warns when no LaunchAgent bridge exists on macOS (plist present)"
+    fi
+    ;;
+  Linux)
+    if [ -d "$HOME/.config/systemd/user" ] || [ -d "/run/user/$(id -u)/systemd" ] 2>/dev/null; then
+      if [ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/environment.d/10-valise.conf" ]; then
+        env SHELL=/bin/sh "$_valise" doctor >"$_test_root/doctor-gui.out" 2>&1 || :
+        if grep -F 'no environment.d/10-valise.conf' "$_test_root/doctor-gui.out" >/dev/null 2>&1; then
+          pass "doctor warns when no environment.d bridge exists on systemd Linux"
+        else
+          fail "doctor did not warn about the missing environment.d bridge"
+          cat "$_test_root/doctor-gui.out" >&2
+        fi
+      else
+        skip "doctor warns when no environment.d bridge exists on systemd Linux (file present)"
+      fi
+    else
+      skip "doctor warns when no environment.d bridge exists on systemd Linux (no systemd user session)"
+    fi
+    ;;
+  esac
 fi
 
 # --- doctor: a tampered release fails ---
