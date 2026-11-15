@@ -1,10 +1,15 @@
 # valise-sh
 
 valise builds your shell profile from modules. Each module is a metadata file
-and a shell body; valise reads the metadata as data, compiles a static
-startup plan for each shell, and installs the result as a sealed, verified
-release. sh, dash, BusyBox ash, bash, zsh, and ksh load the compiled POSIX
-plans; Fish has a native loader.
+and a shell body; valise reads the metadata as data, compiles a static,
+phase-aware startup plan for each shell, and installs the result as a sealed,
+verified release. sh, dash, BusyBox ash, bash, zsh, and ksh load the compiled
+POSIX plans; Fish has a native loader. The managed block is two-stage: the
+env plan runs at every startup entry point (silent, idempotent, convergent —
+it repairs PATH clobbered by macOS path_helper in fresh login shells), and the
+interactive plan runs only in interactive shells. GUI sessions that never read
+a startup file get the env plan through `gui_env` (environment.d on Linux
+systemd, a LaunchAgent on macOS) or `valise env export`.
 
 You keep your modules in a valise project. The engine supplies the `valise`
 CLI and a few generic modules (`valise_path`, `valise_editor`, and others).

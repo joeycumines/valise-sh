@@ -34,23 +34,61 @@ contract, [module-abi.md](module-abi.md) the metadata,
    a saved copy.
 2. For each POSIX shell in the bundle, the compiler resolves the roots'
    closure, applies the variant's exclusions, orders the modules by
-   dependency, and writes `plans/<shell>.sh`. A module that publishes
-   commands gets its own plan under `plans/commands/`.
+   dependency, and writes `plans/<shell>.sh` for the `env`-phase modules and
+   `plans/<shell>-interactive.sh` for `interactive`-phase modules. A module
+   that publishes commands gets its own plan under `plans/commands/`.
 3. The build copies the modules some shell loads, the capability prelude,
    and the Fish runtime when the bundle has Fish roots, then writes
    `manifest.tsv`. The release id is the SHA-256 of the manifest.
 4. `valise install` copies the tree into the release store, verifies it,
    switches the active link, writes the startup-file blocks and the Fish
-   hook, and publishes command stubs. If any step fails, install restores
+   hook, and publishes command stubs. When the project sets `gui_env` to
+   `systemd` or `launchd`, install also writes the GUI-session bridge file
+   (see [projects.md](projects.md)). If any step fails, install restores
    the previous state.
 5. At startup, the POSIX block picks the plan for the running shell class
-   (`bash`, `zsh`, `ksh`, or `sh`) and sources it. The plan contains the
-   load order; it reads no metadata. Fish verifies the release, then runs
-   the native Fish loader over the release's Fish metadata.
+   (`bash`, `zsh`, `ksh`, or `sh`) and sources it. The block is two-stage:
+   stage 1 always sources `plans/<class>.sh` (the convergent env plan,
+   guarded by a release-id-keyed load guard), and stage 2 sources
+   `plans/<class>-interactive.sh` only when `$-` contains `i`. The block is
+   written to every entry point that can carry env — `~/.profile`, the
+   shell's login and rc files, `~/.zshenv`, and the `$ENV` shim for sh/ksh
+   subshells — so non-interactive contexts (ssh host-cmd, docker exec,
+   non-login `zsh -c`) still get the env plan, silently. The plan contains
+   the load order; it reads no metadata. Fish verifies the release, then
+   runs the native Fish loader over the release's Fish metadata.
 
 There is one release shape. The plan is generated ahead of time so that
 startup does no resolution work and so that you can read exactly what will
 run.
+
+## The env re-evaluation contract
+
+The env plan is a convergent projection, not a once-per-session increment:
+after any startup file evaluates, the exported environment equals the
+compiled intended environment regardless of what `/etc/profile`, macOS
+`path_helper`, or an outer shell did. Concretely:
+
+- The env plan is sourced at every startup entry point. PATH is re-asserted
+  idempotently on every evaluation through `valise_path_prepend`/`append`;
+  raw `PATH=...:$PATH` assignments in module bodies are lint-rejected
+  because they duplicate on re-evaluation.
+- The load guard `_valise_profile_loaded` records the active release id, so
+  the same shell with the same release is a no-op, a switched release forces
+  a reload, and a fresh nested shell always re-runs the env plan — which is
+  what repairs `path_helper` damage in new tmux panes.
+- Sourcing the env plan twice in one process yields byte-identical exported
+  env (fixed point; no PATH growth).
+- Contexts with no user startup file at all (cron, systemd services,
+  `wsl -- cmd`, Wayland/macOS GUI apps) cannot carry the profile env by OS
+  design; they are bridged only by `environment.d`, a LaunchAgent, or
+  WSLENV (`valise env export`, or `gui_env` in `valise.conf`), or documented
+  as out of reach.
+
+Only POSIX shells and Fish are in scope. csh/tcsh/nu/pwsh/xonsh/elvish/oils
+are syntax-incompatible and out of scope; the extension point is a
+runtime adapter like `lib/fish/`. Privileged (`-p`) and restricted shells
+read no startup files by design; `BASH_ENV` is user-set.
 
 ## The development loader
 
