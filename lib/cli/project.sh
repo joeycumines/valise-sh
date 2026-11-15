@@ -481,8 +481,10 @@ project_effective_roots() {
   unset _per_prelude _per_stream _per_awk
 }
 
-# project_compile <registry> <shell> <seeds> <excludes> <output> [plan|closure]
-# Compile one plan (or print its ordered closure) into output.
+# project_compile <registry> <shell> <seeds> <excludes> <output> [plan|closure] [phase]
+# Compile one plan (or print its ordered closure) into output. phase selects
+# which phase of the closure the rendered plan contains: env (default) or
+# interactive. closure mode ignores phase and prints the full ordered closure.
 project_compile() {
   _pcm_engine=$(engine_root) || die "cannot locate the valise engine"
   _pcm_compiler="$_pcm_engine/lib/compiler.awk"
@@ -492,13 +494,45 @@ project_compile() {
   _pcm_prelude=$(project_prelude_functions) || exit 1
   project_preprocess "$1" "$2" "$3" "$4" "$_pcm_prelude" >"$_pcm_stream" ||
     die "cannot resolve the $2 module graph"
-  if ! "$_pcm_awk" -v target_shell="$2" -v plan_name="$2" -v mode="${6:-plan}" -f "$_pcm_compiler" \
+  if ! "$_pcm_awk" -v target_shell="$2" -v plan_name="$2" -v mode="${6:-plan}" -v phase="${7:-env}" -f "$_pcm_compiler" \
     "$_pcm_stream" >"$5"; then
     die "cannot compile the $2 module graph"
   fi
   _pcm_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
   "$_pcm_rm" -f "$_pcm_stream" || die "cannot remove compiler scratch file"
   unset _pcm_engine _pcm_compiler _pcm_awk _pcm_stream _pcm_rm _pcm_prelude
+}
+
+# project_closure_has_phase <registry> <shell> <seeds> <excludes> <phase>
+# Succeeds when the closure for the shell contains a module of the phase.
+project_closure_has_phase() {
+  # Compile the closure with the requested phase and look at the "# order="
+  # header: the compiler partitions the closure by phase, so a non-empty order
+  # list proves some module in the closure carries that phase.
+  _pch_engine=$(engine_root) || die "cannot locate the valise engine"
+  _pch_compiler="$_pch_engine/lib/compiler.awk"
+  [ -r "$_pch_compiler" ] || die "compiler not found: $_pch_compiler"
+  _pch_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+  _pch_prelude=$(project_prelude_functions) || exit 1
+  _pch_stream_file=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-closure.XXXXXX") || return 1
+  project_preprocess "$1" "$2" "$3" "$4" "$_pch_prelude" >"$_pch_stream_file" || {
+    _pch_rm=$(trusted_utility_path rm) || return 1
+    "$_pch_rm" -f "$_pch_stream_file"
+    unset _pch_stream_file _pch_rm
+    return 1
+  }
+  _pch_order=$("$_pch_awk" -v target_shell="$2" -v plan_name="$2" -v mode=plan -v phase="$5" -f "$_pch_compiler" "$_pch_stream_file" 2>/dev/null |
+    "$_pch_awk" '/^# order=/ { sub(/^# order=/, ""); print; exit }') || _pch_order=
+  _pch_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
+  "$_pch_rm" -f "$_pch_stream_file" || die "cannot remove closure probe scratch file"
+  unset _pch_stream_file _pch_rm
+  unset _pch_engine _pch_compiler _pch_awk _pch_prelude
+  if [ -n "$_pch_order" ]; then
+    unset _pch_order
+    return 0
+  fi
+  unset _pch_order
+  return 1
 }
 
 # project_output_check <out> <replace>
@@ -585,6 +619,12 @@ cmd_compile() {
     [ -n "$_co_roots" ] || continue
     project_compile "$_stage/.registry" "$_co_shell" "$_co_roots" "$_co_excludes" "$_stage/$_co_shell.sh"
     info "compiled plan for $_co_shell"
+    if project_closure_has_phase "$_stage/.registry" "$_co_shell" "$_co_roots" "$_co_excludes" interactive; then
+      project_compile "$_stage/.registry" "$_co_shell" "$_co_roots" "$_co_excludes" \
+        "$_stage/$_co_shell-interactive.sh" plan interactive ||
+        die "cannot compile the $_co_shell interactive plan"
+      info "compiled interactive plan for $_co_shell"
+    fi
   done
   _co_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
   "$_co_rm" -f "$_stage/.registry" || die "cannot remove registry scratch file"
@@ -1342,7 +1382,9 @@ project_build_commands() {
 #
 #   valise-release.conf                 build selection and closure
 #   manifest.tsv                        release manifest
-#   plans/<shell>.sh                    static plans for sh bash zsh ksh
+#   plans/<shell>.sh                    env-phase static plans for sh bash zsh ksh
+#   plans/<shell>-interactive.sh        interactive-phase plans, when any
+#                                       module in the shell's closure opts in
 #   plans/commands/<module>.sh          plans for modules that publish commands
 #   bin/<command>                       command launchers and executables
 #   runtime/capabilities.sh             the capability prelude
@@ -1418,6 +1460,12 @@ project_build() {
     else
       project_compile "$_pb_registry" "$_pb_shell" "$_pb_roots" "$_pb_excludes" "$_stage/plans/$_pb_shell.sh"
       info "compiled plan for $_pb_shell"
+      if project_closure_has_phase "$_pb_registry" "$_pb_shell" "$_pb_roots" "$_pb_excludes" interactive; then
+        project_compile "$_pb_registry" "$_pb_shell" "$_pb_roots" "$_pb_excludes" \
+          "$_stage/plans/$_pb_shell-interactive.sh" plan interactive ||
+          die "cannot compile the $_pb_shell interactive plan"
+        info "compiled interactive plan for $_pb_shell"
+      fi
     fi
   done
   [ "$_pb_any" -eq 1 ] || die "bundle $_pb_bundle has no roots for any shell"

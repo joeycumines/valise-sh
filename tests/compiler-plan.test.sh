@@ -174,6 +174,18 @@ existing_probe() { :; }'
 _module conflict_alias '' existing_alias_probe any read-only 'printf "alias conflict body\n" >>"'"$_tmp"'/conflict-alias.trace"
 existing_alias_probe() { :; }'
 
+# Phase modules: one env-phase module and one interactive-phase module, the
+# interactive one requiring the env one, so the interactive plan orders the env
+# dependency ahead of itself while the env plan must not contain it at all.
+# valise_path is required so the fixed-point probe can re-assert PATH through
+# the idempotent helper rather than a raw assignment. The env body asserts a
+# compiled PATH order through valise_path_prepend so the fixed-point probe can
+# verify convergence after a simulated path_helper reorder.
+_module phase_env 'valise_path' phase_env_loaded any read-only 'phase_env_loaded() { :; }
+valise_path_prepend /usr/local/bin'
+_module phase_interactive phase_env phase_interactive_loaded any read-only 'phase_interactive_loaded() { :; }'
+printf 'phase=interactive\n' >>"$_project/module.d/phase_interactive.meta"
+
 unset _other_platform
 
 {
@@ -201,6 +213,8 @@ _bundle_row wrapper-ok wrapper_ok
 _bundle_row wrapper-missing wrapper_missing
 _bundle_row conflict-function conflict_function
 _bundle_row conflict-alias conflict_alias
+_bundle_row phase 'phase_env phase_interactive'
+_bundle_row phase-env-only phase_env
 
 printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' \
   >"$_project/variants.tsv"
@@ -265,6 +279,107 @@ _build wrapper-ok "$_tmp/release-wrapper-ok"
 _build wrapper-missing "$_tmp/release-wrapper-missing"
 _build conflict-function "$_tmp/release-conflict-function"
 _build conflict-alias "$_tmp/release-conflict-alias"
+_build phase "$_tmp/release-phase"
+_build phase-env-only "$_tmp/release-phase-env-only"
+
+# --- Phase plans ---
+# The env plan contains the env module but not the interactive one; the
+# interactive plan exists and contains only the interactive module.
+if grep -F '# plan=bash phase=env' "$_tmp/release-phase/plans/bash.sh" >/dev/null &&
+  grep -F 'phase_env@' "$_tmp/release-phase/plans/bash.sh" >/dev/null &&
+  ! grep -F 'phase_interactive@' "$_tmp/release-phase/plans/bash.sh" >/dev/null &&
+  ! grep -F 'modules/phase_interactive.sh' "$_tmp/release-phase/plans/bash.sh" >/dev/null; then
+  pass "env plan contains only env-phase modules"
+else
+  fail "env plan contains only env-phase modules"
+  head -6 "$_tmp/release-phase/plans/bash.sh" >&2
+fi
+if [ -f "$_tmp/release-phase/plans/bash-interactive.sh" ] &&
+  grep -F '# plan=bash phase=interactive' "$_tmp/release-phase/plans/bash-interactive.sh" >/dev/null &&
+  grep -F 'phase_interactive@' "$_tmp/release-phase/plans/bash-interactive.sh" >/dev/null &&
+  ! grep -F 'valise_path@valise)' "$_tmp/release-phase/plans/bash-interactive.sh" >/dev/null; then
+  pass "interactive plan contains only the interactive module of the closure"
+else
+  fail "interactive plan contains only the interactive module of the closure"
+  head -6 "$_tmp/release-phase/plans/bash-interactive.sh" >&2 2>/dev/null
+fi
+
+# A shell whose closure has no interactive modules gets no interactive plan.
+if [ -f "$_tmp/release-phase-env-only/plans/bash.sh" ] &&
+  grep -F 'phase_env@' "$_tmp/release-phase-env-only/plans/bash.sh" >/dev/null &&
+  { [ ! -e "$_tmp/release-phase-env-only/plans/bash-interactive.sh" ] ||
+    ! grep -F '@module.d)' "$_tmp/release-phase-env-only/plans/bash-interactive.sh" >/dev/null; }; then
+  pass "no interactive modules land in the env-only shell closure plans"
+else
+  fail "no interactive modules land in the env-only shell closure plans"
+fi
+
+# Runtime proof: the env plan loads env exports only and stays silent; the
+# interactive plan loads the interactive export after the env plan.
+if VALISE_MODULE_ROOT="$_tmp/release-phase" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
+  if command -v phase_env_loaded >/dev/null && ! command -v phase_interactive_loaded >/dev/null; then
+    printf "env-only=yes\n"
+  else
+    printf "env-only=no\n"
+  fi
+' >"$_tmp/phase-env.out" 2>"$_tmp/phase-env.err" &&
+  grep -F 'env-only=yes' "$_tmp/phase-env.out" >/dev/null &&
+  [ ! -s "$_tmp/phase-env.err" ]; then
+  pass "sourcing the env plan loads env modules and stays silent"
+else
+  fail "sourcing the env plan loads env modules and stays silent"
+  cat "$_tmp/phase-env.out" "$_tmp/phase-env.err" >&2
+fi
+if VALISE_MODULE_ROOT="$_tmp/release-phase" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
+  . "$VALISE_MODULE_ROOT/plans/bash-interactive.sh"
+  if command -v phase_env_loaded >/dev/null && command -v phase_interactive_loaded >/dev/null; then
+    printf "both=yes\n"
+  else
+    printf "both=no\n"
+  fi
+' >"$_tmp/phase-int.out" 2>"$_tmp/phase-int.err" &&
+  grep -F 'both=yes' "$_tmp/phase-int.out" >/dev/null; then
+  pass "sourcing the interactive plan after the env plan loads the interactive module"
+else
+  fail "sourcing the interactive plan after the env plan loads the interactive module"
+  cat "$_tmp/phase-int.out" "$_tmp/phase-int.err" >&2
+fi
+
+# Fixed-point proof: sourcing the env plan twice in one shell yields a
+# byte-identical exported environment, and after a simulated path_helper
+# reorder re-sourcing restores the compiled PATH order front-most.
+if VALISE_MODULE_ROOT="$_tmp/release-phase" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
+  env | LC_ALL=C sort >"'"$_tmp"'/fp1.env"
+  PATH="/usr/bin:/bin:/reordered/helper:$PATH"
+  export PATH
+  VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh"
+  env | LC_ALL=C sort >"'"$_tmp"'/fp2.env"
+  VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh"
+  env | LC_ALL=C sort >"'"$_tmp"'/fp3.env"
+  case "$PATH" in
+    /usr/local/bin:*) printf "front=yes\n" ;;
+    *) printf "front=no path=%s\n" "$PATH" ;;
+  esac
+' >"$_tmp/phase-fp.out" 2>"$_tmp/phase-fp.err" &&
+  for f in fp1 fp2 fp3; do
+    grep -av '^PATH=' "$_tmp/$f.env" | LC_ALL=C sort > "$_tmp/$f.rest"
+  done
+
+  grep -a '^PATH=' "$_tmp/fp1.env" > "$_tmp/fp1.path" &&
+  grep -a '^PATH=' "$_tmp/fp2.env" > "$_tmp/fp2.path" &&
+  grep -a '^PATH=' "$_tmp/fp3.env" > "$_tmp/fp3.path" &&
+  cmp -s "$_tmp/fp2.path" "$_tmp/fp3.path" &&
+  cmp -s "$_tmp/fp2.rest" "$_tmp/fp3.rest" &&
+  grep -F 'front=yes' "$_tmp/phase-fp.out" >/dev/null; then
+  pass "env plan is a fixed-point projection: double source is byte-identical and re-asserts PATH"
+else
+  fail "env plan is a fixed-point projection: double source is byte-identical and re-asserts PATH"
+  cat "$_tmp/phase-fp.out" "$_tmp/phase-fp.err" >&2
+  diff -u "$_tmp/fp2.path" "$_tmp/fp3.path" >&2 || :
+fi
 
 # Strict mode stops at the first failing module and names it.
 if VALISE_MODULE_ROOT="$_tmp/release-behavior" /bin/bash -c '
