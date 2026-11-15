@@ -270,6 +270,16 @@ elif [ "$(uname -s)" = Darwin ]; then
 else
   skip "gui_env=launchd writes the LaunchAgent plist on apply (not darwin; bridge skipped by design)"
 fi
+if [ -f "$_gui_home/Library/LaunchAgents/sh.valise.env.plist" ] &&
+  sed -n '2p' "$_gui_home/Library/LaunchAgents/sh.valise.env.plist" 2>/dev/null |
+    grep -Fq '<!-- written by valise (gui_env=launchd); do not edit -->'; then
+  pass "launchd plist carries the valise ownership marker line"
+elif [ "$(uname -s)" = Darwin ] && [ -f "$_gui_home/Library/LaunchAgents/sh.valise.env.plist" ]; then
+  fail "launchd plist is missing the valise ownership marker line"
+  head -n 3 "$_gui_home/Library/LaunchAgents/sh.valise.env.plist" >&2
+else
+  skip "launchd plist carries the valise ownership marker line (bridge not written)"
+fi
 # F1/F3: a user-owned file at the bridge path must never be overwritten by
 # apply nor removed by uninstall. Plant a foreign plist, re-apply, and check.
 if [ "$(uname -s)" = Darwin ]; then
@@ -290,6 +300,25 @@ if [ "$(uname -s)" = Darwin ]; then
     fail "apply clobbered or misreported a user-owned bridge file"
     ls -l "$_foreign_home/Library/LaunchAgents" >&2 2>/dev/null || :
     cat "$_tmp/apply-foreign.out" >&2
+  fi
+  # F2-followup: a foreign plist that merely uses the valise Label must also
+  # survive — ownership is the exact marker line, not the Label string.
+  _foreign2_home="$_tmp/home-foreign2"
+  mkdir -p "$_foreign2_home/Library/LaunchAgents"
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n  <key>Label</key><string>sh.valise.env</string>\n</dict></plist>\n' \
+    >"$_foreign2_home/Library/LaunchAgents/sh.valise.env.plist"
+  _foreign2_proj="$_tmp/proj-foreign2"
+  cp -R "$_proj" "$_foreign2_proj"
+  printf 'gui_env=launchd\n' >>"$_foreign2_proj/valise.conf"
+  env -i HOME="$_foreign2_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_foreign2_home/.local/share" \
+    XDG_CONFIG_HOME="$_foreign2_home/.config" XDG_STATE_HOME="$_foreign2_home/.local/state" SHELL=/bin/bash \
+    TMPDIR="$_tmp" "$_valise" -C "$_foreign2_proj" uninstall >"$_tmp/un-foreign2.out" 2>&1 || :
+  if [ -f "$_foreign2_home/Library/LaunchAgents/sh.valise.env.plist" ] &&
+    grep -q '<string>sh.valise.env</string>' "$_foreign2_home/Library/LaunchAgents/sh.valise.env.plist" 2>/dev/null; then
+    pass "uninstall leaves a foreign plist that only shares the Label untouched"
+  else
+    fail "uninstall removed a foreign plist that carries only the Label"
+    cat "$_tmp/un-foreign2.out" >&2
   fi
   env -i HOME="$_foreign_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_foreign_home/.local/share" \
     XDG_CONFIG_HOME="$_foreign_home/.config" XDG_STATE_HOME="$_foreign_home/.local/state" SHELL=/bin/bash \

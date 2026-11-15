@@ -39,7 +39,7 @@ gui_env_file() {
 bridge_is_valise_owned() {
   case "${1:-}" in
   systemd) [ -f "$2" ] && head -n 1 "$2" 2>/dev/null | grep -Fq '# written by valise (gui_env=systemd)' ;;
-  launchd) [ -f "$2" ] && grep -q '<string>sh.valise.env</string>' "$2" 2>/dev/null ;;
+  launchd) [ -f "$2" ] && sed -n '2p' "$2" 2>/dev/null | grep -Fq '<!-- written by valise (gui_env=launchd); do not edit -->' ;;
   *) return 1 ;;
   esac
 }

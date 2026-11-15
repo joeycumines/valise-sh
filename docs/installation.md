@@ -80,19 +80,34 @@ line that sources a compiled plan. Such a line loads the profile a second
 time; remove it. `valise doctor` reports the same lines as a failure.
 
 The block detects the running shell class, `ksh`, `zsh`, `bash`, or `sh` for
-any other POSIX shell, and sources `plans/<class>.sh` from the active
-release. It sets `_valise_profile_loaded` only when the plan succeeds, so a
-later startup file in the same session retries after a failure.
-`VALISE_RELOAD=1` makes a later block load the profile again.
+any other POSIX shell, and loads the release in two stages. Stage 1 sources
+`plans/<class>.sh` — the env plan, a silent convergent projection of the
+environment — at every startup file, guarded by `_valise_profile_loaded`,
+which records the active release id: the same shell with the same release is
+a no-op, a different release reloads, and a fresh nested shell always re-runs
+the env plan, so a new login or tmux pane repairs PATH after `path_helper`.
+`VALISE_RELOAD=1` forces a reload in the same shell. Stage 2 sources
+`plans/<class>-interactive.sh` only when `$-` contains `i` and the bundle has
+interactive modules, so a non-interactive `ssh host cmd` or `scp` stays
+silent. A later startup file in the same session retries after a failure.
 
 `valise install` writes `~/.profile`, which ksh reads at login. A non-login
-interactive ksh reads the file named by `$ENV` when that variable is set.
-valise does not choose or edit that file; to cover non-login ksh, put the
-POSIX block in the file `$ENV` names.
+interactive ksh or sh reads the file named by `$ENV` when that variable is
+set. Install deploys a valise-managed shim at
+`${XDG_CONFIG_HOME:-~/.config}/valise/env.sh` and exports `ENV` to it from
+the `~/.profile` block when the running shell class is sh or ksh — but only
+when `ENV` is unset or names no existing file, so a user-owned `$ENV` file
+is never overwritten. `valise uninstall` removes the shim only when it
+carries the managed block.
 
 Zsh does not read `~/.profile` on its own: zsh login shells read
-`.zprofile`, not `~/.profile`. Install writes the same managed block to
-`~/.zprofile`, so zsh needs no separate pointer.
+`.zprofile`, and every zsh — including a non-login `zsh -c` — reads
+`.zshenv`. macOS runs `path_helper` from `/etc/zprofile`, so the block in
+`~/.zprofile` re-asserts the compiled PATH order after it; the block in
+`~/.zshenv` covers non-login zsh. Install therefore writes the same managed
+block to both `~/.zshenv` and `~/.zprofile` (when zsh is installed or the
+file exists), and double evaluation is harmless because the env plan is a
+convergent projection and the guard is keyed by release id.
 
 When the bundle has `fish` rows, the release carries `runtime/fish/`: the
 native Fish metadata reader and loader and `runtime/fish/profile.fish`, which
@@ -138,7 +153,13 @@ write the files once.
 `valise doctor` verifies the active release against its own manifest, checks
 the startup files the running shell actually reads for valise integration,
 including the `.bash_profile` or `.bash_login` that bash reads instead of
-`~/.profile`. It exits nonzero when the active release is missing or fails
+`~/.profile`, and warns about archetype pitfalls: a legacy single-stage
+managed block (no interactivity gate, upgrade recommended), a sh/ksh login
+shell whose `$ENV` does not point at the valise shim, a missing `~/.zshenv`
+block when zsh is installed, and a missing GUI-session bridge
+(`environment.d/10-valise.conf` on systemd Linux, the `sh.valise.env.plist`
+LaunchAgent on macOS) when the platform starts GUI apps without a user
+startup file. It exits nonzero when the active release is missing or fails
 verification, and when no startup file carries the integration.
 
 Two options adjust its scope:
@@ -282,9 +303,11 @@ it does not update the CLI itself.
 `valise uninstall` removes what install wrote:
 
 - the managed block from `~/.profile`, `~/.bash_profile`, `~/.bash_login`,
-  `~/.bashrc`, `~/.zprofile`, and `~/.zshrc`, keeping every other byte and
-  the file mode; a file install created is deleted when nothing else is left
-  in it
+  `~/.bashrc`, `~/.zprofile`, `~/.zshenv`, and `~/.zshrc`, keeping every other
+  byte and the file mode; a file install created is deleted when nothing else
+  is left in it
+- the `$ENV` shim at `${XDG_CONFIG_HOME:-~/.config}/valise/env.sh`, when it
+  carries the managed block
 - the Fish hook, when its first line is the valise header
 - the command stubs valise owns, except a stub that was edited after valise
   wrote it

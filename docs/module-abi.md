@@ -319,7 +319,10 @@ Within an `env`-phase body, raw PATH assignments (`PATH=...:$PATH`,
 which are idempotent under re-evaluation: sourcing the env plan twice, or in a
 nested shell, reaches the same fixed point instead of growing duplicate
 entries. The engine's own `valise_path` module is the exempt implementer of
-those helpers.
+those helpers. The lint scan is line-based and advisory; `phase` partitions the
+compiled POSIX plans only — the Fish runtime loads a module's body in every
+Fish shell, so a Fish module should keep the same env/interactive discipline
+by convention.
 
 ## Side-effect phases
 

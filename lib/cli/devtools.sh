@@ -211,7 +211,11 @@ env_export_emit() {
     ;;
   launchd)
     # A LaunchAgent whose program runs one launchctl setenv per variable.
+    # The comment line is the ownership marker: uninstall removes the plist
+    # only when this exact first line is present, so a foreign LaunchAgent
+    # that happens to use the same Label is never deleted.
     printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<!-- written by valise (gui_env=launchd); do not edit -->' \
       '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
       '<plist version="1.0">' '<dict>' \
       '  <key>Label</key><string>sh.valise.env</string>' \
@@ -309,7 +313,10 @@ lint_report() {
 # _lint_path_scan <file> <module>: reject raw PATH assignments in an
 # env-phase module body. Covers 'PATH=...', 'export PATH=...', and
 # whitespace-prefixed variants; valise_path_prepend/append writes go through
-# the helper and are fine.
+# the helper and are fine. The scan is a regex on source lines, so it is an
+# authoring-time advisory guard, not a security boundary: releases are sealed
+# by the manifest, and indirect writes (PATH+=, eval, ${PATH:=...}) are not
+# textually detectable here.
 _lint_path_scan() {
   _lps_file=$1
   _lps_mod=$2
