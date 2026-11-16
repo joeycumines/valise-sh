@@ -70,6 +70,48 @@ startup_file_for() {
   esac
 }
 
+# _e2e_filter_shell_noise: drop only the SHELL'S OWN diagnostics for an
+# interactive invocation without a controlling terminal, so a module's real
+# stderr stays fatal.
+#   bash  'no job control in this shell'
+#         'cannot set terminal process group (...): Inappropriate ioctl ...'
+#   ksh93 a bare newline (verified: emitted for any -i with non-tty stdin)
+# Anything else passes through and fails the silence assertion it belongs to.
+_e2e_filter_shell_noise() {
+  sed -e '/no job control in this shell$/d' \
+    -e '/cannot set terminal process group/d' \
+    -e '/^$/d'
+}
+
+# _e2e_rc_file_for <lane-shell> <home>: the startup file that carries the
+# INTERACTIVE stage for a POSIX shell.
+#
+# The PLAN is chosen by the class the shell reports (macOS /bin/sh is bash and
+# uses the bash plan), but the STARTUP FILE is chosen by how the shell is
+# INVOKED - which is what the lane name records:
+#   bash lane -> ~/.bashrc          zsh lane -> ~/.zshrc
+#   sh/dash/ksh/busybox -> the $ENV shim: no rc file exists for those
+#     invocations, and an interactive one reads the file $ENV names. That stays
+#     true for macOS /bin/sh, which is bash invoked as `sh`.
+_e2e_rc_file_for() {
+  case "$1" in
+    bash) printf '%s\n' "$2/.bashrc" ;;
+    zsh) printf '%s\n' "$2/.zshrc" ;;
+    *) printf '%s\n' "$2/.config/valise/env.sh" ;;
+  esac
+}
+
+# _e2e_stage1_only_file <class> <home>: a startup file for the shell that must
+# carry stage 1 but NEVER the interactive stage. ~/.profile is read by every
+# POSIX shell, so it is the strongest witness for bash and ksh; zsh never reads
+# it, so zsh's witness is ~/.zshenv.
+_e2e_stage1_only_file() {
+  case "$1" in
+    zsh) printf '%s\n' "$2/.zshenv" ;;
+    *) printf '%s\n' "$2/.profile" ;;
+  esac
+}
+
 # The exports the default bundle loads in a shell on a platform (uname -s),
 # and the exports it must not load there. Printed as two lines:
 # "expect <names...>" and "absent <names...>".
@@ -317,6 +359,23 @@ run_lane() {
     _snippet="$_tmp_home/$(startup_file_for "$_shell_name")"
     _ni_snippet=$_snippet
     [ "$_class" = zsh ] && _ni_snippet="$_tmp_home/.zshenv"
+    # Stage placement: the env stage is in every file; the INTERACTIVE stage is
+    # only in the shell's rc-stage file. In an interactive zsh 'i' is already in
+    # $- while .zshenv runs, so a stage 2 there would run interactive setup
+    # before the user's .zshrc and the release guard would suppress the right,
+    # later run.
+    _stage2_file=$(_e2e_rc_file_for "$_shell_name" "$_tmp_home")
+    _stage1_only=$(_e2e_stage1_only_file "$_class" "$_tmp_home")
+    if [ "$_stage1_only" = "$_stage2_file" ]; then
+      :
+    elif grep -q 'case \$- in \*i\*)' "$_stage1_only" 2>/dev/null; then
+      fail "$_lane/$_shell_name: $_stage1_only carries the interactive stage"
+    elif grep -q 'case \$- in \*i\*)' "$_stage2_file" 2>/dev/null; then
+      pass "$_lane/$_shell_name: the interactive stage lives only in the rc-stage file"
+    else
+      fail "$_lane/$_shell_name: the interactive stage is missing from the rc-stage file"
+      grep -c 'case \$- in \*i\*)' "$_stage2_file" >&2 2>/dev/null || :
+    fi
     _int_names=''
     case "$_class" in
       bash) _int_names='e2e_show_aliases e2e_bash_completions_loaded' ;;
@@ -333,19 +392,20 @@ run_lane() {
         fail "$_lane/$_shell_name: ~/.zshenv lacks the managed block"
       fi
     fi
-    # sh/ksh interactive subshells read $ENV: the .profile block must wire ENV
-    # to the valise shim, and install must have deployed the shim carrying the
-    # same two-stage block.
+    # sh/ksh interactive subshells read $ENV. The .profile block wires ENV to
+    # the valise shim unconditionally (bash ignores ENV as bash and reads it as
+    # `sh`; dash and ksh read it), the shim is the RC-STAGE entry point for those
+    # shells - so it carries BOTH stages - and .profile itself carries stage 1
+    # only, exactly like every other env-stage file.
     case $_class in
       sh|ksh)
         _shim="$_tmp_home/.config/valise/env.sh"
-        if grep -q 'case "$_valise_plan" in' "$_tmp_home/.profile" &&
-          grep -qF "ENV='$_shim'" "$_tmp_home/.profile" &&
+        if grep -qF "ENV='$_shim'" "$_tmp_home/.profile" &&
+          ! grep -q 'case \$- in \*i\*)' "$_tmp_home/.profile" &&
           [ -f "$_shim" ] &&
           grep -q '# BEGIN valise managed block' "$_shim" &&
-          grep -q 'case $- in \*i\*)' "$_shim" &&
-          ! awk '/^case "\$_valise_plan" in/,/^esac$/' "$_tmp_home/.profile" | grep -q '^$'; then
-          pass "$_lane/$_shell_name: .profile wires ENV to the deployed shim (which carries the managed block)"
+          grep -q 'case \$- in \*i\*)' "$_shim"; then
+          pass "$_lane/$_shell_name: .profile wires ENV at the shim, which carries the interactive stage"
         else
           fail "$_lane/$_shell_name: the ENV shim wiring is incomplete"
           ls -l "$_tmp_home/.profile" "$_shim" >&2 2>/dev/null || :
@@ -366,6 +426,41 @@ run_lane() {
         fail "$_lane/$_shell_name: non-interactive startup load is not env-only/silent"
         cat "$_tmp_home/ni.out" "$_tmp_home/ni.err" >&2
       fi
+      # A bash binary invoked as `sh` READS $ENV for an interactive subshell
+      # (bash's POSIX startup file), even though BASH_VERSION marks its plan
+      # class as bash. The ENV stanza is therefore emitted unconditionally and
+      # decided by the runtime, not by the plan class: a class test wrongly
+      # excluded exactly this case. The probe must NOT pre-set ENV - that would
+      # test nothing but its own fixture.
+      if [ "$_class" = bash ] && [ -f "$E2E_RELEASE/plans/bash-interactive.sh" ]; then
+        _as_sh_dir="$_tmp_home/as-sh"
+        mkdir -p "$_as_sh_dir" 2>/dev/null || :
+        if ln -sf "$_shell_path" "$_as_sh_dir/sh" 2>/dev/null; then
+          env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
+            "$_as_sh_dir/sh" -c '. "$HOME/.profile"; printf "ENV=%s\n" "${ENV:-unset}"' \
+            >"$_tmp_home/assh.out" 2>/dev/null
+          _as_sh_shim="$_tmp_home/.config/valise/env.sh"
+          if grep -Fx "ENV=$_as_sh_shim" "$_tmp_home/assh.out" >/dev/null; then
+            # The wiring is what makes the session work: an interactive child
+            # inheriting that ENV must load both plans.
+            env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
+              "ENV=$_as_sh_shim" "$_as_sh_dir/sh" -i -c 'if command -v e2e_env_ready >/dev/null; then printf "env=yes"; fi; if command -v e2e_show_aliases >/dev/null 2>&1 || command -v e2e_bash_completions_loaded >/dev/null 2>&1; then printf " int=yes"; fi; printf "\n"' \
+              >"$_tmp_home/assh-int.out" 2>/dev/null </dev/null
+            if grep -q 'env=yes' "$_tmp_home/assh-int.out" &&
+              grep -q 'int=yes' "$_tmp_home/assh-int.out"; then
+              pass "$_lane/$_shell_name: a bash invoked as sh wires ENV and loads both plans"
+            else
+              fail "$_lane/$_shell_name: a bash invoked as sh wired ENV but did not load both plans"
+              cat "$_tmp_home/assh-int.out" >&2 2>/dev/null || :
+            fi
+          else
+            fail "$_lane/$_shell_name: a bash invoked as sh does not wire ENV"
+            cat "$_tmp_home/assh.out" >&2 2>/dev/null || :
+          fi
+        else
+          skip "$_lane/$_shell_name: a bash invoked as sh wires ENV (cannot create the symlink)"
+        fi
+      fi
       # zsh non-login env: 'zsh -c' reads only ~/.zshenv (plus /etc/zshenv);
       # with the block there, the env plan applies and the interactive plan
       # does not, with zero stderr.
@@ -384,13 +479,9 @@ run_lane() {
       fi
       # shellcheck disable=SC2086
       env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
-        "$_shell_path" -i -c ". '$_snippet'; _ok=1; for _n in $_int_names; do command -v \"\$_n\" >/dev/null 2>&1 || _ok=0; done; [ \"\$_ok\" -eq 1 ] && command -v e2e_env_ready >/dev/null && printf 'both=yes\n'" \
+        "$_shell_path" -i -c ". '$_stage2_file'; _ok=1; for _n in $_int_names; do command -v \"\$_n\" >/dev/null 2>&1 || _ok=0; done; [ \"\$_ok\" -eq 1 ] && command -v e2e_env_ready >/dev/null && printf 'both=yes\n'" \
         >"$_tmp_home/int.out" 2>"$_tmp_home/int.err" </dev/null
-      # bash prints 'no job control in this shell' for -i without a tty, and
-      # ksh93 prints a bare newline to stderr for any interactive invocation
-      # reading from a non-tty; both are the shell's own startup noise, not
-      # valise output, so filter exactly those away.
-      sed -e '/no job control in this shell/d' -e '/^$/d' "$_tmp_home/int.err" >"$_tmp_home/int.err.filtered"
+      _e2e_filter_shell_noise <"$_tmp_home/int.err" >"$_tmp_home/int.err.filtered"
       if grep -q 'both=yes' "$_tmp_home/int.out" && [ ! -s "$_tmp_home/int.err.filtered" ]; then
         pass "$_lane/$_shell_name: interactive startup loads env and interactive plans, silently"
       else
@@ -407,12 +498,52 @@ run_lane() {
       env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
         "$_shell_path" -i -c ". '$_double_snippet'; . '$_double_snippet'; . '$_double_snippet'; printf 'twice=done\n'" \
         >"$_tmp_home/twice.out" 2>"$_tmp_home/twice.err" </dev/null
-      sed -e '/no job control in this shell/d' -e '/^$/d' "$_tmp_home/twice.err" >"$_tmp_home/twice.err.filtered"
+      _e2e_filter_shell_noise <"$_tmp_home/twice.err" >"$_tmp_home/twice.err.filtered"
       if grep -q 'twice=done' "$_tmp_home/twice.out" && [ ! -s "$_tmp_home/twice.err.filtered" ]; then
         pass "$_lane/$_shell_name: sourcing the block repeatedly in one interactive shell is silent"
       else
         fail "$_lane/$_shell_name: repeated block sourcing produced diagnostics"
         cat "$_tmp_home/twice.out" "$_tmp_home/twice.err" >&2
+      fi
+      # The reload flag is an implementation detail. When the BLOCK reloads
+      # (a second read of the same release), it must leave VALISE_RELOAD
+      # exactly as it found it - unset, and never exported into the caller's
+      # children - because the plan it sources reads a shell variable, not an
+      # exported one. Setting it through a prefix assignment on `.` would test
+      # dash/bash special-builtin semantics instead of the block.
+      env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
+        "$_shell_path" -c '. "'"$_stage2_file"'"; . "'"$_stage2_file"'"; if env | grep -q "^VALISE_RELOAD="; then printf "leaked\n"; else printf "sealed=%s\n" "${VALISE_RELOAD-unset}"; fi' \
+        >"$_tmp_home/attr.out" 2>/dev/null
+      if grep -Fx 'sealed=unset' "$_tmp_home/attr.out" >/dev/null; then
+        pass "$_lane/$_shell_name: a block reload neither exports VALISE_RELOAD nor leaves it set"
+      else
+        fail "$_lane/$_shell_name: a block reload leaked or left VALISE_RELOAD set"
+        cat "$_tmp_home/attr.out" >&2 2>/dev/null || :
+      fi
+      # The B5 case: a caller who set VALISE_RELOAD=1 (UNEXPORTED) to force a
+      # reload must get exactly that back. The block force-reloads when it sees
+      # VALISE_RELOAD=1, so this exercises the real reload path; assigning the
+      # flag (never exporting it) is what keeps the caller's attribute, and an
+      # assignment alone cannot REMOVE an attribute the block had added.
+      env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
+        "$_shell_path" -c 'VALISE_RELOAD=1; . "'"$_stage2_file"'"; if env | grep -q "^VALISE_RELOAD="; then printf "leaked-attr\n"; else printf "sealed=%s\n" "${VALISE_RELOAD-unset}"; fi' \
+        >"$_tmp_home/attr3.out" 2>/dev/null
+      if grep -Fx 'sealed=1' "$_tmp_home/attr3.out" >/dev/null; then
+        pass "$_lane/$_shell_name: a forced reload restores a set-but-unexported VALISE_RELOAD"
+      else
+        fail "$_lane/$_shell_name: a forced reload left VALISE_RELOAD exported or changed"
+        cat "$_tmp_home/attr3.out" >&2 2>/dev/null || :
+      fi
+      # A caller who set VALISE_RELOAD themselves keeps their value and their
+      # export status: the block restores both.
+      env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
+        "$_shell_path" -c 'VALISE_RELOAD=9; export VALISE_RELOAD; . "'"$_stage2_file"'"; if env | grep -qx "VALISE_RELOAD=9"; then printf "preserved=%s\n" "$VALISE_RELOAD"; else printf "lost\n"; fi' \
+        >"$_tmp_home/attr2.out" 2>/dev/null
+      if grep -Fx 'preserved=9' "$_tmp_home/attr2.out" >/dev/null; then
+        pass "$_lane/$_shell_name: a block reload restores a caller's exported VALISE_RELOAD"
+      else
+        fail "$_lane/$_shell_name: a block reload did not restore a caller's exported VALISE_RELOAD"
+        cat "$_tmp_home/attr2.out" >&2 2>/dev/null || :
       fi
       # A release switch inside a live shell re-sources the plan over the
       # previous load. That must not report the plan's own earlier exports as

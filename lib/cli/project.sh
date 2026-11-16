@@ -532,11 +532,24 @@ project_closure_has_phase() {
     return 1
   }
   _pch_order=
-  if project_preprocess "$1" "$2" "$3" "$4" "$_pch_prelude" >"$_pch_stream_file" &&
-    "$_pch_awk" -v target_shell="$2" -v plan_name="$2" -v mode=plan -v phase="$5" \
-      -f "$_pch_compiler" "$_pch_stream_file" >"$_pch_plan_file"; then
-    _pch_order=$("$_pch_awk" '/^# order=/ { sub(/^# order=/, ""); print; exit }' "$_pch_plan_file")
+  # "No module of this phase" and "the graph does not compile" are DIFFERENT
+  # answers, and only the first may be a quiet no. The caller is about to
+  # compile the same graph, so a compile failure here must surface rather than
+  # silently omit the plan (a broken interactive release used to ship without
+  # its interactive plan). The two failures are distinguished by running the
+  # preprocess and the compiler as separate statements.
+  if ! project_preprocess "$1" "$2" "$3" "$4" "$_pch_prelude" >"$_pch_stream_file"; then
+    "$_pch_rm" -f "$_pch_stream_file" "$_pch_plan_file" 2>/dev/null || :
+    unset _pch_stream_file _pch_plan_file _pch_engine _pch_compiler _pch_awk _pch_rm _pch_prelude
+    die "cannot resolve the $2 module graph while probing for $5-phase modules"
   fi
+  if ! "$_pch_awk" -v target_shell="$2" -v plan_name="$2" -v mode=plan -v phase="$5" \
+    -f "$_pch_compiler" "$_pch_stream_file" >"$_pch_plan_file"; then
+    "$_pch_rm" -f "$_pch_stream_file" "$_pch_plan_file" 2>/dev/null || :
+    unset _pch_stream_file _pch_plan_file _pch_engine _pch_compiler _pch_awk _pch_rm _pch_prelude
+    die "cannot compile the $2 module graph while probing for $5-phase modules"
+  fi
+  _pch_order=$("$_pch_awk" '/^# order=/ { sub(/^# order=/, ""); print; exit }' "$_pch_plan_file")
   "$_pch_rm" -f "$_pch_stream_file" "$_pch_plan_file" || die "cannot remove closure probe scratch files"
   unset _pch_stream_file _pch_plan_file _pch_engine _pch_compiler _pch_awk _pch_rm _pch_prelude
   if [ -n "$_pch_order" ]; then
@@ -1616,7 +1629,7 @@ cmd_status() {
   printf 'project default variant: %s\n' "$_project_variant"
   _status_home=$(path_normalize "$HOME") || die "cannot resolve HOME"
   _status_targets=$(posix_startup_targets "$_status_home")
-  while IFS= read -r _status_target; do
+  while IFS="$(printf '\t')" read -r _status_stage _status_target; do
     [ -n "$_status_target" ] || continue
     if [ -L "$_status_target" ]; then
       printf 'integration: %s: symlink, not managed by valise\n' "$_status_target"
@@ -1663,7 +1676,7 @@ EOF
   else
     printf 'build output: not built\n'
   fi
-  unset _status_home _status_targets _status_target _status_active_target \
+  unset _status_home _status_targets _status_target _status_stage _status_active_target \
     _status_build _status_build_hash _status_active_hash
 }
 

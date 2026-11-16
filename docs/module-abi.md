@@ -313,16 +313,30 @@ One rule is enforced at parse time: `phase=interactive` combined with
 phase — an interactive-only PATH change would be missing exactly in the
 non-interactive contexts that need it.
 
-Within an `env`-phase body, raw PATH assignments (`PATH=...:$PATH`,
-`export PATH=...`) are rejected by `valise lint`. PATH changes go through
-`valise_path_prepend` / `valise_path_append` (declare `requires=valise_path`),
-which are idempotent under re-evaluation: sourcing the env plan twice, or in a
-nested shell, reaches the same fixed point instead of growing duplicate
-entries. The engine's own `valise_path` module is the exempt implementer of
-those helpers. The lint scan is line-based and advisory; `phase` partitions the
-compiled POSIX plans only — the Fish runtime loads a module's body in every
-Fish shell, so a Fish module should keep the same env/interactive discipline
-by convention.
+Raw PATH assignments (`PATH=...:$PATH`, `export PATH=...`) are rejected by
+`valise lint` in **every** phase, not only `env`: the env plan re-runs at every
+startup entry point and the interactive plan re-runs on a release switch (and
+on an explicit `source ~/.bashrc`), so a raw assignment duplicates entries in
+either one. PATH changes go through `valise_path_prepend` /
+`valise_path_append` (declare `requires=valise_path`), which are idempotent
+under re-evaluation: sourcing the env plan twice, or in a nested shell, reaches
+the same fixed point instead of growing duplicate entries, and an entry that
+was reordered is moved back to the front. The engine's own `valise_path` module
+is the exempt implementer of those helpers.
+
+The lint scan is a line-based authoring aid, not a security boundary: releases
+are sealed by the manifest, and indirect writes (`PATH+=`, `eval`,
+`${PATH:=...}`) are not textually detectable. It skips comment lines and
+`*.fish` bodies. Because a raw PATH write is a lint **FAIL**, `valise lint`
+exits non-zero; the file is readable but the project does not pass.
+
+An interactive module may `require` an env module (the env plan loads first).
+The reverse is a compile error, because the env plan never contains an
+interactive dependency.
+
+`phase` partitions the compiled POSIX plans only — the Fish runtime loads a
+module's body in every Fish shell, so a Fish module should keep the same
+env/interactive discipline by convention.
 
 ## Side-effect phases
 

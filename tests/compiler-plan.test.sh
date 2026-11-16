@@ -187,6 +187,25 @@ _module phase_interactive phase_env phase_interactive_loaded any read-only 'phas
 printf 'phase=interactive\n' >>"$_project/module.d/phase_interactive.meta"
 printf 'commands=phase_interactive_loaded\n' >>"$_project/module.d/phase_interactive.meta"
 
+# Cross-phase availability: an env module that FAILS, and an interactive module
+# that REQUIRES it. Partitioning the closure into two plans must not lose the
+# dependency contract: the interactive module's body must not run, in strict or
+# permissive mode, because its required dependency is unavailable.
+# A failing body must not `exit` - that would end the sourcing shell instead of
+# returning a status. A shell FUNCTION returning non-zero is the failing status
+# the plan records, which is exactly the contract under test.
+_module cx_env '' '' any read-only 'printf "CX_ENV_BODY\n"
+return 42'
+_module cx_int cx_env cx_int_loaded any read-only 'printf "CX_INT_BODY\n"
+cx_int_loaded() { :; }'
+printf 'phase=interactive\n' >>"$_project/module.d/cx_int.meta"
+
+# Export ownership: a module whose body defines a function the caller also
+# defines. Two passes over the plan with VALISE_RELOAD must not silently take
+# the caller's function over - the conflict is reported on BOTH passes, because
+# valise never installed it.
+_module owner_probe '' owner_probe_fn any read-only 'owner_probe_fn() { printf "MODULE\n"; }'
+
 unset _other_platform
 
 {
@@ -216,6 +235,8 @@ _bundle_row conflict-function conflict_function
 _bundle_row conflict-alias conflict_alias
 _bundle_row phase 'phase_env phase_interactive'
 _bundle_row phase-env-only phase_env
+_bundle_row cross-phase 'cx_int'
+_bundle_row ownership owner_probe
 
 printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' \
   >"$_project/variants.tsv"
@@ -282,6 +303,8 @@ _build conflict-function "$_tmp/release-conflict-function"
 _build conflict-alias "$_tmp/release-conflict-alias"
 _build phase "$_tmp/release-phase"
 _build phase-env-only "$_tmp/release-phase-env-only"
+_build cross-phase "$_tmp/release-cross-phase"
+_build ownership "$_tmp/release-ownership"
 
 # --- Phase plans ---
 # The env plan contains the env module but not the interactive one; the
@@ -350,8 +373,117 @@ else
   cat "$_tmp/cross.err" >&2
 fi
 
-# A command plan is phase-agnostic: a published command of an
-# interactive-phase module must find its own body in plans/commands/<m>.sh.
+# A required dependency that FAILED in the env phase must still block its
+# interactive dependent. Each plan used to initialise _valise_plan_unavailable
+# to empty and the env plan discarded it before returning, so the interactive
+# body ran against a missing dependency. _valise_plan_carried now links the two
+# plans within one evaluation. Strict stops at the env failure; permissive
+# continues but must record the failure and block the dependent.
+for _cx_mode in strict permissive; do
+  VALISE_MODE=$_cx_mode VALISE_MODULE_ROOT="$_tmp/release-cross-phase" /bin/bash -c '
+    # A plan returns (not exits), so it must be sourced inside a function: at
+    # the top level of a -c script, `return 42` would end the whole shell.
+    _cx_run() {
+      . "$VALISE_MODULE_ROOT/plans/bash.sh"
+      _env_rc=$?
+      if [ -f "$VALISE_MODULE_ROOT/plans/bash-interactive.sh" ]; then
+        . "$VALISE_MODULE_ROOT/plans/bash-interactive.sh"
+      fi
+      printf "env_rc=%s int_loaded=%s\n" "$_env_rc" "${_valise_interactive_loaded:-unset}"
+    }
+    _cx_run
+  ' >"$_tmp/cx-$_cx_mode.out" 2>"$_tmp/cx-$_cx_mode.err" || :
+  if grep -F 'CX_INT_BODY' "$_tmp/cx-$_cx_mode.out" >/dev/null; then
+    fail "a required env failure blocks its interactive dependent ($_cx_mode)"
+    cat "$_tmp/cx-$_cx_mode.out" "$_tmp/cx-$_cx_mode.err" >&2
+  elif grep -F 'CX_ENV_BODY' "$_tmp/cx-$_cx_mode.out" >/dev/null; then
+    pass "a required env failure blocks its interactive dependent ($_cx_mode)"
+  else
+    fail "the cross-phase fixture did not run its env module ($_cx_mode)"
+    cat "$_tmp/cx-$_cx_mode.out" "$_tmp/cx-$_cx_mode.err" >&2
+  fi
+done
+
+# The reload prelude clears only exports valise itself installed. A caller
+# function that collides with a module export is reported on the FIRST pass and
+# again on a reload pass - it is never silently replaced, because valise never
+# owned it.
+# The diagnostics go to a file both passes append to, so the count covers both.
+OWNER_ERR="$_tmp/owner.err" : >"$_tmp/owner.err"
+OWNER_ERR="$_tmp/owner.err" VALISE_MODULE_ROOT="$_tmp/release-ownership" /bin/bash -c '
+  owner_probe_fn() { printf "USER\n"; }
+  printf "before=%s\n" "$(owner_probe_fn)"
+  . "$VALISE_MODULE_ROOT/plans/bash.sh" 2>>"$OWNER_ERR"
+  printf "first=%s\n" "$(owner_probe_fn)"
+  VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh" 2>>"$OWNER_ERR"
+  printf "second=%s\n" "$(owner_probe_fn)"
+' >"$_tmp/owner.out" 2>/dev/null || :
+_owner_conflicts=$(grep -cF 'declared export already exists before load: owner_probe_fn' "$_tmp/owner.err" || :)
+case "$_owner_conflicts" in '' | *[!0-9]*) _owner_conflicts=0 ;; esac
+if grep -Fx 'before=USER' "$_tmp/owner.out" >/dev/null &&
+  grep -Fx 'first=USER' "$_tmp/owner.out" >/dev/null &&
+  grep -Fx 'second=USER' "$_tmp/owner.out" >/dev/null &&
+  [ "$_owner_conflicts" -eq 2 ]; then
+  pass "an automatic reload never takes over a caller-owned function"
+else
+  fail "an automatic reload replaced a caller-owned function"
+  cat "$_tmp/owner.out" "$_tmp/owner.err" >&2
+fi
+# A module valise DID install is cleared and reinstalled on a reload pass with
+# no conflict diagnostic: ownership, not a guess from having attempted a load.
+VALISE_MODULE_ROOT="$_tmp/release-reload" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
+  VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh"
+  printf "reload_ok=%s owned=%s\n" "$(command -v reload_probe_loaded >/dev/null && echo yes)" "${_valise_plan_owned:-unset}"
+' >"$_tmp/owned-reload.out" 2>"$_tmp/owned-reload.err"
+if grep -Fx 'reload_ok=yes owned=reload_probe_loaded' "$_tmp/owned-reload.out" >/dev/null &&
+  [ ! -s "$_tmp/owned-reload.err" ]; then
+  pass "a reload clears only the exports valise installed and reports no conflict"
+else
+  fail "a reload did not record or clear its own exports correctly"
+  cat "$_tmp/owned-reload.out" "$_tmp/owned-reload.err" >&2
+fi
+
+# Phase migration across a release switch: a module that was env-phase in the
+# release this process loaded and is interactive-phase in the next one must be
+# reloaded when the block re-sources. The reload decision is per RELEASE, not
+# per stage, which is what makes the new interactive plan succeed instead of
+# reporting valise's own earlier definition as a foreign conflict.
+_mig_env="$_tmp/migrate-a"
+_mig_int="$_tmp/migrate-b"
+for _mig_pair in "$_mig_env:env" "$_mig_int:interactive"; do
+  _mig_dir=${_mig_pair%:*}
+  _mig_phase=${_mig_pair#*:}
+  mkdir -p "$_mig_dir/module.d" "$_mig_dir/modules"
+  : >"$_mig_dir/valise.conf"
+  printf '%s\n' 'name=mover' 'version=' 'side_effect=read-only' 'requires=' 'optional=' \
+    'shells=posix' 'platforms=any' 'exports=mover_fn' 'load=modules/mover.sh' \
+    >"$_mig_dir/module.d/mover.meta"
+  [ "$_mig_phase" = env ] || printf 'phase=interactive\n' >>"$_mig_dir/module.d/mover.meta"
+  printf 'mover_fn() { printf "IMPL-%s\\n"; }\n' "$_mig_phase" >"$_mig_dir/modules/mover.sh"
+  printf '# bundle\tshell\troots\ndefault\tbash\tmover\n' >"$_mig_dir/bundles.tsv"
+  printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_mig_dir/variants.tsv"
+done
+rm -rf "$_tmp/migrate-rel-a" "$_tmp/migrate-rel-b"
+( cd "$_mig_env" && "$_valise" build "$_tmp/migrate-rel-a" ) >/dev/null 2>&1
+( cd "$_mig_int" && "$_valise" build "$_tmp/migrate-rel-b" ) >/dev/null 2>&1
+VALISE_MODULE_ROOT="$_tmp/migrate-rel-a" /bin/bash -c '
+  VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh"
+  printf "before=%s\n" "$(mover_fn)"
+  VALISE_MODULE_ROOT="'"$_tmp"'/migrate-rel-b"
+  VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh"
+  VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash-interactive.sh"
+  printf "after=%s\n" "$(mover_fn)"
+' >"$_tmp/migrate.out" 2>"$_tmp/migrate.err" || :
+if grep -Fx 'before=IMPL-env' "$_tmp/migrate.out" >/dev/null &&
+  grep -Fx 'after=IMPL-interactive' "$_tmp/migrate.out" >/dev/null &&
+  ! grep -F 'already exists before load' "$_tmp/migrate.err" >/dev/null; then
+  pass "a module moved from env to interactive phase reloads cleanly"
+else
+  fail "a module moved from env to interactive phase did not reload"
+  cat "$_tmp/migrate.out" "$_tmp/migrate.err" >&2
+fi
+
 if [ -f "$_tmp/release-phase/plans/commands/phase_interactive.sh" ] &&
   grep -F '# plan=bash phase=all' "$_tmp/release-phase/plans/commands/phase_interactive.sh" >/dev/null &&
   grep -F 'phase_interactive@' "$_tmp/release-phase/plans/commands/phase_interactive.sh" >/dev/null; then

@@ -40,7 +40,7 @@ ignored; an unknown or repeated key is an error.
 | `variant` | Default variant (default `default`). |
 | `requires_valise` | Oldest valise version that may build the project, such as `0.3.0`. An older valise refuses with `this project requires valise >= ...`. |
 | `lint_layer_forbid` | Extended regular expression that must not match anything under `layers/` (case-insensitive). `valise lint` enforces it; use it to keep personal or employer material out of a layer you share. |
-| `gui_env` | GUI-session environment bridge written by `valise apply`/`install`: `off` (default) writes nothing, `systemd` writes `${XDG_CONFIG_HOME:-$HOME/.config}/environment.d/10-valise.conf` on Linux with a systemd user session, `launchd` writes `~/Library/LaunchAgents/sh.valise.env.plist` on macOS. `valise uninstall` removes the bridge it wrote. |
+| `gui_env` | GUI-session environment bridge written by `valise apply`/`install`: `off` (default) writes nothing, `systemd` writes `${XDG_CONFIG_HOME:-$HOME/.config}/environment.d/10-valise.conf` on Linux (written whether or not a user session is running, so a machine can be provisioned before one starts), `launchd` writes `~/Library/LaunchAgents/sh.valise.env.plist` on macOS. `valise uninstall` removes the bridge it wrote. |
 
 A layer's directory name is made of letters, digits, `_`, `-`, and `.`, and
 may not start with `.` or contain `..`. Metadata and bodies must be regular
@@ -253,9 +253,17 @@ with, and whether the active release matches `build/release`.
 
 When `valise.conf` sets `gui_env` to `systemd` or `launchd`, apply also writes
 the GUI-session bridge file (see the key table above) from the active
-release's env plan, so graphical sessions get the same environment as a login
-shell. `valise env export <environment.d|launchd|wsl>` prints that bridge
-content directly for the active release, without installing.
+release's env plan, so graphical sessions get the exported variables the env
+plan produces. The bridge is deliberately **partial**: `PATH` and the four XDG
+root variables are not carried, because a GUI session's `PATH` comes from
+launchd or the systemd user manager rather than the profile, and copying the
+installer's `PATH` into every application would be wrong. `valise env export`
+lists every excluded variable on stderr so the omission is visible.
+`valise env export <environment.d|launchd|wsl>` prints that bridge content
+directly for the active release, without installing. The copy is evaluated the
+way a login shell would evaluate it, module side effects included; only
+`valise apply --dry-run` refuses to run module bodies, so it reports that the
+bridge would be regenerated rather than computing its bytes.
 
 ## Checking a project
 

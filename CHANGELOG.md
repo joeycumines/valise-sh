@@ -11,11 +11,12 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
   `phase=env|interactive` (default `env`); the compiler emits `plans/<shell>.sh`
   for the env phase and `plans/<shell>-interactive.sh` for interactive modules.
   The managed block sources the env plan at every startup entry point behind a
-  release-id-keyed guard and sources the interactive plan only when `$-`
-  contains `i`. The block is written to `~/.zshenv` as well as `~/.zprofile`,
-  and `sh`/`ksh` login shells get `ENV` pointed at a valise-owned shim so
-  interactive POSIX subshells load valise too. `valise doctor` flags legacy
-  single-stage blocks as upgradeable.
+  release-id-keyed guard. Stage 2 sources the interactive plan only when `$-`
+  contains `i`, and is written only into the shell's rc-stage file
+  (`~/.bashrc`, `~/.zshrc`, or the `$ENV` shim). The env plan is written to
+  `~/.zshenv` as well as `~/.zprofile`, and `sh`/`ksh` login shells get `ENV`
+  pointed at a valise-owned shim so interactive POSIX subshells load valise
+  too. `valise doctor` flags legacy single-stage blocks as upgradeable.
 - `valise env export <environment.d|launchd|wsl>` renders the active release's
   env plan as GUI-session bridge content: `environment.d` `KEY=VALUE` lines,
   a `launchctl setenv` LaunchAgent plist, or WSL `WSLENV` flag lines. The
@@ -36,14 +37,18 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
   `gui_env=off` on the next release removes a bridge an earlier one wrote.
   `valise apply --dry-run` now reports the ENV shim and the GUI bridge.
 - The `$ENV` stanza is emitted into every managed block and decided at RUNTIME
-  from the shell class, so an install run from bash or zsh still wires an
-  `sh` login shell. The shim is a managed startup file: `valise uninstall`
-  strips the block and keeps any lines you added, and ownership is an
-  exact-line marker match rather than a substring.
-- The env-plan capture keeps your real `HOME` and isolates only the
-  startup-file surface, so a `$HOME`-derived variable carries the real path.
-  It fails loudly instead of truncating when a value contains a newline, when
-  the interpreter is unavailable, or when the plan fails to load.
+  by what the shell does, not by the plan class: bash ignores `ENV` as `bash`
+  and reads it as `sh`, and dash and ksh read it, so an unconditional stanza
+  wires exactly the shells that need it. The shim carries both stages and is a
+  managed startup file: `valise uninstall` strips the block and keeps any lines
+  you added, and ownership is an exact-line marker match rather than a
+  substring.
+- The env-plan capture keeps your real `HOME`, `XDG` roots and `TMPDIR`, and
+  isolates only the startup-file surface, so a variable derived from any of them
+  carries the real path. It fails loudly, naming the variable, when a value
+  cannot be represented (a newline or a control byte outside XML 1.0), when the
+  interpreter is unavailable, or when the plan fails to load - and it prints the
+  plan's own diagnostics.
 - `launchd` values are shell-quoted before XML-escaping, so a value containing
   a space, `;`, `$`, a backtick or a quote reaches `launchctl setenv` intact.
   `environment.d` doubles `$` to `$$` (systemd expands it even in quotes).
@@ -65,6 +70,77 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 - The GUI bridge is a file, not an effect: environment.d applies at user-manager
   start, the LaunchAgent at login. See
   [GUI-session environment](docs/installation.md#gui-session-environment).
+
+### Fixed
+
+- `valise lint` aborted with `Bad substitution` under a `#!/bin/sh` that is
+  dash (the primary Linux case), because the PATH scan used a bash-only
+  parameter expansion. The scan now uses a POSIX test, and the suite RUNS the
+  CLI under a non-bash `sh` rather than only syntax-checking it.
+- `valise uninstall` could delete user content from a damaged `$ENV` shim: the
+  shim is now part of the paired-marker pre-check that runs before anything is
+  modified, and the block stripper itself refuses an unpaired file.
+- `gui_env=systemd` never wrote a bridge. The configured mode `systemd` was
+  passed to a renderer whose format name is `environment.d`; every automatic
+  systemd bridge failed to render while install still announced that it had
+  written one. Rendering failures now fail the install instead of reporting
+  success.
+- The GUI bridge is prepared before the active release changes and published
+  after it, so a capture or render failure can no longer leave the old release
+  active with its bridge, or switch the release while the bridge still
+  describes the previous environment. `valise release use`/`rollback` roll the
+  link back if publication fails.
+- Bridge files are written mode `0600`. They hold whatever the env plan
+  exports, and the module ABI permits a `local-secret` module to export a value
+  read from a protected file; `0644` published that value over a restrictive
+  umask.
+- The env capture keeps the caller's `XDG` roots and `TMPDIR` instead of
+  substituting scratch paths, so a variable derived from one no longer bakes in
+  a directory that is deleted before the bridge is read. It resolves the dump
+  utility by absolute path before the plan runs, so a directory the plan
+  prepends to `PATH` cannot substitute one, and it surfaces the plan's own
+  stderr instead of reporting only that it failed. The capture also sets
+  `VALISE_MODULE_ROOT` at the source site, exactly as the managed block does,
+  so the plan always resolves its own files; passing it through the helper's
+  environment made the capture fail intermittently while reporting
+  `runtime/capabilities.sh: No such file`.
+- A value containing SOH could fabricate a variable in the bridge (`X="a\001FAKE=1"`
+  produced `FAKE`), and a value containing CR or ESC produced a corrupt or
+  invalid plist. Unrepresentable values are now refused by name before any
+  record separator is translated.
+- A required dependency that failed in the env phase no longer lets its
+  interactive dependent run: the plans carry the unavailable-module list across
+  the phase boundary, and the block starts the interactive stage only after the
+  env stage succeeded. Strict and permissive mode both block it.
+- The interactive stage is written only into the shell's rc-stage file. An
+  interactive zsh has `i` in `$-` while it reads `~/.zshenv`, so the stage ran
+  interactive setup before the user's own `.zshrc` and the guard then suppressed
+  the correct run.
+- The `$ENV` stanza is emitted unconditionally and decided at runtime. A bash
+  binary invoked as `sh` reads `ENV` and was excluded by the old plan-class
+  test; `$ENV` values containing `$` or starting with `~` remain user-owned.
+- A reload clears only the exports valise itself installed, so a caller function
+  that collides with a module export is reported on every pass instead of being
+  silently replaced on the automatic retry. A module that moves from `env` to
+  `interactive` between two releases reloads correctly.
+- `valise apply --dry-run` no longer executes module bodies, so a permitted
+  `local-state` module cannot create directories in the real home while the
+  command promises that nothing outside `build/` is written. The bridge is
+  reported as would-create/would-regenerate, and ownership of an existing file
+  at the bridge path is respected. An unknown `gui_env` value is reported
+  rather than silently skipped.
+- `release use`/`rollback` no longer write a bridge for an install that used
+  `--no-integration`.
+- A compile failure while probing for interactive-phase modules now fails the
+  command instead of silently omitting the interactive plan.
+- `XDG_CONFIG_HOME=/` produced `//valise` paths; joined paths are spelled with
+  exactly one separator.
+- `make check` failed on a fresh checkout because it required the empty
+  `helpers/` and `install/` directories that were removed from the tree.
+- The end-to-end suite filters bash's `cannot set terminal process group`
+  warning alongside `no job control in this shell`, so a host without a
+  controlling terminal no longer reports a module-loading failure that did not
+  happen.
 
 ## [0.3.0] - 2026-11-06
 

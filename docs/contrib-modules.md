@@ -60,7 +60,7 @@ Choose `phase` by when the body may run (see
   PATH entries (always through `valise_path_prepend`/`valise_path_append`),
   `umask`, and XDG defaults. The env plan is sourced at every startup entry
   point and must stay silent and idempotent, so `valise lint` rejects raw
-  `PATH=` assignments in an env-phase body.
+  `PATH=` assignments in every phase (the interactive plan is re-sourced too).
 - `phase=interactive` for aliases, functions, prompt, history, shell options,
   completions, and keybindings — anything that only makes sense when `$-`
   contains `i`. The block's interactive stage is itself gated on `$-`, and

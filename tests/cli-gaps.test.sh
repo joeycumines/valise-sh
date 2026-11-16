@@ -310,6 +310,25 @@ if _env; then
     skip "doctor warns when \$ENV is unset for an sh login shell (no shim)"
   fi
 
+  # (d2) An ENV the user owns - one containing '$', which the shell expands, or
+  # starting with '~', which ksh expands - is left alone by the block and must
+  # not be reported as foreign. path_normalize does not expand '~', so only the
+  # ownership test can tell this case apart.
+  if [ -f "$(env_shim_path 2>/dev/null || printf '%s' "$HOME/.config/valise/env.sh")" ]; then
+    for _own_env in '~/my-env.sh' '$HOME/my-env.sh'; do
+      env SHELL=/bin/sh ENV="$_own_env" "$_valise" doctor >"$_test_root/doctor-env-own.out" 2>&1 || :
+      if grep -F '$ENV points at' "$_test_root/doctor-env-own.out" >/dev/null 2>&1; then
+        fail "doctor warns about a user-owned \$ENV ($_own_env)"
+        cat "$_test_root/doctor-env-own.out" >&2
+        break
+      else
+        pass "doctor leaves a user-owned \$ENV alone ($_own_env)"
+      fi
+    done
+  else
+    skip "doctor leaves a user-owned \$ENV alone (no shim)"
+  fi
+
   # (e) gui_env=off is the deliberate default: doctor must not warn about a
   # missing bridge for a release that declared it.
   if [ "$(uname -s)" = Darwin ] && [ ! -f "$HOME/Library/LaunchAgents/sh.valise.env.plist" ]; then

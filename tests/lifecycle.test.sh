@@ -35,9 +35,13 @@ _home=
 _bin_override=
 
 # _use_home <name>: switch every later valise call to a new private home.
+# The ENV shim path is derived here too: a test that switches homes and then
+# wrote to a shim captured from the PREVIOUS home would assert against a file
+# the command under test never touched.
 _use_home() {
   _home="$_tmp/$1"
   mkdir -p "$_home"
+  _shim="$_home/.config/valise/env.sh"
 }
 
 # _v <project> <args...>: valise against a project with the current home.
@@ -376,30 +380,28 @@ fi
 _use_home envshim
 _v "$_proj" apply >/dev/null 2>&1
 _shim="$_home/.config/valise/env.sh"
-# The shim carries the two-stage managed block. Its ENV stanza is gated on the
-# RUNTIME shell class, so re-asserting the same ENV from inside the shim is a
-# no-op - the shim content is byte-identical to the block written to the
-# startup files.
+# The shim is the RC-STAGE entry point for sh/ksh interactive subshells, so it
+# carries BOTH stages; ~/.profile is an env-stage file and must carry only
+# stage 1, because interactive setup belongs in the shell's rc file. The ENV
+# stanza names the shim in both.
 if [ -f "$_shim" ] &&
-  cmp -s "$_shim" "$_home/.profile" &&
   grep -q '# BEGIN valise managed block' "$_shim" &&
-  grep -q 'case $- in \*i\*)' "$_shim" &&
+  grep -q 'case \$- in \*i\*)' "$_shim" &&
+  grep -qF "ENV='$_shim'" "$_shim" &&
   [ "$(_mode "$_shim")" = 644 ]; then
-  pass "apply deploys the ENV shim with the same two-stage block as the startup files"
+  pass "apply deploys a two-stage ENV shim naming itself"
 else
   fail "apply did not deploy a correct ENV shim"
   ls -l "$_shim" >&2 2>/dev/null || :
   cat "$_shim" >&2 2>/dev/null || :
 fi
-# The ENV stanza is a RUNTIME decision, so a bash/zsh install still emits it;
-# only an sh/ksh session acts on it. The stanza is present in every file and
-# names the shim.
-if grep -q 'case "$_valise_plan" in' "$_home/.profile" &&
+if grep -q '# BEGIN valise managed block' "$_home/.profile" &&
+  ! grep -q 'case \$- in \*i\*)' "$_home/.profile" &&
   grep -qF "ENV='$_shim'" "$_home/.profile"; then
-  pass "the .profile block exports ENV at the shim (installer shell does not gate it)"
+  pass "~/.profile carries stage 1 only and wires ENV at the shim"
 else
-  fail "the .profile block does not export ENV at the shim"
-  grep -n 'ENV' "$_home/.profile" >&2
+  fail "~/.profile does not carry exactly stage 1 plus the ENV stanza"
+  cat "$_home/.profile" >&2 2>/dev/null || :
 fi
 # A bash/zsh install must produce the same wiring: the harness runs
 # SHELL=/bin/bash, so this is the case that used to be silently missing.
@@ -407,12 +409,15 @@ _use_home envshim-bash
 ( cd "$_proj" && env -i HOME="$_home" PATH=/usr/bin:/bin \
     XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
     XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/bash "$_valise" apply ) >/dev/null 2>&1
-if grep -q 'case "$_valise_plan" in' "$_home/.profile" &&
-  grep -qF "ENV='$_home/.config/valise/env.sh'" "$_home/.profile" &&
+# The ENV stanza is unconditional: bash ignores ENV when invoked as bash and
+# READS it when invoked as `sh`, so gating on the plan class excluded a shell
+# that needs it.
+if grep -qF "ENV='$_home/.config/valise/env.sh'" "$_home/.profile" &&
+  ! grep -q 'case "$_valise_plan" in' "$_home/.profile" &&
   [ -f "$_home/.config/valise/env.sh" ]; then
-  pass "installing under bash still wires ENV for an sh login shell"
+  pass "installing under bash wires ENV unconditionally for an sh login shell"
 else
-  fail "installing under bash did not wire ENV for an sh login shell"
+  fail "installing under bash did not wire ENV unconditionally"
   grep -n 'ENV' "$_home/.profile" >&2
 fi
 # A user-owned $ENV file is never overwritten: the block only sets ENV when
@@ -477,6 +482,33 @@ else
   fail "uninstall did not preserve user content below the shim block"
   cat "$_shim" >&2 2>/dev/null || :
 fi
+# A DAMAGED shim must stop uninstall with nothing modified. The shim is a
+# managed startup file, so it gets the same paired-marker pre-check every
+# startup file gets: before that, an unpaired BEGIN swallowed every line after
+# it (including the user's own) and, because install had created the file, the
+# emptied shim was then deleted.
+_use_home envshim-damaged
+_v "$_proj" apply >/dev/null 2>&1
+printf '%s\n' '# the user owns this line' 'export USER_VALUE=must_survive' >>"$_shim"
+_before_profile=$(cksum <"$_home/.profile")
+# Remove only the END marker, leaving BEGIN unmatched and user content below.
+_grep_path=$(command -v grep)
+"$_grep_path" -v '^# END valise managed block$' "$_shim" >"$_tmp/shim-damaged" || :
+cat "$_tmp/shim-damaged" >"$_shim"
+_shim_damaged=$(cksum <"$_shim")
+if _v "$_proj" uninstall >/dev/null 2>"$_tmp/un-damaged.err"; then
+  fail "uninstall stops on a damaged ENV shim with nothing removed (it succeeded)"
+elif [ -f "$_shim" ] && [ "$(cksum <"$_shim")" = "$_shim_damaged" ] &&
+  "$_grep_path" -qx 'export USER_VALUE=must_survive' "$_shim" &&
+  [ "$(cksum <"$_home/.profile")" = "$_before_profile" ] &&
+  [ -L "$_home/.config/valise/active" ]; then
+  pass "uninstall stops on a damaged ENV shim with nothing removed"
+else
+  fail "uninstall stops on a damaged ENV shim with nothing removed"
+  cat "$_tmp/un-damaged.err" >&2
+  [ ! -f "$_shim" ] || cat "$_shim" >&2
+fi
+
 # A file that merely MENTIONS the marker in prose is not valise-owned: the
 # marker test is a whole-line match, so it must be left completely alone.
 _use_home envshim-prose

@@ -50,13 +50,20 @@ contract, [module-abi.md](module-abi.md) the metadata,
    (`bash`, `zsh`, `ksh`, or `sh`) and sources it. The block is two-stage:
    stage 1 always sources `plans/<class>.sh` (the convergent env plan,
    guarded by a release-id-keyed load guard), and stage 2 sources
-   `plans/<class>-interactive.sh` only when `$-` contains `i`. The block is
-   written to every entry point that can carry env — `~/.profile`, the
-   shell's login and rc files, `~/.zshenv`, and the `$ENV` shim for sh/ksh
-   subshells — so non-interactive contexts (ssh host-cmd, docker exec,
-   non-login `zsh -c`) still get the env plan, silently. The plan contains
-   the load order; it reads no metadata. Fish verifies the release, then
-   runs the native Fish loader over the release's Fish metadata.
+   `plans/<class>-interactive.sh` only when `$-` contains `i`. **Stage 2 is
+   written only into the shell's rc-stage file** — `~/.bashrc`, `~/.zshrc`, or
+   the `$ENV` shim — because an interactive zsh already has `i` in `$-` while
+   it reads `~/.zshenv`, and running interactive setup there would precede the
+   user's own `.zshrc`. Stage 1 goes into every entry point that can carry
+   env: `~/.profile`, the login files, `~/.zshenv`, `~/.zprofile`, and the
+   `$ENV` shim. Non-interactive contexts therefore get the env plan, silently,
+   but only in shells that read a startup file in that mode: zsh via
+   `~/.zshenv`, and sh/ksh interactive subshells via `$ENV`. **bash is the
+   exception** — a non-interactive `bash -c`, and an `ssh host cmd` whose
+   remote shell is bash, reads neither `~/.bashrc` nor `~/.profile`, and
+   valise does not set `BASH_ENV`, so such a context gets no valise env. The
+   plan contains the load order; it reads no metadata. Fish verifies the
+   release, then runs the native Fish loader over the release's Fish metadata.
 
 There is one release shape. The plan is generated ahead of time so that
 startup does no resolution work and so that you can read exactly what will
@@ -86,6 +93,19 @@ compiled intended environment regardless of what `/etc/profile`, macOS
   design; they are bridged only by `environment.d`, a LaunchAgent, or
   WSLENV (`valise env export`, or `gui_env` in `valise.conf`), or documented
   as out of reach.
+- The bridge is a partial environment, deliberately. `PATH` and the four XDG
+  root variables are **not** bridged: a GUI session's `PATH` is set by launchd
+  or the systemd user manager, not by the profile, and copying the installer's
+  `PATH` into every application would be wrong. `valise env export` names every
+  excluded variable on stderr, so the omission is visible at the point of use
+  rather than silently implied by the docs.
+- A required dependency in the other phase is still enforced. A module marked
+  `phase=interactive` may require an env module (the env plan loads first), and
+  when that env module fails, the interactive dependent does not run: the env
+  plan hands its unavailable-module list to the interactive plan
+  (`_valise_plan_carried`), and the block starts stage 2 only after stage 1
+  succeeded. The reverse — an env module requiring an interactive one — is a
+  compile error.
 
 Only POSIX shells and Fish are in scope. csh/tcsh/nu/pwsh/xonsh/elvish/oils
 are syntax-incompatible and out of scope; the extension point is a

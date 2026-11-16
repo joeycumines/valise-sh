@@ -385,7 +385,11 @@ END {
     printf "%sstatus=0\n", prefix
     printf "%sfailed=0\n", prefix
     printf "%sfirst_status=0\n", prefix
-    printf "%sunavailable=\n", prefix
+    # A module this process already found unavailable in the OTHER phase is
+    # carried in here, so a required cross-phase dependency stays enforceable
+    # after the closure was partitioned into two plans. The managed block seeds
+    # this empty at each evaluation; the plan writes its own result back.
+    printf "%sunavailable=\"${%scarried:-}\"\n", prefix, prefix
     printf "%smode=${VALISE_MODE:-strict}\n", prefix
     printf "case \"$%smode\" in\n", prefix
     printf "strict | permissive) ;;\n"
@@ -407,6 +411,12 @@ END {
     printf "*) %splatform=unknown ;;\n", prefix
     printf "esac\n"
 
+    # The reload prelude clears ONLY exports valise itself installed in this
+    # process. _valise_plan_owned is written below as each module loads, so an
+    # automatic retry over our own previous definitions is quiet, while a
+    # CALLER function that collided with a module export is reported again on
+    # every pass instead of being silently replaced. An ATTEMPTED load does not
+    # establish ownership, which is what an unconditional unset assumed.
     if (reload_export_count > 0) {
         printf "if [ \"${VALISE_RELOAD:-}\" = 1 ]; then\n"
         printf "  for %sexport in", prefix
@@ -414,7 +424,11 @@ END {
             printf " %s", reload_exports[i]
         }
         printf "; do\n"
-        printf "    unset -f \"$%sexport\" 2>/dev/null || :\n", prefix
+        printf "    case \" ${_valise_plan_owned:-} \" in\n"
+        printf "    *\" $%sexport \"*)\n", prefix
+        printf "      unset -f \"$%sexport\" 2>/dev/null || :\n", prefix
+        printf "      ;;\n"
+        printf "    esac\n"
         printf "  done\n"
         printf "  unset %sexport\n", prefix
         printf "fi\n"
@@ -559,6 +573,22 @@ END {
                 printf "%s    unset -f \"$%sexport\" 2>/dev/null || :\n", body_indent, prefix
                 printf "%s  done\n", body_indent
                 printf "%sfi\n", body_indent
+                # A module that succeeded owns its exports for the lifetime of
+                # the process: record them so the VALISE_RELOAD prelude may
+                # clear exactly these and never a caller's colliding function.
+                printf "%sif [ \"$%sstatus\" -eq 0 ]; then\n", body_indent, prefix
+                printf "%s  for %sexport in", body_indent, prefix
+                for (ei = 1; ei <= export_count; ei++) {
+                    printf " %s", module_exports[ei]
+                }
+                printf "; do\n"
+                printf "%s    case \" ${_valise_plan_owned:-} \" in\n", body_indent
+                printf "%s    *\" $%sexport \"*) ;;\n", body_indent, prefix
+                printf "%s    *) _valise_plan_owned=\"${_valise_plan_owned:+$_valise_plan_owned }$%sexport\" ;;\n", body_indent, prefix
+                printf "%s    esac\n", body_indent
+                printf "%s  done\n", body_indent
+                printf "%s  unset %sexport\n", body_indent, prefix
+                printf "%sfi\n", body_indent
             }
         }
         if (platform_any == 0) {
@@ -585,6 +615,10 @@ END {
     printf "  done\n"
     printf "fi\n"
 
+    # Hand this phase's availability on to the NEXT plan sourced in the same
+    # evaluation (env -> interactive). The managed block clears the carrier at
+    # the start of each evaluation, so it never leaks across a release switch.
+    printf "%scarried=${%sunavailable# }\n", prefix, prefix
     printf "if [ \"$%sfailed\" -ne 0 ]; then\n", prefix
     printf "  %sreturn=$%sfirst_status\n", prefix, prefix
     printf "else\n"
@@ -592,5 +626,8 @@ END {
     printf "fi\n"
     printf "unset %sstatus %sfailed %sfirst_status %sunavailable %smode %splatform\n", prefix, prefix, prefix, prefix, prefix, prefix
     printf "unset %smodule %srequired %sblocked_by %splatform_match %sexport %slookup %sconflict %swrapper_exports %scleanup_exports\n", prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix
+    # _valise_plan_carried deliberately survives this plan: the interactive
+    # plan sourced next in the same evaluation reads it. The managed block
+    # resets it at the start of each evaluation.
     printf "eval \"unset %sreturn; return $%sreturn\"\n", prefix, prefix
 }

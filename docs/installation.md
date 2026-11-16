@@ -92,25 +92,39 @@ was missing or after a plan failed retries at the next startup file it reads.
 Stage 2 sources `plans/<class>-interactive.sh` only when `$-` contains `i`
 and the bundle has interactive modules, so a non-interactive `ssh host cmd`
 or `scp` stays silent; it carries its own release-id guard, so a login that
-reads several startup files runs it once. Both stages re-export
-`VALISE_RELOAD=1` for a re-source of a plan this process already loaded, and
-restore the caller's value afterwards, so a release switch inside a live
-shell does not report the plan's own earlier exports as a conflict. On a
-login shell the block arms a one-shot repair pass that runs stage 1 again at
-the second startup file: that is what restores the compiled PATH order after
-macOS `/etc/zprofile` runs `path_helper` following `~/.zshenv`.
+reads several startup files runs it once. Stage 2 is written only into the
+shell's rc-stage file (`~/.bashrc`, `~/.zshrc`, or the `$ENV` shim), never into
+`~/.zshenv` or `~/.profile`: an interactive zsh already has `i` in `$-` while
+it reads `~/.zshenv`, so an interactive stage there would run before your own
+`.zshrc` and the guard would then suppress the correct, later run. Whenever a
+plan is re-sourced over one this process already loaded — a release switch, or
+a module that moved between phases — the block exports `VALISE_RELOAD=1` for
+that source and restores your value afterwards. The compiled plan clears only
+the exports valise itself installed, so a release switch inside a live shell
+does not report the plan's own earlier exports as a conflict, and a function
+you defined that happens to collide with a module export is still reported
+rather than silently replaced. On a login shell the block arms a one-shot
+repair pass that runs stage 1 again at the second startup file: that is what
+restores the compiled PATH order after macOS `/etc/zprofile` runs `path_helper`
+following `~/.zshenv`.
+
+Stage 2 runs only after stage 1 succeeded. The env plan hands its
+unavailable-module list to the interactive plan, so an interactive module
+whose required env dependency failed is skipped exactly as it would be in a
+single combined plan.
 
 `valise install` writes `~/.profile`, which ksh reads at login. A non-login
 interactive ksh or sh reads the file named by `$ENV` when that variable is
 set. Install deploys a valise-managed shim at
-`${XDG_CONFIG_HOME:-~/.config}/valise/env.sh`, carrying the same managed
-block as the startup files. The block ends with a stanza that points `ENV`
-at the shim, decided at RUNTIME from the shell class the block detects: an
-sh/ksh session wires itself and a bash/zsh session ignores `ENV` entirely, so
-the result does not depend on which shell ran install. The stanza acts only
-when `ENV` is empty, contains a `$` (the shell expands it, so it is the
-user's own indirection), or names no existing file, so a user-owned `$ENV`
-file is never overwritten. Because the shim is a managed startup file,
+`${XDG_CONFIG_HOME:-~/.config}/valise/env.sh`, carrying both stages — it is the
+rc-stage entry point for those shells. The block ends with a stanza that points
+`ENV` at the shim, emitted unconditionally and decided at runtime: bash ignores
+`ENV` when invoked as `bash`, but READS it when invoked as `sh`, and dash and
+ksh read it, so gating on the shell class would exclude a bash binary running
+as `sh`. The stanza acts only when `ENV` is empty, contains a `$` (the shell
+expands it, so it is your own indirection), starts with `~` (ksh expands it),
+or names no existing file, so a user-owned `$ENV` file is never overwritten.
+Because the shim is a managed startup file,
 `valise uninstall` removes just the block from it: any lines you added
 yourself survive, and a shim install created from nothing is deleted.
 
@@ -357,17 +371,37 @@ The bridge is a file, not an effect: the session picks it up at its own start.
 
 | Mode | File | Takes effect |
 |---|---|---|
-| `systemd` | `${XDG_CONFIG_HOME:-~/.config}/environment.d/10-valise.conf` | at user-manager start: run `systemctl --user daemon-reexec`, or log out and back in |
+| `systemd` | `${XDG_CONFIG_HOME:-~/.config}/environment.d/10-valise.conf` | at user-manager start: log out and back in (the environment generator runs once, when the user manager starts) |
+
+The `environment.d` file writes a literal `$` as `$$`, because systemd's
+environment generator expands `$VAR` in each value - even inside double quotes.
+That expansion is performed by systemd's generator, so this relies on the
+systemd version you run; on a systemd too old to expand, a value containing `$`
+would reach the session with the doubling visible. The renderer's escaping is
+covered by tests against the emitted bytes; a native user-manager restart was
+not exercised here.
 | `launchd` | `~/Library/LaunchAgents/sh.valise.env.plist` | at login: run `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/sh.valise.env.plist`, or log out and back in |
 
 `valise release use` and `valise release rollback` re-render the bridge for the
-release they activate and remove a valise-owned bridge when that release wants
-none, so the bridge never describes an older release. `valise uninstall`
-removes the bridge file; variables the LaunchAgent already published stay set
-in a session that is already running, so log out or reboot to clear them.
+release they activate — but only when an install actually wrote the
+integration. An install with `--no-integration` writes no bridge, and a later
+release switch keeps that promise. The bridge is prepared *before* the active
+release changes, so a capture or render failure aborts the switch and leaves the
+outgoing release and its bridge consistent, rather than switching the release
+while the GUI session keeps the old environment. The file is written mode
+`0600`: it holds whatever the env plan exports, and the module ABI allows a
+`local-secret` module to export a value read from a protected file.
+`valise uninstall` removes the bridge file; variables the LaunchAgent already
+published stay set in a session that is already running, so log out or reboot
+to clear them.
 
-The capture behind the bridge keeps your real `HOME` and isolates only the
-startup-file surface (an empty `ZDOTDIR`, `BASH_ENV` and `ENV` pointing at
-`/dev/null`). It refuses to write a value a bridge format cannot represent -
-a value containing a newline, for instance - and names the variable instead of
-truncating it.
+The capture behind the bridge keeps your real `HOME`, the four XDG root
+variables and `TMPDIR`, and isolates only the startup-file surface (an empty
+`ZDOTDIR`, `BASH_ENV` and `ENV` pointing at `/dev/null`). Replacing the XDG
+roots would make every value derived from one point into a directory that is
+gone by the time the bridge is read. It resolves the dump utility by absolute
+path before the plan runs, so a directory the plan prepends to `PATH` cannot
+substitute one. It refuses to write a value a bridge format cannot represent — a
+newline, or a control byte outside XML 1.0 — and names the variable instead of
+truncating or corrupting it. `PATH` and the XDG roots are listed on stderr as
+excluded rather than silently dropped.

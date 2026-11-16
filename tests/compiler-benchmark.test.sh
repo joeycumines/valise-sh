@@ -34,8 +34,12 @@ printf '=== valise compiler structural scaling ===\n\n'
 # The emitted plan is a fixed-size shell block per module, wrapped in a
 # constant-size preamble and epilogue. BLOCK_LINES is that per-module size; the
 # dependency check of a module is one line however many dependencies it has.
+# FIXED_LINES is the preamble plus epilogue, which is what must stay CONSTANT as
+# N grows: it moved from 52 to 53 when the plan gained the `_valise_plan_carried`
+# hand-off for cross-phase availability. Only that constant changes when the
+# plan header changes; BLOCK_LINES changing would mean per-module work grew.
 BLOCK_LINES=14
-FIXED_LINES=52
+FIXED_LINES=53
 
 # Generate a synthetic module graph of N modules: a linear dependency chain
 # plus a fan-out edge every 7th module, seeded from the last 5 modules so the

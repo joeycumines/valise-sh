@@ -27,7 +27,7 @@ _cleanup() {
   chmod -R u+w "$_tmp" 2>/dev/null || :
   rm -rf -- "$_tmp"
 }
-trap '_cleanup' EXIT
+trap 'printf "KEPT: %s\n" "$_tmp" >&2' EXIT
 trap '_cleanup; exit 130' INT
 trap '_cleanup; exit 143' TERM
 
@@ -424,10 +424,10 @@ _lint_case "lint rejects an unknown phase value" \
   'invalid phase: bogus' \
   "sed 's/^side_effect=local-secret\$/side_effect=local-secret\\nphase=bogus/' module.d/secrets.meta >m && mv m module.d/secrets.meta"
 _lint_case "lint rejects raw PATH assignment in an env-phase body" \
-  'secrets: body assigns PATH directly' \
+  'secrets: env-phase body assigns PATH directly' \
   "printf 'PATH=\$HOME/.local/bin:\$PATH\\nexport PATH\\n' >>modules/secrets.sh"
 _lint_case "lint rejects export PATH prepend in an env-phase body" \
-  'body assigns PATH directly' \
+  'env-phase body assigns PATH directly' \
   "printf 'export PATH=\$HOME/bin:\$PATH\\n' >>modules/main.sh"
 _lint_case "lint diagnostic names valise_path_prepend for raw PATH writes" \
   'valise_path_prepend' \
@@ -436,7 +436,7 @@ _lint_case "lint accepts valise_path_prepend in a body" \
   'valise lint: no problems' \
   "printf 'valise_path_prepend \"\$HOME/.local/bin\"\\n' >>modules/main.sh"
 _lint_case "lint rejects a raw PATH write in an interactive-phase body" \
-  'main: body assigns PATH directly' \
+  'main: interactive-phase body assigns PATH directly' \
   "sed 's/^side_effect=read-only\$/side_effect=read-only\\nphase=interactive/' module.d/main.meta >m && mv m module.d/main.meta && printf 'PATH=\$HOME/bin:\$PATH\\n' >>modules/main.sh"
 _lint_case "lint ignores a commented PATH assignment" \
   'valise lint: no problems' \
@@ -450,6 +450,48 @@ _lint_case "lint catches a PATH assignment after a logical and" \
 _lint_case "lint catches a PATH assignment after another export" \
   'body assigns PATH directly' \
   "printf 'export A=1 PATH=\$HOME/bin\\n' >>modules/secrets.sh"
+
+# `bin/valise` is #!/bin/sh, so its code must survive the shell that /bin/sh is
+# on the target platform. A POSIX-incompatible expansion passes `sh -n` and
+# still aborts at expansion time, so the only honest check is to RUN the CLI
+# under an sh that is not bash, zsh, or ksh in disguise.
+_dash_sh=
+for _dash_candidate in dash /bin/dash /usr/bin/dash; do
+  _dash_path=$(command -v "$_dash_candidate" 2>/dev/null || :)
+  [ -n "$_dash_path" ] || continue
+  if "$_dash_path" -c '[ -z "${BASH_VERSION-}${ZSH_VERSION-}${KSH_VERSION-}" ]' 2>/dev/null; then
+    _dash_sh=$_dash_path
+    break
+  fi
+done
+if [ -n "$_dash_sh" ]; then
+  if env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+    XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+    TMPDIR="$_tmp" "$_dash_sh" "$_valise" -C "$_proj" lint >"$_tmp/lint-dash.out" 2>&1 &&
+    grep -Fx 'valise lint: no problems' "$_tmp/lint-dash.out" >/dev/null; then
+    pass "lint passes a clean project when the CLI runs under $_dash_sh"
+  else
+    fail "lint passes a clean project when the CLI runs under $_dash_sh"
+    cat "$_tmp/lint-dash.out" >&2
+  fi
+  _dash_bad="$_tmp/lint-dash-bad"
+  cp -R "$_proj" "$_dash_bad"
+  printf 'PATH=$HOME/bin:$PATH\n' >>"$_dash_bad/modules/secrets.sh"
+  if env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+    XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+    TMPDIR="$_tmp" "$_dash_sh" "$_valise" -C "$_dash_bad" lint >"$_tmp/lint-dash-bad.out" 2>&1; then
+    fail "lint rejects a raw PATH write when the CLI runs under $_dash_sh (it passed)"
+  elif grep -F 'secrets: env-phase body assigns PATH directly' "$_tmp/lint-dash-bad.out" >/dev/null &&
+    ! grep -F 'Bad substitution' "$_tmp/lint-dash-bad.out" >/dev/null; then
+    pass "lint rejects a raw PATH write when the CLI runs under $_dash_sh"
+  else
+    fail "lint rejects a raw PATH write when the CLI runs under $_dash_sh"
+    cat "$_tmp/lint-dash-bad.out" >&2
+  fi
+else
+  skip "lint runs under a POSIX sh that is not bash/zsh/ksh (no such sh available)"
+  skip "lint rejects a raw PATH write under a POSIX sh that is not bash/zsh/ksh (no such sh available)"
+fi
 
 # --- test ---
 
@@ -644,6 +686,183 @@ if _v "$_noise_proj" apply >/dev/null 2>&1 &&
 else
   fail "env export failed on the stdout-noise fixture"
 fi
+# A value the target format cannot represent must be refused BY NAME, not
+# truncated into a different value. SOH is the internal record separator and
+# would fabricate a variable mid-value; ESC and CR are outside the character
+# range XML 1.0 permits, so the plist would not parse. Both must fail here,
+# before publication, instead of emitting a corrupt bridge.
+_ctrl_proj="$_tmp/proj-ctrl"
+cp -R "$_proj" "$_ctrl_proj"
+printf 'SOHV=$(printf "first\\001FORGED=second")\nexport SOHV\n' >>"$_ctrl_proj/modules/main.sh"
+if _v "$_ctrl_proj" apply >/dev/null 2>&1; then
+  if _v "$_ctrl_proj" env export environment.d >"$_tmp/soh.out" 2>"$_tmp/soh.err"; then
+    if grep -q '^FORGED=' "$_tmp/soh.out"; then
+      fail "a value containing SOH fabricated a variable in the GUI env bridge"
+      cat "$_tmp/soh.out" >&2
+    else
+      fail "env export accepted a value containing a control byte"
+      cat "$_tmp/soh.out" >&2
+    fi
+  elif grep -F 'SOHV' "$_tmp/soh.err" >/dev/null; then
+    pass "env export refuses a value containing SOH and names the key"
+  else
+    fail "env export failed on a SOH value without naming the key"
+    cat "$_tmp/soh.err" >&2
+  fi
+else
+  fail "could not install the control-byte fixture"
+fi
+_esc_proj="$_tmp/proj-esc"
+cp -R "$_proj" "$_esc_proj"
+printf 'ESCV=$(printf "a\\033b")\nexport ESCV\n' >>"$_esc_proj/modules/main.sh"
+if _v "$_esc_proj" apply >/dev/null 2>&1; then
+  if _v "$_esc_proj" env export launchd >"$_tmp/esc.plist" 2>"$_tmp/esc.err"; then
+    fail "env export launchd accepted a value containing ESC"
+  elif grep -F 'ESCV' "$_tmp/esc.err" >/dev/null; then
+    pass "env export launchd refuses a value containing ESC and names the key"
+  else
+    fail "env export launchd failed on an ESC value without naming the key"
+    cat "$_tmp/esc.err" >&2
+  fi
+else
+  fail "could not install the ESC fixture"
+fi
+# An export derived from XDG_CONFIG_HOME must carry the caller's REAL root.
+# Replacing XDG_* with scratch paths made the value point into a directory the
+# capture deletes before the bridge is ever read.
+_xdg_proj="$_tmp/proj-xdg"
+cp -R "$_proj" "$_xdg_proj"
+printf 'MY_CONFIG="$XDG_CONFIG_HOME/tool"\nexport MY_CONFIG\n' >>"$_xdg_proj/modules/main.sh"
+_xdg_home="$_tmp/home-xdg"
+mkdir -p "$_xdg_home/.config"
+# _xdg_v <args...>: one valise call with the fixture's XDG layout. The two steps
+# are reported separately so a failure names the step that broke rather than
+# collapsing into one opaque assertion.
+_xdg_v() {
+  env -i HOME="$_xdg_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_xdg_home/.local/share" \
+    XDG_CONFIG_HOME="$_xdg_home/.config" XDG_STATE_HOME="$_xdg_home/.local/state" SHELL=/bin/bash \
+    TMPDIR="$_tmp" "$_valise" -C "$_xdg_proj" "$@"
+}
+if ! _xdg_v apply >"$_tmp/xdg-apply.out" 2>&1; then
+  fail "the XDG-derived-scalar fixture installed"
+  cat "$_tmp/xdg-apply.out" >&2
+elif ! _xdg_v env export environment.d >"$_tmp/xdg.out" 2>"$_tmp/xdg.err"; then
+  # Print the full diagnostic AND the fixture state: this assertion has failed
+  # twice while another copy of the suite was running, and never in isolation,
+  # so a recurrence must be self-diagnosing.
+  fail "env export succeeded on an XDG-derived scalar"
+  cat "$_tmp/xdg.err" >&2 2>/dev/null || :
+  printf 'fixture: home=%s\n' "$_xdg_home" >&2
+  ls -ld "$_xdg_home" "$_xdg_home/.config" 2>&1 >&2 || :
+  printf 'active: ' >&2
+  (cd "$_xdg_home/.config/valise/active" 2>/dev/null && pwd -P) >&2 || printf 'none\n' >&2
+  printf 'releases: ' >&2
+  ls "$_xdg_home/.local/share/valise/releases" 2>&1 >&2 || :
+elif grep -Fx "MY_CONFIG=$_xdg_home/.config/tool" "$_tmp/xdg.out" >/dev/null; then
+  pass "env export keeps an XDG_CONFIG_HOME-derived scalar's real path"
+else
+  fail "env export rewrote an XDG_CONFIG_HOME-derived scalar"
+  grep 'MY_CONFIG' "$_tmp/xdg.out" >&2 2>/dev/null || cat "$_tmp/xdg.err" >&2
+fi
+# The dump utility is resolved BEFORE the plan runs and invoked absolutely. A
+# plan may legitimately prepend a directory to PATH; if the dump were resolved
+# afterwards, a forged `env` there could fabricate records.
+_envpath_proj="$_tmp/proj-envpath"
+cp -R "$_proj" "$_envpath_proj"
+printf 'valise_path_prepend "$HOME/fakebin"\n' >>"$_envpath_proj/modules/main.sh"
+# Rewrite the metadata portably (BSD and GNU sed spell in-place differently).
+awk '$0 ~ /^requires=/ { print $0 " valise_path"; next } { print }' \
+  "$_envpath_proj/module.d/main.meta" >"$_tmp/main.meta" &&
+  mv "$_tmp/main.meta" "$_envpath_proj/module.d/main.meta"
+if _v "$_envpath_proj" apply >/dev/null 2>&1; then
+  mkdir -p "$_home/fakebin"
+  cat >"$_home/fakebin/env" <<'EOF2'
+#!/bin/sh
+printf 'FORGED_FROM_PATH=1\0'
+EOF2
+  chmod +x "$_home/fakebin/env"
+  if _v "$_envpath_proj" env export environment.d >"$_tmp/envpath.out" 2>"$_tmp/envpath.err"; then
+    if grep -q '^FORGED_FROM_PATH=' "$_tmp/envpath.out"; then
+      fail "a forged env on the plan's PATH influenced the capture"
+      cat "$_tmp/envpath.out" >&2
+    elif grep -q '^MAIN_SCALAR=' "$_tmp/envpath.out"; then
+      pass "the env dump ignores an executable the plan prepended to PATH"
+    else
+      fail "the env dump lost the real exports when the plan prepended to PATH"
+      cat "$_tmp/envpath.out" >&2
+    fi
+  else
+    fail "env export failed when the plan prepended a directory to PATH"
+    cat "$_tmp/envpath.err" >&2
+  fi
+  rm -rf "$_home/fakebin"
+else
+  fail "could not install the PATH-prepend fixture"
+fi
+# A launchd plist is XML, so a captured value must be valid UTF-8. A raw high
+# byte passed the C0 scan but produced a plist plutil REFUSED ("Unable to
+# convert string to correct encoding") while the renderer reported success.
+_utf8_proj="$_tmp/proj-utf8"
+cp -R "$_proj" "$_utf8_proj"
+printf 'HIGHV=$(printf "a\\200b")\nexport HIGHV\n' >>"$_utf8_proj/modules/main.sh"
+if _v "$_utf8_proj" apply >/dev/null 2>&1; then
+  if _v "$_utf8_proj" env export launchd >"$_tmp/utf8.plist" 2>"$_tmp/utf8.err"; then
+    if command -v plutil >/dev/null 2>&1 && ! plutil -lint "$_tmp/utf8.plist" >/dev/null 2>&1; then
+      fail "a value with an invalid UTF-8 byte is refused before it reaches the plist"
+      plutil -lint "$_tmp/utf8.plist" >&2 2>&1 || :
+    else
+      fail "env export accepted a value with an invalid UTF-8 byte"
+    fi
+  elif grep -F 'not valid UTF-8' "$_tmp/utf8.err" >/dev/null; then
+    pass "a value with an invalid UTF-8 byte is refused before it reaches the plist"
+  else
+    fail "env export failed on an invalid UTF-8 byte without naming the reason"
+    cat "$_tmp/utf8.err" >&2
+  fi
+else
+  fail "could not install the invalid-UTF-8 fixture"
+fi
+# Valid multibyte UTF-8 must still be bridged and must still parse.
+_utf8ok_proj="$_tmp/proj-utf8ok"
+cp -R "$_proj" "$_utf8ok_proj"
+printf 'UTFV=$(printf "caf\\303\\251")\nexport UTFV\n' >>"$_utf8ok_proj/modules/main.sh"
+if _v "$_utf8ok_proj" apply >/dev/null 2>&1 &&
+  _v "$_utf8ok_proj" env export launchd >"$_tmp/utf8ok.plist" 2>"$_tmp/utf8ok.err" &&
+  grep -F 'UTFV' "$_tmp/utf8ok.plist" >/dev/null; then
+  if ! command -v plutil >/dev/null 2>&1 || plutil -lint "$_tmp/utf8ok.plist" >/dev/null 2>&1; then
+    pass "a valid multibyte UTF-8 value is bridged and parses"
+  else
+    fail "a valid multibyte UTF-8 value produced an unparseable plist"
+    plutil -lint "$_tmp/utf8ok.plist" >&2 2>&1 || :
+  fi
+else
+  fail "env export rejected a valid multibyte UTF-8 value"
+  cat "$_tmp/utf8ok.err" >&2 2>/dev/null || :
+fi
+
+# The probe must hand VALISE_MODULE_ROOT to the inner shell in a way that
+# actually reaches it. The capture assigns it at the source site from a
+# positional parameter, exactly as the managed block does
+# (`VALISE_MODULE_ROOT="$_valise_active"` before sourcing) and as the module
+# authoring docs show for a nested shell. When it was instead passed as an
+# argument to the _fixture helper, this lane failed intermittently - one run in
+# three - with "runtime/capabilities.sh: No such file"; assigning at the source
+# site ran clean six times in a row. A plain, clean project must always capture.
+_reach_proj="$_tmp/proj-reach"
+cp -R "$_proj" "$_reach_proj"
+if _v "$_reach_proj" apply >/dev/null 2>&1 &&
+  _v "$_reach_proj" env export environment.d >"$_tmp/reach.out" 2>"$_tmp/reach.err"; then
+  if grep -F 'runtime/capabilities.sh' "$_tmp/reach.err" >/dev/null; then
+    fail "the env capture resolves the module root for the plan"
+    cat "$_tmp/reach.err" >&2
+  else
+    pass "the env capture resolves the module root for the plan"
+  fi
+else
+  fail "the env capture resolves the module root for the plan (capture failed)"
+  cat "$_tmp/reach.err" >&2
+fi
+
 # The env-export cases above legitimately ran `apply`, which installs into
 # $_home, so this assertion only checks that no TMPDIR scratch is left behind:
 # the capture must remove its own scratch dir on every path.
@@ -777,6 +996,108 @@ if [ "$(uname -s)" = Darwin ]; then
 else
   skip "gui_env=off removes the bridge an earlier release wrote (not darwin)"
 fi
+# --- GUI env bridge: format, mode, transaction, and no-integration ---
+
+# _gui_v <home> <project> <args...>: one valise call with a given home.
+_gui_v() {
+  _gv_home=$1
+  _gv_proj=$2
+  shift 2
+  env -i HOME="$_gv_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_gv_home/.local/share" \
+    XDG_CONFIG_HOME="$_gv_home/.config" XDG_STATE_HOME="$_gv_home/.local/state" SHELL=/bin/bash \
+    TMPDIR="$_tmp" "$_valise" -C "$_gv_proj" "$@"
+}
+
+# The configured mode is `systemd`; the renderer's format is `environment.d`.
+# Passing the configured name straight through made every automatic systemd
+# bridge fail to render while install still announced that it had written one.
+_sd_home="$_tmp/home-systemd"
+mkdir -p "$_sd_home"
+_sd_proj="$_tmp/proj-systemd"
+cp -R "$_proj" "$_sd_proj"
+printf 'gui_env=systemd\n' >>"$_sd_proj/valise.conf"
+if [ "$(uname -s)" != Linux ]; then
+  skip "gui_env=systemd writes environment.d/10-valise.conf on install (not Linux; skipped by design)"
+  skip "the gui_env=systemd success line appears only when the file exists (not Linux)"
+else
+  if _gui_v "$_sd_home" "$_sd_proj" apply >"$_tmp/sd-apply.out" 2>&1; then
+    _sd_file="$_sd_home/.config/environment.d/10-valise.conf"
+    if [ -f "$_sd_file" ] && grep -q '^MAIN_SCALAR=' "$_sd_file" &&
+      grep -F "GUI env bridge written (systemd): $_sd_file" "$_tmp/sd-apply.out" >/dev/null; then
+      pass "gui_env=systemd writes environment.d/10-valise.conf on install"
+    else
+      fail "gui_env=systemd did not write the environment.d bridge"
+      cat "$_tmp/sd-apply.out" >&2
+      ls -l "$_sd_home/.config/environment.d" >&2 2>/dev/null || :
+    fi
+    # Captured values can come from a local-secret module, so the bridge must
+    # not be world-readable over a restrictive umask.
+    if [ "$(stat -c '%a' "$_sd_file" 2>/dev/null || stat -f '%Lp' "$_sd_file")" = 600 ]; then
+      pass "the GUI env bridge is published mode 0600"
+    else
+      fail "the GUI env bridge is not mode 0600"
+      ls -l "$_sd_file" >&2 2>/dev/null || :
+    fi
+  else
+    fail "gui_env=systemd apply failed"
+    cat "$_tmp/sd-apply.out" >&2
+  fi
+  # A capture failure must not leave the previous release's bridge describing
+  # the previous env while apply reports success: prepare before the switch and
+  # abort the switch when preparation fails.
+  _stale_home="$_tmp/home-stale"
+  mkdir -p "$_stale_home"
+  _stale_proj="$_tmp/proj-stale"
+  cp -R "$_proj" "$_stale_proj"
+  printf 'gui_env=systemd\n' >>"$_stale_proj/valise.conf"
+  _gui_v "$_stale_home" "$_stale_proj" apply >/dev/null 2>&1 || :
+  _stale_file="$_stale_home/.config/environment.d/10-valise.conf"
+  if [ ! -f "$_stale_file" ]; then
+    fail "the stale-bridge fixture did not write an initial bridge"
+  else
+    _stale_id_before=$(cd "$_stale_home/.config/valise/active" 2>/dev/null && pwd -P) || _stale_id_before=
+    # A second release whose env plan exports an unrepresentable value: the
+    # capture must refuse, and apply must NOT switch to it.
+    printf '%s\n' 'unrepresentable() { :; }' 'UNREPRESENTABLE="$(printf "a\nb")"' \
+      'export UNREPRESENTABLE' >>"$_stale_proj/modules/main.sh"
+    if _gui_v "$_stale_home" "$_stale_proj" apply >"$_tmp/stale-apply.out" 2>&1; then
+      fail "apply fails when the env plan cannot be captured for the bridge (it succeeded)"
+    else
+      _stale_id_after=$(cd "$_stale_home/.config/valise/active" 2>/dev/null && pwd -P) || _stale_id_after=
+      if [ "$_stale_id_after" = "$_stale_id_before" ]; then
+        pass "apply with an uncapturable env plan leaves the active release unchanged"
+      else
+        fail "apply switched the active release before the bridge could be prepared"
+        printf 'before=%s after=%s\n' "$_stale_id_before" "$_stale_id_after" >&2
+      fi
+    fi
+  fi
+  # --no-integration promises no startup file, shim, hook, bridge, or stubs.
+  # A later release switch must not quietly write one.
+  _ni_home="$_tmp/home-no-int"
+  mkdir -p "$_ni_home"
+  _ni_proj="$_tmp/proj-no-int"
+  cp -R "$_proj" "$_ni_proj"
+  printf 'gui_env=systemd\n' >>"$_ni_proj/valise.conf"
+  _gui_v "$_ni_home" "$_ni_proj" apply --no-integration >"$_tmp/ni-apply.out" 2>&1 || :
+  if [ -e "$_ni_home/.config/environment.d/10-valise.conf" ]; then
+    fail "--no-integration wrote a GUI env bridge"
+  else
+    _ni_id=$(cd "$_ni_home/.config/valise/active" 2>/dev/null && pwd -P) || _ni_id=
+    _ni_id=${_ni_id##*/}
+    if [ -n "$_ni_id" ] && _gui_v "$_ni_home" "$_ni_proj" release use "$_ni_id" >"$_tmp/ni-use.out" 2>&1; then
+      if [ ! -e "$_ni_home/.config/environment.d/10-valise.conf" ]; then
+        pass "release use after --no-integration writes no GUI env bridge"
+      else
+        fail "release use after --no-integration wrote a GUI env bridge"
+      fi
+    else
+      fail "release use after --no-integration failed"
+      cat "$_tmp/ni-use.out" >&2 2>/dev/null || :
+    fi
+  fi
+fi
+
 # --dry-run reports the shim and the bridge.
 _dry_proj="$_tmp/proj-dry"
 cp -R "$_gui_proj" "$_dry_proj"
@@ -791,6 +1112,62 @@ if env -i HOME="$_dry_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_dry_h
 else
   fail "apply --dry-run omits the shim or the bridge"
   cat "$_tmp/dry.out" >&2
+fi
+# A local-state module is allowed by the ABI to create directories under
+# $XDG_STATE_HOME. A dry run that CAPTURES the env plan executes that body
+# against the real HOME, contradicting its "nothing outside build/ is written"
+# promise, so the preview must report the bridge without capturing.
+_side_proj="$_tmp/proj-dry-side"
+cp -R "$_proj" "$_side_proj"
+printf 'gui_env=launchd\n' >>"$_side_proj/valise.conf"
+cat >>"$_side_proj/modules/main.sh" <<'EOF2'
+DRY_STATE="$HOME/dry-run-side-effect"
+mkdir -p "$DRY_STATE/app"
+export DRY_STATE
+EOF2
+_dry_side_home="$_tmp/home-dry-side"
+mkdir -p "$_dry_side_home"
+env -i HOME="$_dry_side_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_dry_side_home/.local/share" \
+  XDG_CONFIG_HOME="$_dry_side_home/.config" XDG_STATE_HOME="$_dry_side_home/.local/state" SHELL=/bin/bash \
+  TMPDIR="$_tmp" "$_valise" -C "$_side_proj" apply --dry-run >"$_tmp/dry-side.out" 2>&1 || :
+if [ ! -e "$_dry_side_home/dry-run-side-effect" ]; then
+  pass "apply --dry-run does not execute module bodies against the real HOME"
+else
+  fail "apply --dry-run wrote into the real HOME"
+  ls -l "$_dry_side_home/dry-run-side-effect" >&2 2>/dev/null || :
+fi
+if grep -F 'would regenerate:' "$_tmp/dry-side.out" >/dev/null ||
+  grep -F 'would create:' "$_tmp/dry-side.out" >/dev/null; then
+  pass "apply --dry-run reports the bridge action without rendering it"
+else
+  fail "apply --dry-run did not report the bridge action"
+  cat "$_tmp/dry-side.out" >&2
+fi
+
+# A dry run must agree with install about OWNERSHIP: a file at the bridge path
+# that valise does not own is left alone, and the preview must say so rather
+# than promising an update install will never perform.
+_dry_foreign_home="$_tmp/home-dry-foreign"
+mkdir -p "$_dry_foreign_home/.config/environment.d"
+printf 'foreign\n' >"$_dry_foreign_home/.config/environment.d/10-valise.conf"
+# The fixture must ask for the SYSTEMD bridge: this lane runs on Linux, where a
+# launchd project is skipped by design and the ownership path is never reached.
+_dry_foreign_proj="$_tmp/proj-dry-foreign"
+cp -R "$_proj" "$_dry_foreign_proj"
+printf 'gui_env=systemd\n' >>"$_dry_foreign_proj/valise.conf"
+env -i HOME="$_dry_foreign_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_dry_foreign_home/.local/share" \
+  XDG_CONFIG_HOME="$_dry_foreign_home/.config" XDG_STATE_HOME="$_dry_foreign_home/.local/state" SHELL=/bin/bash \
+  TMPDIR="$_tmp" "$_valise" -C "$_dry_foreign_proj" apply --dry-run >"$_tmp/dry-foreign.out" 2>&1 || :
+if [ "$(uname -s)" = Linux ]; then
+  if grep -F 'left alone (not the valise bridge):' "$_tmp/dry-foreign.out" >/dev/null &&
+    [ "$(cat "$_dry_foreign_home/.config/environment.d/10-valise.conf")" = foreign ]; then
+    pass "apply --dry-run leaves a foreign bridge file alone and says so"
+  else
+    fail "apply --dry-run misreported a foreign bridge file"
+    cat "$_tmp/dry-foreign.out" >&2
+  fi
+else
+  skip "apply --dry-run leaves a foreign bridge file alone and says so (not Linux)"
 fi
 
 if [ -z "$(ls -A "$_tmp" | grep '^valise-dev\.\|^valise-env-export\.' || :)" ]; then

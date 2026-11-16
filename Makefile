@@ -48,8 +48,6 @@ test: test-runner-quarantine
 	@test -d modules
 	@test -d entrypoints
 	@test -d manifests
-	@test -d helpers
-	@test -d install
 	@test -d examples/local
 	@test -d tests/fixtures
 	@$(MAKE) test-metadata-abi
