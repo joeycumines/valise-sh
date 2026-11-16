@@ -88,7 +88,7 @@ expected_exports_for() {
       return 0
       ;;
   esac
-  _eef_expect='e2e_env_ready e2e_config_loaded e2e_net_available e2e_layer_probe_ok'
+  _eef_expect='e2e_env_ready e2e_config_loaded e2e_net_available e2e_layer_probe_ok e2e_bin_dir'
   _eef_absent='e2e_fish_loaded'
   case "$_eef_shell" in
     bash) _eef_int='e2e_show_aliases e2e_bash_completions_loaded'
@@ -333,19 +333,19 @@ run_lane() {
         fail "$_lane/$_shell_name: ~/.zshenv lacks the managed block"
       fi
     fi
-    # sh/ksh interactive subshells read $ENV: the .profile block must export
-    # ENV at the valise shim, and install must have deployed the shim carrying
-    # the same two-stage block minus the ENV export.
+    # sh/ksh interactive subshells read $ENV: the .profile block must wire ENV
+    # to the valise shim, and install must have deployed the shim carrying the
+    # same two-stage block.
     case $_class in
       sh|ksh)
         _shim="$_tmp_home/.config/valise/env.sh"
-        if grep -q 'export ENV' "$_tmp_home/.profile" &&
-          grep -q "ENV='$_shim'" "$_tmp_home/.profile" &&
+        if grep -q 'case "$_valise_plan" in' "$_tmp_home/.profile" &&
+          grep -qF "ENV='$_shim'" "$_tmp_home/.profile" &&
           [ -f "$_shim" ] &&
           grep -q '# BEGIN valise managed block' "$_shim" &&
           grep -q 'case $- in \*i\*)' "$_shim" &&
-          ! grep -q 'export ENV' "$_shim"; then
-          pass "$_lane/$_shell_name: .profile exports ENV at the deployed shim (which carries no ENV export)"
+          ! awk '/^case "\$_valise_plan" in/,/^esac$/' "$_tmp_home/.profile" | grep -q '^$'; then
+          pass "$_lane/$_shell_name: .profile wires ENV to the deployed shim (which carries the managed block)"
         else
           fail "$_lane/$_shell_name: the ENV shim wiring is incomplete"
           ls -l "$_tmp_home/.profile" "$_shim" >&2 2>/dev/null || :
@@ -385,12 +385,46 @@ run_lane() {
       # shellcheck disable=SC2086
       env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
         "$_shell_path" -i -c ". '$_snippet'; _ok=1; for _n in $_int_names; do command -v \"\$_n\" >/dev/null 2>&1 || _ok=0; done; [ \"\$_ok\" -eq 1 ] && command -v e2e_env_ready >/dev/null && printf 'both=yes\n'" \
-        >"$_tmp_home/int.out" 2>/dev/null </dev/null
-      if grep -q 'both=yes' "$_tmp_home/int.out"; then
-        pass "$_lane/$_shell_name: interactive startup loads env and interactive plans"
+        >"$_tmp_home/int.out" 2>"$_tmp_home/int.err" </dev/null
+      # bash prints 'no job control in this shell' for -i without a tty, and
+      # ksh93 prints a bare newline to stderr for any interactive invocation
+      # reading from a non-tty; both are the shell's own startup noise, not
+      # valise output, so filter exactly those away.
+      sed -e '/no job control in this shell/d' -e '/^$/d' "$_tmp_home/int.err" >"$_tmp_home/int.err.filtered"
+      if grep -q 'both=yes' "$_tmp_home/int.out" && [ ! -s "$_tmp_home/int.err.filtered" ]; then
+        pass "$_lane/$_shell_name: interactive startup loads env and interactive plans, silently"
       else
-        fail "$_lane/$_shell_name: interactive startup did not load the interactive plan"
-        cat "$_tmp_home/int.out" >&2
+        fail "$_lane/$_shell_name: interactive startup did not load the interactive plan silently"
+        cat "$_tmp_home/int.out" "$_tmp_home/int.err" >&2
+      fi
+      # A login that reads more than one startup file (zsh: .zshenv, .zprofile,
+      # .zshrc; bash with a .bash_profile that sources .bashrc; sh/ksh with
+      # $ENV) must run each plan ONCE and stay silent. This is the defect the
+      # release-id guard on stage 2 exists to prevent: a second source of the
+      # interactive plan trips the compiler's export pre-check.
+      _double_snippet=$_snippet
+      [ "$_class" = zsh ] && _double_snippet="$_tmp_home/.zshenv"
+      env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
+        "$_shell_path" -i -c ". '$_double_snippet'; . '$_double_snippet'; . '$_double_snippet'; printf 'twice=done\n'" \
+        >"$_tmp_home/twice.out" 2>"$_tmp_home/twice.err" </dev/null
+      sed -e '/no job control in this shell/d' -e '/^$/d' "$_tmp_home/twice.err" >"$_tmp_home/twice.err.filtered"
+      if grep -q 'twice=done' "$_tmp_home/twice.out" && [ ! -s "$_tmp_home/twice.err.filtered" ]; then
+        pass "$_lane/$_shell_name: sourcing the block repeatedly in one interactive shell is silent"
+      else
+        fail "$_lane/$_shell_name: repeated block sourcing produced diagnostics"
+        cat "$_tmp_home/twice.out" "$_tmp_home/twice.err" >&2
+      fi
+      # A release switch inside a live shell re-sources the plan over the
+      # previous load. That must not report the plan's own earlier exports as
+      # a foreign conflict.
+      env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin \
+        "$_shell_path" -c "_valise_profile_loaded=stale-release-id; . '$_double_snippet'; printf 'switch=done\n'" \
+        >"$_tmp_home/switch.out" 2>"$_tmp_home/switch.err"
+      if grep -q 'switch=done' "$_tmp_home/switch.out" && [ ! -s "$_tmp_home/switch.err" ]; then
+        pass "$_lane/$_shell_name: reloading after a release switch is silent"
+      else
+        fail "$_lane/$_shell_name: reloading after a release switch produced diagnostics"
+        cat "$_tmp_home/switch.out" "$_tmp_home/switch.err" >&2
       fi
       # sh/ksh: an interactive subshell reads $ENV (exported by the .profile
       # block), so 'sh -i' with ENV set must load both plans; a
@@ -444,6 +478,20 @@ run_lane() {
       else
         fail "$_lane/$_shell_name: nested shell did not reach the env fixed point"
         cat "$_tmp_home/nested.out" "$_tmp_home/nested.err" >&2
+      fi
+      # The compiled PATH entry must be front-most after a LOGIN shell. On
+      # macOS zsh runs /etc/zprofile's path_helper AFTER ~/.zshenv, which
+      # reorders PATH; the block's one-shot repair pass at the next startup
+      # file (~/.zprofile) is what puts the compiled entry back in front.
+      # Without it the entry ends up LAST - the defect this assertion locks.
+      env -i HOME="$_tmp_home" XDG_CONFIG_HOME="$_tmp_home/.config" PATH=/usr/bin:/bin TERM=dumb \
+        "$_shell_path" -l -c 'case $PATH in "$HOME/e2e-bin:"*) printf "front=yes\n" ;; *) printf "front=no path=%s\n" "$PATH" ;; esac' \
+        >"$_tmp_home/login.out" 2>"$_tmp_home/login.err" </dev/null
+      if grep -q 'front=yes' "$_tmp_home/login.out"; then
+        pass "$_lane/$_shell_name: a login shell keeps the env plan's PATH entry front-most"
+      else
+        fail "$_lane/$_shell_name: a login shell lost the env plan's PATH ordering"
+        cat "$_tmp_home/login.out" "$_tmp_home/login.err" >&2
       fi
     fi
   fi

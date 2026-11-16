@@ -12,8 +12,11 @@
 # per line in load order instead of rendering a plan.
 # With -v phase=interactive the rendered plan contains only the interactive
 # modules of the same closure; the default phase=env renders the env plan
-# (plans/<shell>.sh). The closure is computed once from the full module set,
-# so both plans share dependency order and validation.
+# (plans/<shell>.sh). With -v phase=all the filter is disabled and the whole
+# closure renders - that is what a command plan needs, since a module's own
+# body has to be present for its published command to run whatever phase it
+# declares. The closure is computed once from the full module set, so every
+# plan shares dependency order and validation.
 
 BEGIN {
     prefix = "_valise_plan_"
@@ -297,15 +300,46 @@ END {
             print "ERROR: meta module " mod_display[name] " declares exports without a body" > "/dev/stderr"
             exit 1
         }
+        # Defence in depth: metadata validation rejects an unknown phase before
+        # a registry exists, so this only fires for a stream that bypassed it.
+        # Without it a bogus phase would silently drop the module from every
+        # plan.
+        if (mod_phase[name] != "env" && mod_phase[name] != "interactive") {
+            print "ERROR: module " mod_display[name] " has invalid phase: " mod_phase[name] > "/dev/stderr"
+            exit 1
+        }
     }
 
-    # Partition the closure by phase. Both plans share this dependency order;
-    # a module renders only into the plan of its own phase. The interactive
-    # plan stays empty when no module opts in, and the caller skips writing it.
+    # A required dependency in the other phase is only broken in ONE direction.
+    # An interactive module may require an env module: the env plan loads first
+    # at every entry point, so the dependency is always present. The reverse is
+    # a contradiction - the env plan never contains an interactive dependency,
+    # so the env module would load with it permanently absent (before it in an
+    # interactive shell, never in a non-interactive one). An OPTIONAL
+    # cross-phase edge is fine in either direction: the dependency simply
+    # belongs to the other plan.
+    for (oi = 1; oi <= ordered_count; oi++) {
+        name = ordered[oi]
+        if (mod_phase[name] != "env") continue
+        n_req = split(mod_req[name], reqs, " ")
+        for (rqi = 1; rqi <= n_req; rqi++) {
+            dep = reqs[rqi]
+            if (dep == "") continue
+            if (mod_phase[dep] != "env") {
+                print "ERROR: env module " mod_display[name] " requires " mod_phase[dep] " module " mod_display[dep] > "/dev/stderr"
+                exit 1
+            }
+        }
+    }
+
+    # Partition the closure by phase. Every plan shares this dependency order;
+    # a module renders only into the plan of its own phase (phase=all disables
+    # the filter). The interactive plan stays empty when no module opts in, and
+    # the caller skips writing it.
     plan_count = 0
     for (oi = 1; oi <= ordered_count; oi++) {
         name = ordered[oi]
-        if (mod_phase[name] == phase) {
+        if (phase == "all" || mod_phase[name] == phase) {
             plan_count++
             plan_ordered[plan_count] = name
         }

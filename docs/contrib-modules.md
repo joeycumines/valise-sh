@@ -96,6 +96,7 @@ your functions can call them later:
 - `sp_cap_file_mtime <path>`
 - `sp_cap_secure_local_bin_check <home> [reject|allow-owned-symlinks]`
 - `sp_cap_mktemp_dir [prefix] [parent]`, `sp_cap_mktemp_file <parent> <prefix>`
+- `sp_cap_is_interactive`, `sp_cap_is_tty`
 
 `sp_cap_secure_local_bin_check` defaults to `reject`, which refuses every
 symlink in `~/.local/bin`. `allow-owned-symlinks` accepts a symlink whose

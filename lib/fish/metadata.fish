@@ -308,7 +308,13 @@ function sp_fish_metadata_read --description 'Read and validate a .meta file, ou
     if not sp_fish_metadata_validate_side_effect "$m_side_effect"
         return 1
     end
-    if not sp_fish_metadata_validate_phase_side_effect (test -z "$m_phase"; and echo env; or echo $m_phase) "$m_side_effect"
+    # `echo $m_phase` treats a value like -n or -e as its own flags, so an
+    # invalid phase of that shape reached validation as an empty string and the
+    # diagnostic hid the offending token. Quote through string, which has no
+    # option parsing for its arguments.
+    set -l effective_phase env
+    test -z "$m_phase"; or set effective_phase "$m_phase"
+    if not sp_fish_metadata_validate_phase_side_effect "$effective_phase" "$m_side_effect"
         return 1
     end
     if not sp_fish_metadata_validate_identifier_list "$m_exports" export

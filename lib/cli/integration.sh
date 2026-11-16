@@ -17,20 +17,44 @@
 # release directory name it loaded, so the same shell with the same release
 # is a no-op, a switched release forces a reload, and a fresh nested shell
 # (new process, guard unset) always re-runs the env plan. It is set only
-# after a plan was sourced, so a shell started before the first install, or
-# while the release was missing, tries again from the next startup file. A
-# plan that failed is not re-run in the same shell; VALISE_RELOAD=1 forces
-# another attempt. Stage 2 sources the interactive plan only when the shell
-# is interactive (case $- in *i*); it must stay silent too, so ssh host-cmd
-# sessions (which read .bashrc non-interactively) are safe. The shell class
-# is named by the first of KSH_VERSION, ZSH_VERSION and BASH_VERSION that is
-# set; any other shell uses the generic sh plan.
+# after a plan was sourced successfully, so a shell started before the first
+# install, while the release was missing, or after a plan failed tries again
+# from the next startup file the shell reads.
+#
+# Two private markers make re-evaluation safe and cheap:
+#   _valise_env_tried / _valise_int_tried  the release this process has
+#     already attempted in each stage. Neither is exported, so a child process
+#     always attempts the plan for itself (functions are not inherited).
+#     Whenever the block is about to source a plan this process already
+#     attempted, it exports VALISE_RELOAD=1 for that source and restores the
+#     caller's value afterwards: the compiled plan then clears its own
+#     declared exports first, instead of reporting its own previous
+#     definitions as a foreign conflict.
+#   _valise_env_repair  a one-shot ticket, armed only by a login shell (case
+#     $- in *l*). macOS zsh runs /etc/zprofile's path_helper AFTER ~/.zshenv,
+#     so the entry .zshenv prepended ends up last; the ticket forces exactly
+#     one more stage-1 pass at the next startup file (~/.zprofile), which
+#     restores the compiled PATH, and is then spent.
+#
+# Stage 2 sources the interactive plan only when the shell is interactive
+# (case $- in *i*), guarded the same way by release id so a login that reads
+# two or three startup files runs it once. Both stages must stay silent, so
+# ssh host-cmd sessions (which read .bashrc non-interactively) are safe. The
+# shell class is named by the first of KSH_VERSION, ZSH_VERSION and
+# BASH_VERSION that is set; any other shell uses the generic sh plan.
 print_posix_integration() {
   _pix_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
-  _pix_env_export=''
-  case "${SHELL:-}" in
-    */ksh|ksh|*/sh|"/bin/sh"|sh|*/dash|dash|*/ash|ash|*/busybox|busybox) _pix_env_export=1 ;;
-  esac
+  # The $ENV stanza is emitted into every file and decided at RUNTIME from the
+  # shell class the block already detects. Keying it off the installer's
+  # $SHELL made the wiring depend on who ran install: a bash/zsh install left
+  # an sh login shell without ENV, and an sh install wrote an inert export
+  # into zsh/bash files. bash and zsh ignore ENV, so unconditional emission is
+  # harmless there and correct for sh/ksh.
+  _pix_shim_literal=
+  if _pix_shim=$(env_shim_path); then
+    _pix_shim_literal=$(shell_quote "$_pix_shim") || { unset _pix_active_literal _pix_shim; return 1; }
+  fi
+  unset _pix_shim
   printf '%s\n' \
     '# BEGIN valise managed block' \
     "_valise_active_link=$_pix_active_literal" \
@@ -38,62 +62,84 @@ print_posix_integration() {
     '_valise_active=$(cd "$_valise_active_link" 2>/dev/null && pwd -P)' \
     'if [ -n "$_valise_active" ]; then' \
     '  _valise_release_id=${_valise_active##*/}' \
-    '  if [ -z "${_valise_profile_loaded:-}" ] || [ "${_valise_profile_loaded:-}" != "$_valise_release_id" ] || [ "${VALISE_RELOAD:-}" = 1 ]; then' \
-    '    if [ -f "$_valise_active/plans/$_valise_plan.sh" ]; then' \
+    '  _valise_want=0' \
+    '  if [ "${_valise_profile_loaded:-}" != "$_valise_release_id" ] || [ "${VALISE_RELOAD:-}" = 1 ]; then' \
+    '    _valise_want=1' \
+    '  elif [ "${_valise_env_repair:-}" = armed ] || [ "${_valise_env_tried:-}" != "$_valise_release_id" ]; then' \
+    '    _valise_want=1' \
+    '  fi' \
+    '  if [ "${_valise_env_repair:-}" = armed ]; then _valise_env_repair=done; fi' \
+    '  if [ "$_valise_want" -eq 1 ] && [ -f "$_valise_active/plans/$_valise_plan.sh" ]; then' \
+    '    _valise_had=${VALISE_RELOAD+x}' \
+    '    _valise_old=${VALISE_RELOAD-}' \
+    '    if [ -n "${_valise_env_tried:-}" ] || [ "${VALISE_RELOAD:-}" = 1 ]; then' \
+    '      VALISE_RELOAD=1' \
+    '      export VALISE_RELOAD' \
+    '    fi' \
+    '    VALISE_MODULE_ROOT="$_valise_active"' \
+    '    . "$_valise_active/plans/$_valise_plan.sh"' \
+    '    _valise_rc=$?' \
+    '    unset VALISE_MODULE_ROOT' \
+    '    if [ -n "$_valise_had" ]; then VALISE_RELOAD=$_valise_old; else unset VALISE_RELOAD; fi' \
+    '    _valise_env_tried=$_valise_release_id' \
+    '    if [ "$_valise_rc" -eq 0 ]; then' \
     '      _valise_profile_loaded=$_valise_release_id' \
-    '      VALISE_MODULE_ROOT="$_valise_active"' \
-    '      . "$_valise_active/plans/$_valise_plan.sh"' \
-    '      unset VALISE_MODULE_ROOT' \
+    '      case $- in' \
+    '      *l*) [ -n "${_valise_env_repair:-}" ] || _valise_env_repair=armed ;;' \
+    '      esac' \
     '    fi' \
     '  fi' \
     '  case $- in *i*)' \
-    '    if [ -f "$_valise_active/plans/$_valise_plan-interactive.sh" ]; then' \
+    '    if [ -f "$_valise_active/plans/$_valise_plan-interactive.sh" ] &&' \
+    '      { [ "${_valise_interactive_loaded:-}" != "$_valise_release_id" ] || [ "${VALISE_RELOAD:-}" = 1 ] || [ "${_valise_int_tried:-}" != "$_valise_release_id" ]; }; then' \
+    '      _valise_had=${VALISE_RELOAD+x}' \
+    '      _valise_old=${VALISE_RELOAD-}' \
+    '      if [ -n "${_valise_int_tried:-}" ] || [ "${VALISE_RELOAD:-}" = 1 ]; then' \
+    '        VALISE_RELOAD=1' \
+    '        export VALISE_RELOAD' \
+    '      fi' \
     '      VALISE_MODULE_ROOT="$_valise_active"' \
     '      . "$_valise_active/plans/$_valise_plan-interactive.sh"' \
+    '      _valise_rc=$?' \
     '      unset VALISE_MODULE_ROOT' \
+    '      if [ -n "$_valise_had" ]; then VALISE_RELOAD=$_valise_old; else unset VALISE_RELOAD; fi' \
+    '      _valise_int_tried=$_valise_release_id' \
+    '      if [ "$_valise_rc" -eq 0 ]; then _valise_interactive_loaded=$_valise_release_id; fi' \
     '    fi' \
     '    ;;' \
     '  esac' \
-    '  unset _valise_release_id' \
-    'fi' \
-    'unset _valise_active _valise_plan' \
-    'unset _valise_active_link'
-  # sh/ksh interactive subshells read $ENV on startup; point it at the valise
-  # shim so a nested POSIX shell loads valise too. Only set when ENV does not
-  # already name an existing user-owned file.
-  if [ "$_pix_env_export" = 1 ]; then
-    _pix_shim_literal=$(shell_quote "${XDG_CONFIG_HOME:-$HOME/.config}/valise/env.sh") || { unset _pix_active_literal _pix_env_export; return 1; }
+    '  unset _valise_release_id _valise_want _valise_had _valise_old _valise_rc' \
+    'fi'
+  if [ -n "$_pix_shim_literal" ]; then
     printf '%s\n' \
-      "if [ -z \"\${ENV:-}\" ] || [ ! -e \"\$ENV\" ]; then" \
-      "  ENV=$_pix_shim_literal" \
-      '  export ENV' \
-      'fi'
-    unset _pix_shim_literal
+      'case "$_valise_plan" in' \
+      'sh | ksh)' \
+      "  if [ -f $_pix_shim_literal ]; then" \
+      '    case "${ENV:-}" in' \
+      "    '') ENV=$_pix_shim_literal; export ENV ;;" \
+      '    *"\$"*) : ;;' \
+      "    *) [ -e \"\$ENV\" ] || { ENV=$_pix_shim_literal; export ENV; } ;;" \
+      '    esac' \
+      '  fi' \
+      '  ;;' \
+      'esac'
   fi
-  printf '%s\n' '# END valise managed block'
-  unset _pix_active_literal _pix_env_export
+  printf '%s\n' \
+    'unset _valise_active _valise_plan' \
+    'unset _valise_active_link' \
+    '# END valise managed block'
+  unset _pix_active_literal _pix_shim_literal
 }
 
-# env_shim_path: the $ENV shim install writes for sh/ksh subshells.
+# env_shim_path: the $ENV shim install writes for sh/ksh subshells. It is
+# derived from VALISE_XDG_CONFIG, the normalized configuration root, so a
+# relative XDG_CONFIG_HOME or a trailing slash cannot place the shim relative
+# to whatever directory the caller happened to be in (the release tree, during
+# an install). Without HOME there is no user configuration root, so there is
+# no shim either.
 env_shim_path() {
-  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/valise/env.sh"
-}
-
-# print_env_shim: the contents of the $ENV shim. It is the same two-stage
-# managed block, minus the ENV export (a shim must not re-point ENV).
-print_env_shim() {
-  _pes_saved_shell=${SHELL:-}
-  SHELL=/bin/sh
-  print_posix_integration | awk '
-    /^# BEGIN valise managed block$/ { inblock = 1; print; next }
-    /^# END valise managed block$/   { inblock = 0; print; next }
-    inblock && /^if \[ -z "\$\{ENV:-\}" \]/ { skip = 1; next }
-    skip && /^fi$/ { skip = 0; next }
-    skip { next }
-    { print }
-  '
-  SHELL=$_pes_saved_shell
-  unset _pes_saved_shell
+  [ -n "${HOME:-}${XDG_CONFIG_HOME:-}" ] || return 1
+  printf '%s\n' "$VALISE_XDG_CONFIG/env.sh"
 }
 
 # integration_markers_paired <file>
@@ -137,11 +183,15 @@ cmd_init() {
 
 # Report whether a startup file carries valise integration: the POSIX managed
 # block, or the header of the Fish hook, which valise owns as a whole file.
+# The markers are matched as WHOLE LINES: a file that merely mentions the
+# marker text in prose, or a foreign file that happens to carry the string, is
+# not valise-owned, and must never be rewritten or deleted because of a
+# substring match.
 integration_has_managed_block() {
   _ihb_awk=$(trusted_utility_path awk) || return 1
   "$_ihb_awk" '
-    index($0, "# BEGIN valise managed block") { found = 1; exit }
-    index($0, "# valise Fish integration") { found = 1; exit }
+    $0 == "# BEGIN valise managed block" { found = 1; exit }
+    $0 == "# valise Fish integration. Do not edit." { found = 1; exit }
     END { exit !found }
   ' "$1" 2>/dev/null
 }
@@ -225,9 +275,16 @@ write_posix_integration() {
   done <<EOF
 $_wpi_targets
 EOF
-  # The $ENV shim for sh/ksh subshells: the same two-stage block, minus the
-  # ENV export. Never overwrite a user-owned shim.
-  _wpi_shim=$(env_shim_path)
+  # The $ENV shim for sh/ksh subshells. Its content IS the managed block: with
+  # the ENV stanza gated on the runtime class, re-asserting the same ENV from
+  # inside the shim is a no-op, so no second-generation variant is needed. It
+  # is written and removed as a managed startup file, so every other byte in
+  # the file survives and a file install created is deleted only when the
+  # created-ledger says so.
+  _wpi_shim=$(env_shim_path) || {
+    unset _wpi_home _wpi_snippet _wpi_targets _wpi_target
+    return 0
+  }
   _wpi_shim_parent=$(path_parent "$_wpi_shim")
   _wpi_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
   [ -d "$_wpi_shim_parent" ] || "$_wpi_mkdir" -p "$_wpi_shim_parent" || die "cannot create shim parent: $_wpi_shim_parent"
@@ -238,19 +295,9 @@ EOF
       return 0
     fi
   fi
-  _wpi_shim_tmp=$(trusted_mktemp_at "$_wpi_shim_parent" file "$_wpi_shim_parent/.valise-env.XXXXXX") ||
-    die "cannot create shim staging file"
-  if ! print_env_shim >"$_wpi_shim_tmp"; then
-    _wpi_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
-    "$_wpi_rm" -f "$_wpi_shim_tmp"
-    die "cannot generate the ENV shim"
-  fi
-  _wpi_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
-  _wpi_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
-  "$_wpi_chmod" 0644 "$_wpi_shim_tmp" && "$_wpi_mv" -f "$_wpi_shim_tmp" "$_wpi_shim" ||
-    { "$_wpi_rm" -f "$_wpi_shim_tmp" 2>/dev/null || :; die "cannot publish the ENV shim: $_wpi_shim"; }
+  project_write_integration "$_wpi_shim" "$_wpi_snippet"
   info "ENV shim deployed: $_wpi_shim"
-  unset _wpi_home _wpi_snippet _wpi_targets _wpi_target _wpi_shim _wpi_shim_parent _wpi_mkdir _wpi_shim_tmp _wpi_chmod _wpi_mv _wpi_rm
+  unset _wpi_home _wpi_snippet _wpi_targets _wpi_target _wpi_shim _wpi_shim_parent _wpi_mkdir
 }
 
 cmd_doctor() {
@@ -415,41 +462,71 @@ cmd_doctor() {
       # the markers) is upgradeable; an sh/ksh login shell whose ENV does not
       # point at the valise shim misses interactive subshells; zsh without a
       # .zshenv block misses non-login 'zsh -c' env.
-      if [ -f "$HOME/.profile" ] && [ ! -L "$HOME/.profile" ]; then
-        if integration_has_managed_block "$HOME/.profile" &&
-          ! awk '/^# BEGIN valise managed block$/ { inblock = 1 } inblock && /case \$- in \*i\*\)/ { gate = 1 } /^# END valise managed block$/ { inblock = 0 } END { exit gate ? 0 : 1 }' "$HOME/.profile"; then
-          printf '  warn: ~/.profile has a legacy single-stage block; run valise install again to upgrade to the two-stage block\n'
+      _doctor_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+      # Every startup file valise manages is inspected, not only ~/.profile: an
+      # upgrade from a single-stage install may have left a legacy block in
+      # .bashrc, .zshrc or .zprofile alone.
+      for _doctor_name in $VALISE_STARTUP_NAMES; do
+        _doctor_file="$HOME/$_doctor_name"
+        [ -f "$_doctor_file" ] && [ ! -L "$_doctor_file" ] || continue
+        integration_has_posix_block "$_doctor_file" || continue
+        if ! "$_doctor_awk" '
+          /^# BEGIN valise managed block$/ { inblock = 1 }
+          inblock && /case \$- in \*i\*\)/ { gate = 1 }
+          /^# END valise managed block$/ { inblock = 0 }
+          END { exit gate ? 0 : 1 }
+        ' "$_doctor_file"; then
+          printf '  warn: %s has a legacy single-stage block; run valise install again to upgrade to the two-stage block\n' "$_doctor_file"
         fi
-      fi
+      done
+      # $ENV wiring for sh/ksh: unset is as broken as foreign, because an
+      # interactive sh/ksh subshell then reads nothing at all. Comparisons use
+      # the normalized path, so a '~' or a relative spelling does not
+      # false-warn.
       case "${_doctor_shell:-}" in
         ksh|sh|"")
-          if [ -n "${ENV:-}" ] && [ -e "$ENV" ] && [ "$ENV" != "$(env_shim_path)" ]; then
-            printf '  warn: $ENV points at %s, not the valise shim %s; interactive sh/ksh subshells will not load valise\n' "$ENV" "$(env_shim_path)"
+          if _doctor_shim=$(env_shim_path); then
+            _doctor_env=${ENV:-}
+            if [ -z "$_doctor_env" ]; then
+              if [ -f "$_doctor_shim" ]; then
+                printf '  warn: $ENV is unset; interactive sh/ksh subshells will not load valise (the shim is at %s)\n' "$_doctor_shim"
+              fi
+            elif _doctor_env_norm=$(path_normalize "$_doctor_env" 2>/dev/null); then
+              if [ "$_doctor_env_norm" != "$_doctor_shim" ]; then
+                printf '  warn: $ENV points at %s, not the valise shim %s; interactive sh/ksh subshells will not load valise\n' "$_doctor_env" "$_doctor_shim"
+              fi
+            fi
           fi
           ;;
       esac
-      if [ "$_doctor_shell" = zsh ] && command -v zsh >/dev/null 2>&1; then
+      # zsh reads ~/.zshenv for every invocation, so its absence is a defect
+      # whenever zsh is INSTALLED - install writes the block on zsh presence,
+      # not on $SHELL.
+      if command -v zsh >/dev/null 2>&1; then
         if [ ! -f "$HOME/.zshenv" ] || ! integration_has_managed_block "$HOME/.zshenv" 2>/dev/null; then
           printf '  warn: no valise managed block in ~/.zshenv; non-login zsh (zsh -c) will not load the env plan\n'
         fi
       fi
       # GUI-session bridge diagnostics: on platforms where GUI apps never read
       # a startup file, only the environment.d (systemd) or LaunchAgent
-      # (launchd) bridge can carry the env plan into the session.
-      case $(cli_os_name) in
-      linux)
-        if [ -d "$HOME/.config/systemd/user" ] || [ -d "/run/user/$(id -u 2>/dev/null || printf '%s' 0)/systemd" ] 2>/dev/null; then
-          if [ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/environment.d/10-valise.conf" ]; then
-            printf '  warn: systemd user session detected but no environment.d/10-valise.conf; GUI apps will not see the profile env (set gui_env=systemd in valise.conf)\n'
+      # (launchd) bridge can carry the env plan into the session. This is only
+      # worth reporting when the ACTIVE RELEASE asked for a bridge: gui_env=off
+      # is the deliberate default and must not warn on every such machine.
+      if _doctor_bridge_mode=$(gui_env_mode "$_doctor_active_target" 2>/dev/null); then
+        case "$_doctor_bridge_mode" in
+        systemd)
+          if [ ! -f "$(gui_env_file systemd 2>/dev/null)" ]; then
+            printf '  warn: the active release sets gui_env=systemd but there is no environment.d/10-valise.conf; run valise install again\n'
           fi
-        fi
-        ;;
-      darwin)
-        if [ ! -f "$HOME/Library/LaunchAgents/sh.valise.env.plist" ]; then
-          printf '  warn: macOS detected but no ~/Library/LaunchAgents/sh.valise.env.plist; GUI apps will not see the profile env (set gui_env=launchd in valise.conf)\n'
-        fi
-        ;;
-      esac
+          ;;
+        launchd)
+          if [ ! -f "$(gui_env_file launchd 2>/dev/null)" ]; then
+            printf '  warn: the active release sets gui_env=launchd but there is no ~/Library/LaunchAgents/sh.valise.env.plist; run valise install again\n'
+          fi
+          ;;
+        esac
+      fi
+      unset _doctor_awk _doctor_name _doctor_file _doctor_shim _doctor_env _doctor_env_norm _doctor_bridge_mode
     else
       printf '  info: skipping the shell integration check\n'
     fi

@@ -376,34 +376,48 @@ fi
 _use_home envshim
 _v "$_proj" apply >/dev/null 2>&1
 _shim="$_home/.config/valise/env.sh"
-# The shim carries the two-stage block but must NOT export ENV itself, and
-# the .profile block must point ENV at the shim (SHELL=/bin/bash is not
-# sh/ksh, so test the block emission through SHELL=/bin/sh instead).
+# The shim carries the two-stage managed block. Its ENV stanza is gated on the
+# RUNTIME shell class, so re-asserting the same ENV from inside the shim is a
+# no-op - the shim content is byte-identical to the block written to the
+# startup files.
 if [ -f "$_shim" ] &&
+  cmp -s "$_shim" "$_home/.profile" &&
   grep -q '# BEGIN valise managed block' "$_shim" &&
   grep -q 'case $- in \*i\*)' "$_shim" &&
-  ! grep -q 'export ENV' "$_shim" &&
   [ "$(_mode "$_shim")" = 644 ]; then
-  pass "apply deploys the ENV shim with the two-stage block and no ENV export"
+  pass "apply deploys the ENV shim with the same two-stage block as the startup files"
 else
   fail "apply did not deploy a correct ENV shim"
   ls -l "$_shim" >&2 2>/dev/null || :
   cat "$_shim" >&2 2>/dev/null || :
 fi
-# With SHELL=/bin/sh the .profile block exports ENV at the shim.
-( cd "$_proj" && env -i HOME="$_home" PATH=/usr/bin:/bin \
-    XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
-    XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh "$_valise" apply ) >/dev/null 2>&1
-if grep -q 'export ENV' "$_home/.profile" &&
+# The ENV stanza is a RUNTIME decision, so a bash/zsh install still emits it;
+# only an sh/ksh session acts on it. The stanza is present in every file and
+# names the shim.
+if grep -q 'case "$_valise_plan" in' "$_home/.profile" &&
   grep -qF "ENV='$_shim'" "$_home/.profile"; then
-  pass "with SHELL=/bin/sh the .profile block exports ENV at the shim"
+  pass "the .profile block exports ENV at the shim (installer shell does not gate it)"
 else
   fail "the .profile block does not export ENV at the shim"
   grep -n 'ENV' "$_home/.profile" >&2
 fi
+# A bash/zsh install must produce the same wiring: the harness runs
+# SHELL=/bin/bash, so this is the case that used to be silently missing.
+_use_home envshim-bash
+( cd "$_proj" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+    XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+    XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/bash "$_valise" apply ) >/dev/null 2>&1
+if grep -q 'case "$_valise_plan" in' "$_home/.profile" &&
+  grep -qF "ENV='$_home/.config/valise/env.sh'" "$_home/.profile" &&
+  [ -f "$_home/.config/valise/env.sh" ]; then
+  pass "installing under bash still wires ENV for an sh login shell"
+else
+  fail "installing under bash did not wire ENV for an sh login shell"
+  grep -n 'ENV' "$_home/.profile" >&2
+fi
 # A user-owned $ENV file is never overwritten: the block only sets ENV when
-# the current value does not name an existing file, and install leaves a
-# non-valise shim in place.
+# the current value is empty, contains a '$' (the shell expands it), or names
+# no existing file.
 printf 'export USER_ENV=1\n' >"$_tmp/user-env.sh"
 ( cd "$_proj" && env -i HOME="$_home" PATH=/usr/bin:/bin ENV="$_tmp/user-env.sh" \
     XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
@@ -415,10 +429,8 @@ else
 fi
 # A non-valise file at the shim path is left in place with a warning.
 _use_home envshim-owned
-printf 'export MINE=1\n' >"$_home/.config/valise/env.sh" 2>/dev/null || {
-  mkdir -p "$_home/.config/valise"
-  printf 'export MINE=1\n' >"$_home/.config/valise/env.sh"
-}
+mkdir -p "$_home/.config/valise"
+printf 'export MINE=1\n' >"$_home/.config/valise/env.sh"
 _v "$_proj" apply >"$_tmp/env-owned.out" 2>&1
 if [ "$(cksum <"$_home/.config/valise/env.sh")" = "$(printf 'export MINE=1\n' | cksum)" ] &&
   grep -F "leaving $_home/.config/valise/env.sh: it is not the valise ENV shim" "$_tmp/env-owned.out" >/dev/null; then
@@ -430,7 +442,7 @@ fi
 # Uninstall removes the valise-owned shim, and leaves a foreign one alone.
 _use_home envshim
 _v "$_proj" uninstall >"$_tmp/env-un.out" 2>&1
-if [ ! -e "$_shim" ] && grep -F "removed the ENV shim: $_shim" "$_tmp/env-un.out" >/dev/null; then
+if [ ! -e "$_shim" ]; then
   pass "uninstall removes the valise ENV shim"
 else
   fail "uninstall did not remove the valise ENV shim"
@@ -444,6 +456,42 @@ if [ -f "$_shim" ] && grep -F "leaving $_shim: it is not the valise ENV shim" "$
 else
   fail "uninstall did not leave a user-owned shim alone"
   cat "$_tmp/env-un2.out" >&2
+fi
+# User content appended BELOW the managed block survives both apply and
+# uninstall: the shim is a managed startup file, not a valise-owned whole file.
+_use_home envshim-user-content
+_v "$_proj" apply >/dev/null 2>&1
+printf '%s\n' '# the user owns this line' 'export USER_APPENDED=1' >>"$_shim"
+_v "$_proj" apply >/dev/null 2>&1
+if grep -qx 'export USER_APPENDED=1' "$_shim" >/dev/null 2>&1; then
+  pass "re-applying keeps user content below the shim block"
+else
+  fail "re-applying discarded user content below the shim block"
+  cat "$_shim" >&2
+fi
+_v "$_proj" uninstall >/dev/null 2>&1
+if [ -f "$_shim" ] && grep -qx 'export USER_APPENDED=1' "$_shim" &&
+  ! grep -q '# BEGIN valise managed block' "$_shim"; then
+  pass "uninstall strips the shim block and keeps user content below it"
+else
+  fail "uninstall did not preserve user content below the shim block"
+  cat "$_shim" >&2 2>/dev/null || :
+fi
+# A file that merely MENTIONS the marker in prose is not valise-owned: the
+# marker test is a whole-line match, so it must be left completely alone.
+_use_home envshim-prose
+mkdir -p "$_home/.config/valise"
+printf '%s\n' '# my notes: the tool writes # BEGIN valise managed block here' 'export PROSE=1' \
+  >"$_home/.config/valise/env.sh"
+cp "$_home/.config/valise/env.sh" "$_tmp/shim-prose.orig"
+_v "$_proj" apply >"$_tmp/env-prose.out" 2>&1
+if cmp -s "$_home/.config/valise/env.sh" "$_tmp/shim-prose.orig" &&
+  grep -F "leaving $_home/.config/valise/env.sh: it is not the valise ENV shim" "$_tmp/env-prose.out" >/dev/null; then
+  pass "a file that only mentions the marker in prose is left alone"
+else
+  fail "a prose marker mention was treated as valise-owned"
+  cat "$_tmp/env-prose.out" >&2
+  cat "$_home/.config/valise/env.sh" >&2
 fi
 
 # --- zshenv target ---

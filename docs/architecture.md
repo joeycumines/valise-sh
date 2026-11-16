@@ -71,8 +71,10 @@ compiled intended environment regardless of what `/etc/profile`, macOS
 
 - The env plan is sourced at every startup entry point. PATH is re-asserted
   idempotently on every evaluation through `valise_path_prepend`/`append`;
-  raw `PATH=...:$PATH` assignments in module bodies are lint-rejected
-  because they duplicate on re-evaluation.
+  raw `PATH=...:$PATH` assignments in module bodies are lint-rejected in
+  every phase, because both plans can be re-sourced (the env plan at every
+  entry point, the interactive plan on a release switch or an explicit
+  `source ~/.bashrc`) and a raw assignment duplicates on each evaluation.
 - The load guard `_valise_profile_loaded` records the active release id, so
   the same shell with the same release is a no-op, a switched release forces
   a reload, and a fresh nested shell always re-runs the env plan — which is

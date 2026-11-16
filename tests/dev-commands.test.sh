@@ -170,14 +170,16 @@ if _v "$_proj" env export wsl >"$_tmp/env-export-wsl.out" 2>&1; then
 else
   fail "env export wsl succeeds"
 fi
-if grep -qE '^[A-Za-z_][A-Za-z0-9_]*/(p|l)$' "$_tmp/env-export-wsl.out" &&
-  grep -q '/p$' "$_tmp/env-export-wsl.out" 2>/dev/null || true; then
-  :
-fi
-if grep -qE '^[A-Za-z_][A-Za-z0-9_]*/(p|l)$' "$_tmp/env-export-wsl.out"; then
-  pass "env export wsl emits NAME/flag lines"
+if grep -q '^WSLENV=' "$_tmp/env-export-wsl.out"; then
+  _wsl_line=$(grep '^WSLENV=' "$_tmp/env-export-wsl.out")
+  if printf '%s\n' "$_wsl_line" | grep -qE '^WSLENV=[A-Za-z_][A-Za-z0-9_]*(/(l|p|w))?(:[A-Za-z_][A-Za-z0-9_]*(/(l|p|w))?)*$'; then
+    pass "env export wsl emits one colon-joined WSLENV line"
+  else
+    fail "env export wsl emits a malformed WSLENV line"
+    printf '%s\n' "$_wsl_line" >&2
+  fi
 else
-  fail "env export wsl emits NAME/flag lines"
+  fail "env export wsl emits one colon-joined WSLENV line"
   cat "$_tmp/env-export-wsl.out" >&2
 fi
 if _v "$_proj" env export launchd >"$_tmp/env-export-ld.out" 2>&1; then
@@ -203,17 +205,18 @@ if command -v plutil >/dev/null 2>&1; then
 else
   skip "env export launchd plist passes plutil -lint (plutil unavailable)"
 fi
-# F6: XML-special characters in values must be escaped exactly once — the
-# plist string must contain &amp; (not &amp;amp;) for a literal '&'. The value
-# is assigned quoted in the module body so the shell parses it.
+# F6: XML-special characters in values must be escaped exactly once, and the
+# value is shell-quoted BEFORE the XML escaping, so the command /bin/sh runs
+# carries the literal value. The value is assigned quoted in the module body so
+# the shell parses it.
 if printf 'XMLV="a<&>\\"b"\nexport XMLV\n' >>"$_proj/modules/main.sh" &&
   _v "$_proj" apply >/dev/null 2>&1 &&
   _v "$_proj" env export launchd >"$_tmp/env-export-ld-xml.out" 2>&1; then
-  if grep -q 'launchctl setenv XMLV a&lt;&amp;&gt;&quot;b' "$_tmp/env-export-ld-xml.out" &&
+  if grep -qF "launchctl setenv 'XMLV' 'a&lt;&amp;&gt;&quot;b'" "$_tmp/env-export-ld-xml.out" &&
     ! grep -q '&amp;amp;\|&amp;lt;\|&amp;gt;\|&amp;quot;' "$_tmp/env-export-ld-xml.out"; then
-    pass "env export launchd escapes XML-special value chars exactly once"
+    pass "env export launchd shell-quotes then XML-escapes the value exactly once"
   else
-    fail "env export launchd double-escapes XML-special value chars"
+    fail "env export launchd did not quote and escape the XML-special value correctly"
     grep 'XMLV' "$_tmp/env-export-ld-xml.out" >&2
   fi
   if command -v plutil >/dev/null 2>&1; then
@@ -421,20 +424,32 @@ _lint_case "lint rejects an unknown phase value" \
   'invalid phase: bogus' \
   "sed 's/^side_effect=local-secret\$/side_effect=local-secret\\nphase=bogus/' module.d/secrets.meta >m && mv m module.d/secrets.meta"
 _lint_case "lint rejects raw PATH assignment in an env-phase body" \
-  'secrets: env-phase body assigns PATH directly' \
+  'secrets: body assigns PATH directly' \
   "printf 'PATH=\$HOME/.local/bin:\$PATH\\nexport PATH\\n' >>modules/secrets.sh"
 _lint_case "lint rejects export PATH prepend in an env-phase body" \
-  'env-phase body assigns PATH directly' \
+  'body assigns PATH directly' \
   "printf 'export PATH=\$HOME/bin:\$PATH\\n' >>modules/main.sh"
 _lint_case "lint diagnostic names valise_path_prepend for raw PATH writes" \
   'valise_path_prepend' \
   "printf 'PATH=\$HOME/bin:\$PATH\\n' >>modules/main.sh"
-_lint_case "lint accepts valise_path_prepend in an env-phase body" \
+_lint_case "lint accepts valise_path_prepend in a body" \
   'valise lint: no problems' \
   "printf 'valise_path_prepend \"\$HOME/.local/bin\"\\n' >>modules/main.sh"
-_lint_case "lint allows raw PATH writes in an interactive-phase body" \
-  'valise lint: no problems' \
+_lint_case "lint rejects a raw PATH write in an interactive-phase body" \
+  'main: body assigns PATH directly' \
   "sed 's/^side_effect=read-only\$/side_effect=read-only\\nphase=interactive/' module.d/main.meta >m && mv m module.d/main.meta && printf 'PATH=\$HOME/bin:\$PATH\\n' >>modules/main.sh"
+_lint_case "lint ignores a commented PATH assignment" \
+  'valise lint: no problems' \
+  "printf '# PATH=\$HOME/bin:\$PATH\\n' >>modules/secrets.sh"
+_lint_case "lint catches a PATH assignment after a separator" \
+  'body assigns PATH directly' \
+  "printf 'true; PATH=\$HOME/bin:\$PATH\\n' >>modules/secrets.sh"
+_lint_case "lint catches a PATH assignment after a logical and" \
+  'body assigns PATH directly' \
+  "printf 'true && PATH=\$HOME/bin:\$PATH\\n' >>modules/secrets.sh"
+_lint_case "lint catches a PATH assignment after another export" \
+  'body assigns PATH directly' \
+  "printf 'export A=1 PATH=\$HOME/bin\\n' >>modules/secrets.sh"
 
 # --- test ---
 
@@ -542,9 +557,242 @@ if [ "$(_v "$_proj" run --shell=bash --variant=no-secrets -- 'command -v secret_
 else
   fail "run --variant applies the variant's exclusions"
 fi
-# The env-export block above ran `apply`, which legitimately installs into
-# $_home, so the no-install assertion below only checks TMPDIR scratch: the
-# env export capture must remove its own scratch dir.
+# --- interactive phase: test, run, and published commands ---
+# A phase=interactive module must still be exercised by the developer tools:
+# the plans carry no $- gate (the managed block does), so the harness sources
+# the module under test. And a module that publishes a command needs its own
+# body in the command plan whatever phase it declares.
+_int_proj="$_tmp/proj-interactive"
+cp -R "$_proj" "$_int_proj"
+printf '%s\n' 'name=intbits' 'side_effect=read-only' 'shells=posix' 'platforms=any' \
+  'exports=intbits_ok' 'load=modules/intbits.sh' 'tests=tests/intbits.sh' \
+  'commands=intbits_ok' 'phase=interactive' >"$_int_proj/module.d/intbits.meta"
+printf 'intbits_ok() { printf "intbits:%%s\\n" "$*"; }\n' >"$_int_proj/modules/intbits.sh"
+printf 'test "$(intbits_ok x)" = intbits:x\n' >"$_int_proj/tests/intbits.sh"
+awk -F '\t' 'BEGIN { OFS = "\t" } $1 == "default" && $2 == "bash" { $3 = $3 " intbits" } { print }' \
+  "$_int_proj/bundles.tsv" >"$_tmp/b.tsv" && mv "$_tmp/b.tsv" "$_int_proj/bundles.tsv"
+if _v "$_int_proj" test --shell=bash intbits >"$_tmp/int-test.out" 2>&1 &&
+  grep -Fx 'ok intbits [bash] tests/intbits.sh' "$_tmp/int-test.out" >/dev/null; then
+  pass "test loads a phase=interactive module under test"
+else
+  fail "test did not load a phase=interactive module under test"
+  cat "$_tmp/int-test.out" >&2
+fi
+if [ "$(_v "$_int_proj" run --shell=bash --module=intbits -- 'intbits_ok y' 2>&1)" = intbits:y ]; then
+  pass "run --module loads a phase=interactive module"
+else
+  fail "run --module did not load a phase=interactive module"
+fi
+if _v "$_int_proj" apply >/dev/null 2>&1 &&
+  _cmd_bin=$(ls "$_home"/.local/bin/intbits_ok 2>/dev/null) &&
+  [ -n "$_cmd_bin" ] &&
+  [ "$(env -i HOME="$_home" PATH=/usr/bin:/bin "$_cmd_bin" z 2>&1)" = intbits:z ]; then
+  pass "a command published by a phase=interactive module runs"
+else
+  fail "a command published by a phase=interactive module does not run"
+  _v "$_int_proj" apply >&2 2>&1 || :
+fi
+
+# --- capture ---
+# The GUI env capture keeps the caller's real HOME while isolating the rc
+# surface, so a $HOME-derived scalar carries the REAL path and not the
+# throwaway probe directory. A value containing a newline must fail loudly
+# rather than being silently truncated; module stdout must not inject a fake
+# KEY=VALUE line.
+_gopath_proj="$_tmp/proj-gopath"
+cp -R "$_proj" "$_gopath_proj"
+printf 'GOPATH=$HOME/go\nexport GOPATH\n' >>"$_gopath_proj/modules/main.sh"
+if _v "$_gopath_proj" apply >/dev/null 2>&1 &&
+  _v "$_gopath_proj" env export environment.d >"$_tmp/gopath.out" 2>"$_tmp/gopath.err"; then
+  if grep -Fx "GOPATH=$_home/go" "$_tmp/gopath.out" >/dev/null; then
+    pass "env export keeps a \$HOME-derived scalar's real path"
+  else
+    fail "env export rewrote a \$HOME-derived scalar"
+    grep 'GOPATH' "$_tmp/gopath.out" >&2
+  fi
+else
+  fail "env export failed on a \$HOME-derived scalar"
+  cat "$_tmp/gopath.err" >&2
+fi
+_multiline_proj="$_tmp/proj-multiline"
+cp -R "$_proj" "$_multiline_proj"
+printf 'MULTIV="first line\nsecond line"\nexport MULTIV\n' >>"$_multiline_proj/modules/main.sh"
+if _v "$_multiline_proj" apply >/dev/null 2>&1; then
+  if _v "$_multiline_proj" env export environment.d >"$_tmp/ml.out" 2>"$_tmp/ml.err"; then
+    fail "env export accepted a value containing a newline"
+    cat "$_tmp/ml.out" >&2
+  elif grep -F 'MULTIV' "$_tmp/ml.err" >/dev/null; then
+    pass "env export fails loudly on a value containing a newline"
+  else
+    fail "env export failed without naming the offending key"
+    cat "$_tmp/ml.err" >&2
+  fi
+else
+  fail "could not install the newline-value fixture"
+fi
+_noise_proj="$_tmp/proj-noise"
+cp -R "$_proj" "$_noise_proj"
+printf 'printf "FAKE_INJECTED=1\\n"\n' >>"$_noise_proj/modules/main.sh"
+if _v "$_noise_proj" apply >/dev/null 2>&1 &&
+  _v "$_noise_proj" env export environment.d >"$_tmp/noise.out" 2>&1; then
+  if grep -q '^FAKE_INJECTED=' "$_tmp/noise.out"; then
+    fail "module stdout injected a variable into the GUI env bridge"
+    cat "$_tmp/noise.out" >&2
+  else
+    pass "module stdout cannot inject a variable into the GUI env bridge"
+  fi
+else
+  fail "env export failed on the stdout-noise fixture"
+fi
+# The env-export cases above legitimately ran `apply`, which installs into
+# $_home, so this assertion only checks that no TMPDIR scratch is left behind:
+# the capture must remove its own scratch dir on every path.
+# --- env export renderers: value fidelity ---
+# A launchd value is executed by /bin/sh. Extract the command string, unescape
+# the XML, run it with a stub launchctl, and assert the exact argv.
+_torture_proj="$_tmp/proj-torture"
+cp -R "$_proj" "$_torture_proj"
+cat >>"$_torture_proj/modules/main.sh" <<'EOF2'
+TORMENT1='a b;c$d'
+TORMENT2="e'f\"g\\h"
+export TORMENT1 TORMENT2
+EOF2
+if _v "$_torture_proj" apply >/dev/null 2>&1 &&
+  _v "$_torture_proj" env export launchd >"$_tmp/torture.plist" 2>"$_tmp/torture.err"; then
+  mkdir -p "$_tmp/stub"
+  cat >"$_tmp/stub/launchctl" <<'EOF2'
+#!/bin/sh
+printf 'argc=%s\n' "$#"
+for _a in "$@"; do printf 'arg=[%s]\n' "$_a"; done
+EOF2
+  chmod +x "$_tmp/stub/launchctl"
+  _cmd_line=$(sed -n 's:.*<string>\(launchctl setenv .*\)</string>.*:\1:p' "$_tmp/torture.plist" |
+    sed 's/&quot;/"/g; s/&lt;/</g; s/&gt;/>/g; s/&amp;/\&/g')
+  _stub_out=$(PATH="$_tmp/stub:/usr/bin:/bin" /bin/sh -c "$_cmd_line" 2>&1)
+  if printf '%s\n' "$_stub_out" | grep -Fx 'arg=[a b;c$d]' >/dev/null &&
+    printf '%s\n' "$_stub_out" | grep -Fx 'arg=[e'"'"'f"g\h]' >/dev/null; then
+    pass "env export launchd round-trips shell metacharacters to launchctl argv"
+  else
+    fail "env export launchd corrupts shell metacharacters"
+    printf '%s\n' "$_stub_out" >&2
+  fi
+  if ! command -v plutil >/dev/null 2>&1; then
+    skip "env export launchd torture plist passes plutil -lint (plutil unavailable)"
+  elif plutil -lint "$_tmp/torture.plist" >/dev/null 2>&1; then
+    pass "env export launchd torture plist passes plutil -lint"
+  else
+    fail "env export launchd torture plist fails plutil -lint"
+  fi
+else
+  fail "env export launchd torture case did not run"
+  cat "$_tmp/torture.err" >&2 2>/dev/null || :
+fi
+# environment.d must double '$' (systemd expands it even inside quotes).
+if _v "$_torture_proj" env export environment.d >"$_tmp/torture.ed" 2>&1 &&
+  grep -Fx 'TORMENT1="a b;c$$d"' "$_tmp/torture.ed" >/dev/null; then
+  pass "env export environment.d doubles \$ so systemd leaves it literal"
+else
+  fail "env export environment.d did not double \$"
+  grep 'TORMENT1' "$_tmp/torture.ed" >&2 2>/dev/null || :
+fi
+# WSLENV flags follow the value shape, not a substring of the key.
+_wsl_proj="$_tmp/proj-wsl"
+cp -R "$_proj" "$_wsl_proj"
+cat >>"$_wsl_proj/modules/main.sh" <<'EOF2'
+MANPATH=/usr/share/man:/usr/local/share/man
+SINGLE=/usr/local/bin
+CLASSPATH=foo:bar
+export MANPATH SINGLE CLASSPATH
+EOF2
+if _v "$_wsl_proj" apply >/dev/null 2>&1 &&
+  _v "$_wsl_proj" env export wsl >"$_tmp/wsl.out" 2>&1; then
+  _wsl_line=$(grep '^WSLENV=' "$_tmp/wsl.out" | head -n 1)
+  if printf '%s' "$_wsl_line" | grep -q 'MANPATH/l' &&
+    printf '%s' "$_wsl_line" | grep -q 'SINGLE/p' &&
+    printf '%s' "$_wsl_line" | grep -Eq '(^|:)CLASSPATH(:|$)'; then
+    pass "env export wsl derives the flag from the value shape, not the key"
+  else
+    fail "env export wsl mislabels variables"
+    printf '%s\n' "$_wsl_line" >&2
+  fi
+else
+  fail "env export wsl flag case did not run"
+fi
+# --help is a help request, not a usage error.
+if _v "$_proj" env export --help >"$_tmp/env-help.out" 2>&1 &&
+  grep -F 'usage: valise env' "$_tmp/env-help.out" >/dev/null; then
+  pass "env export --help prints usage"
+else
+  fail "env export --help does not print usage"
+fi
+
+# --- gui_env lifecycle ---
+# The mode is recorded in the release at build time, so an install from a
+# relocated release tree still writes the bridge.
+_reloc_home="$_tmp/home-reloc"
+mkdir -p "$_reloc_home"
+if [ -d "$_gui_proj/build/release" ] && [ "$(uname -s)" = Darwin ]; then
+  rm -rf "$_tmp/reloc"
+  cp -R "$_gui_proj/build/release" "$_tmp/reloc"
+  if ( cd "$_tmp/reloc" && env -i HOME="$_reloc_home" PATH="${PATH:-/usr/bin:/bin}" \
+      XDG_DATA_HOME="$_reloc_home/.local/share" XDG_CONFIG_HOME="$_reloc_home/.config" \
+      XDG_STATE_HOME="$_reloc_home/.local/state" SHELL=/bin/bash TMPDIR="$_tmp" \
+      "$_valise" install ) >"$_tmp/reloc-install.out" 2>&1 &&
+    [ -f "$_reloc_home/Library/LaunchAgents/sh.valise.env.plist" ]; then
+    pass "install from a relocated release tree writes the declared gui_env bridge"
+  else
+    fail "install from a relocated release tree did not write the bridge"
+    cat "$_tmp/reloc-install.out" >&2
+  fi
+else
+  skip "install from a relocated release tree writes the declared gui_env bridge (not darwin)"
+fi
+# gui_env=off on the next release removes the bridge the previous one wrote.
+# This builds its own fixture so it does not depend on a sibling case having
+# run first.
+if [ "$(uname -s)" = Darwin ]; then
+  _off_home="$_tmp/home-gui-off"
+  mkdir -p "$_off_home"
+  _off_proj="$_tmp/proj-gui-off"
+  cp -R "$_proj" "$_off_proj"
+  printf 'gui_env=launchd\n' >>"$_off_proj/valise.conf"
+  env -i HOME="$_off_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_off_home/.local/share" \
+    XDG_CONFIG_HOME="$_off_home/.config" XDG_STATE_HOME="$_off_home/.local/state" SHELL=/bin/bash \
+    TMPDIR="$_tmp" "$_valise" -C "$_off_proj" apply >"$_tmp/gui-off-first.out" 2>&1 || :
+  if [ ! -f "$_off_home/Library/LaunchAgents/sh.valise.env.plist" ]; then
+    fail "the gui_env=off fixture did not write a bridge to remove"
+  else
+    sed 's/^gui_env=launchd$/gui_env=off/' "$_off_proj/valise.conf" >"$_tmp/gui-off.conf"
+    cp "$_tmp/gui-off.conf" "$_off_proj/valise.conf"
+    env -i HOME="$_off_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_off_home/.local/share" \
+      XDG_CONFIG_HOME="$_off_home/.config" XDG_STATE_HOME="$_off_home/.local/state" SHELL=/bin/bash \
+      TMPDIR="$_tmp" "$_valise" -C "$_off_proj" apply >"$_tmp/gui-off.out" 2>&1 || :
+    if [ ! -e "$_off_home/Library/LaunchAgents/sh.valise.env.plist" ]; then
+      pass "gui_env=off removes the bridge an earlier release wrote"
+    else
+      fail "gui_env=off left a stale bridge behind"
+      cat "$_tmp/gui-off.out" >&2
+    fi
+  fi
+else
+  skip "gui_env=off removes the bridge an earlier release wrote (not darwin)"
+fi
+# --dry-run reports the shim and the bridge.
+_dry_proj="$_tmp/proj-dry"
+cp -R "$_gui_proj" "$_dry_proj"
+_dry_home="$_tmp/home-dry"
+mkdir -p "$_dry_home"
+if env -i HOME="$_dry_home" PATH="${PATH:-/usr/bin:/bin}" XDG_DATA_HOME="$_dry_home/.local/share" \
+  XDG_CONFIG_HOME="$_dry_home/.config" XDG_STATE_HOME="$_dry_home/.local/state" SHELL=/bin/bash \
+  TMPDIR="$_tmp" "$_valise" -C "$_dry_proj" apply --dry-run >"$_tmp/dry.out" 2>&1 &&
+  grep -F "$_dry_home/.config/valise/env.sh" "$_tmp/dry.out" >/dev/null &&
+  grep -F 'gui env bridge' "$_tmp/dry.out" >/dev/null; then
+  pass "apply --dry-run names the ENV shim and the GUI env bridge"
+else
+  fail "apply --dry-run omits the shim or the bridge"
+  cat "$_tmp/dry.out" >&2
+fi
+
 if [ -z "$(ls -A "$_tmp" | grep '^valise-dev\.\|^valise-env-export\.' || :)" ]; then
   pass "lint, test, run, and env export leave no scratch behind in TMPDIR"
 else

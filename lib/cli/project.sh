@@ -490,8 +490,10 @@ project_effective_roots() {
 
 # project_compile <registry> <shell> <seeds> <excludes> <output> [plan|closure] [phase]
 # Compile one plan (or print its ordered closure) into output. phase selects
-# which phase of the closure the rendered plan contains: env (default) or
-# interactive. closure mode ignores phase and prints the full ordered closure.
+# which phase of the closure the rendered plan contains: env (default),
+# interactive, or all (an unfiltered plan, which is what a command plan needs
+# so the module's own body is present whatever phase it declares). closure
+# mode ignores phase and prints the full ordered closure.
 project_compile() {
   _pcm_engine=$(engine_root) || die "cannot locate the valise engine"
   _pcm_compiler="$_pcm_engine/lib/compiler.awk"
@@ -512,28 +514,31 @@ project_compile() {
 
 # project_closure_has_phase <registry> <shell> <seeds> <excludes> <phase>
 # Succeeds when the closure for the shell contains a module of the phase.
+# The probe renders the plan ONCE into a staging file and reads its "# order="
+# header: the compiler partitions the closure by phase, so a non-empty order
+# list proves some module in the closure carries that phase. Compiler errors
+# are NOT swallowed - a graph that does not compile must fail here, because
+# the caller is about to compile the same graph again.
 project_closure_has_phase() {
-  # Compile the closure with the requested phase and look at the "# order="
-  # header: the compiler partitions the closure by phase, so a non-empty order
-  # list proves some module in the closure carries that phase.
   _pch_engine=$(engine_root) || die "cannot locate the valise engine"
   _pch_compiler="$_pch_engine/lib/compiler.awk"
   [ -r "$_pch_compiler" ] || die "compiler not found: $_pch_compiler"
   _pch_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+  _pch_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
   _pch_prelude=$(project_prelude_functions) || exit 1
   _pch_stream_file=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-closure.XXXXXX") || return 1
-  project_preprocess "$1" "$2" "$3" "$4" "$_pch_prelude" >"$_pch_stream_file" || {
-    _pch_rm=$(trusted_utility_path rm) || return 1
+  _pch_plan_file=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-closure-plan.XXXXXX") || {
     "$_pch_rm" -f "$_pch_stream_file"
-    unset _pch_stream_file _pch_rm
     return 1
   }
-  _pch_order=$("$_pch_awk" -v target_shell="$2" -v plan_name="$2" -v mode=plan -v phase="$5" -f "$_pch_compiler" "$_pch_stream_file" 2>/dev/null |
-    "$_pch_awk" '/^# order=/ { sub(/^# order=/, ""); print; exit }') || _pch_order=
-  _pch_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
-  "$_pch_rm" -f "$_pch_stream_file" || die "cannot remove closure probe scratch file"
-  unset _pch_stream_file _pch_rm
-  unset _pch_engine _pch_compiler _pch_awk _pch_prelude
+  _pch_order=
+  if project_preprocess "$1" "$2" "$3" "$4" "$_pch_prelude" >"$_pch_stream_file" &&
+    "$_pch_awk" -v target_shell="$2" -v plan_name="$2" -v mode=plan -v phase="$5" \
+      -f "$_pch_compiler" "$_pch_stream_file" >"$_pch_plan_file"; then
+    _pch_order=$("$_pch_awk" '/^# order=/ { sub(/^# order=/, ""); print; exit }' "$_pch_plan_file")
+  fi
+  "$_pch_rm" -f "$_pch_stream_file" "$_pch_plan_file" || die "cannot remove closure probe scratch files"
+  unset _pch_stream_file _pch_plan_file _pch_engine _pch_compiler _pch_awk _pch_rm _pch_prelude
   if [ -n "$_pch_order" ]; then
     unset _pch_order
     return 0
@@ -1350,7 +1355,12 @@ project_build_commands() {
         "$_pbc_awk" '{ print }' "$_pbc_scratch/closure.cmd" >>"$_pbc_scratch/closure" ||
           die "cannot record the command closure of $_pbc_name"
         _pbc_new=1
-        project_compile "$_pbc_registry" "$_pbc_class" "$_pbc_id" "$_pbc_excludes" "$_pbc_stage/$_pbc_plan"
+        # A command plan is phase-agnostic: the launcher sources this plan and
+        # then calls the function, so the module's OWN body must be present
+        # whatever phase it declares. Compiling it as the env phase produced an
+        # empty order list for an interactive module and a launcher that called
+        # a function nothing had defined.
+        project_compile "$_pbc_registry" "$_pbc_class" "$_pbc_id" "$_pbc_excludes" "$_pbc_stage/$_pbc_plan" plan all
         for _pbc_cmd in $_pbc_cmds; do
           case " $_pb_commands " in *" $_pbc_cmd "*) die "command $_pbc_cmd is published by more than one module" ;; esac
           _pb_commands="${_pb_commands:+$_pb_commands }$_pbc_cmd"
@@ -1521,6 +1531,7 @@ project_build() {
       "valise_version=$VALISE_VERSION" \
       "bundle=$_pb_bundle" \
       "variant=$_pb_variant" \
+      "gui_env=${_project_gui_env:-off}" \
       "$_pb_conf_roots"
     printf 'modules=%s\n' "$_pb_modules"
     printf 'commands=%s\n' "$_pb_commands"
@@ -1563,10 +1574,6 @@ cmd_apply() {
   _apply_build_out=$_project_root/build/release
   project_build "$_apply_variant" "$_apply_bundle" "$_apply_build_out" 1
   _apply_old_pwd=$(pwd -P) || die "cannot resolve current directory"
-  # install chdirs into the release tree; remember the project cwd so the GUI
-  # env bridge can still read this project's valise.conf (gui_env) there.
-  VALISE_PROJECT_CWD=$_apply_old_pwd
-  export VALISE_PROJECT_CWD
   cd "$_apply_build_out" || die "cannot enter build output: $_apply_build_out"
   if [ "$_apply_dry_run" -eq 1 ]; then
     # Only build/ has changed; describe the install without performing it.
@@ -1574,7 +1581,6 @@ cmd_apply() {
     [ -z "$_apply_install_arg" ] || _apply_integration=0
     install_preview "$_apply_integration"
     cd "$_apply_old_pwd" || die "cannot restore project directory: $_apply_old_pwd"
-    unset VALISE_PROJECT_CWD
     unset _apply_arg _apply_variant _apply_bundle _apply_install_arg _apply_build_out _apply_old_pwd \
       _apply_dry_run _apply_integration
     return 0
@@ -1583,7 +1589,6 @@ cmd_apply() {
   cd "$_apply_old_pwd" || die "cannot restore project directory: $_apply_old_pwd"
   cmd_verify_active
   info "applied project: $_project_root"
-  unset VALISE_PROJECT_CWD
   unset _apply_arg _apply_variant _apply_bundle _apply_install_arg _apply_build_out _apply_old_pwd _apply_dry_run
 }
 

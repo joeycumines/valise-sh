@@ -27,6 +27,45 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
   bridge file.
 - `sp_cap_is_interactive` and `sp_cap_is_tty` in the capability library.
 
+### Changed
+
+- `gui_env` is recorded in `valise-release.conf` at build time, so a release
+  built elsewhere and installed directly still writes its bridge, and
+  `valise release use`/`rollback` re-render the bridge for the release they
+  activate (removing a valise-owned one when that release wants none).
+  `gui_env=off` on the next release removes a bridge an earlier one wrote.
+  `valise apply --dry-run` now reports the ENV shim and the GUI bridge.
+- The `$ENV` stanza is emitted into every managed block and decided at RUNTIME
+  from the shell class, so an install run from bash or zsh still wires an
+  `sh` login shell. The shim is a managed startup file: `valise uninstall`
+  strips the block and keeps any lines you added, and ownership is an
+  exact-line marker match rather than a substring.
+- The env-plan capture keeps your real `HOME` and isolates only the
+  startup-file surface, so a `$HOME`-derived variable carries the real path.
+  It fails loudly instead of truncating when a value contains a newline, when
+  the interpreter is unavailable, or when the plan fails to load.
+- `launchd` values are shell-quoted before XML-escaping, so a value containing
+  a space, `;`, `$`, a backtick or a quote reaches `launchctl setenv` intact.
+  `environment.d` doubles `$` to `$$` (systemd expands it even in quotes).
+  `wsl` emits one colon-joined `WSLENV=` line with spec-correct flags derived
+  from the value shape (`/l` for a colon-delimited path list, `/p` for a
+  single absolute path, no flag for a scalar).
+- `valise test` and `valise run` load both phase plans, so a module under test
+  is present whatever phase it declares; a command plan renders the whole
+  closure, so a published command of an `interactive` module works.
+- Raw `PATH=` assignments are lint-rejected in every phase (comments and
+  `*.fish` bodies excepted). `valise doctor` looks for legacy blocks in every
+  startup file it manages, warns when `$ENV` is unset as well as foreign,
+  checks `~/.zshenv` whenever zsh is installed, and only warns about a GUI
+  bridge the active release actually asked for.
+- Compile rejects an `env`-phase module that requires an `interactive` one,
+  and the compiler itself validates the phase value.
+- The plan header is `# plan=<shell> phase=<phase>`: a reader that parsed it by
+  splitting on `=` must take the shell name as the first word of the value.
+- The GUI bridge is a file, not an effect: environment.d applies at user-manager
+  start, the LaunchAgent at login. See
+  [GUI-session environment](docs/installation.md#gui-session-environment).
+
 ## [0.3.0] - 2026-11-06
 
 0.3.0 changes the project layout, the metadata, and the release format. A

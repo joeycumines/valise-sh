@@ -82,7 +82,8 @@ path_normalize() {
 # prune would compare the active release by a path spelling that never
 # matches the release directory.
 VALISE_XDG_DATA=$(path_normalize "${XDG_DATA_HOME:-$HOME/.local/share}/valise")
-VALISE_XDG_CONFIG=$(path_normalize "${XDG_CONFIG_HOME:-$HOME/.config}/valise")
+VALISE_XDG_CONFIG_ROOT=$(path_normalize "${XDG_CONFIG_HOME:-$HOME/.config}")
+VALISE_XDG_CONFIG="$VALISE_XDG_CONFIG_ROOT/valise"
 VALISE_XDG_STATE=$(path_normalize "${XDG_STATE_HOME:-$HOME/.local/state}/valise")
 VALISE_RELEASES_DIR="$VALISE_XDG_DATA/releases"
 VALISE_ACTIVE_LINK="$VALISE_XDG_CONFIG/active"
@@ -203,6 +204,12 @@ trusted_utility_path() {
     rm) _trusted_candidates='/bin/rm /usr/bin/rm' ;;
     stat) _trusted_candidates='/usr/bin/stat /bin/stat' ;;
     tail) _trusted_candidates='/usr/bin/tail /bin/tail' ;;
+    head) _trusted_candidates='/usr/bin/head /bin/head' ;;
+    grep) _trusted_candidates='/usr/bin/grep /bin/grep' ;;
+    sed) _trusted_candidates='/usr/bin/sed /bin/sed' ;;
+    id) _trusted_candidates='/usr/bin/id /bin/id' ;;
+    comm) _trusted_candidates='/usr/bin/comm /bin/comm' ;;
+    env) _trusted_candidates='/usr/bin/env /bin/env' ;;
     tr) _trusted_candidates='/usr/bin/tr /bin/tr' ;;
     wc) _trusted_candidates='/usr/bin/wc /bin/wc' ;;
     sha256sum) _trusted_candidates='/usr/bin/sha256sum /bin/sha256sum /sbin/sha256sum /opt/homebrew/bin/sha256sum /usr/local/bin/sha256sum' ;;

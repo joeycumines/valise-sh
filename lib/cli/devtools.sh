@@ -75,6 +75,13 @@ devtool_build() {
 # defines valise_test_reload, then runs the body. VALISE_TEST_RELEASE and
 # VALISE_TEST_PLAN are exported so the body can load the same modules in a
 # child shell.
+#
+# Both phase plans are sourced. A module under test may be phase=interactive,
+# and the plans themselves carry no $- gate (the managed block does), so a
+# test harness - which is never an interactive login - still loads the module
+# it is testing. Sourcing only the env plan left `valise test` and
+# `valise run --module=<interactive>` running against a shell where the module
+# under test had never been defined.
 devtool_runner() {
   _dr_release=$(shell_quote "$2") || return 1
   _dr_cat=$(trusted_utility_path cat) || return 1
@@ -102,21 +109,34 @@ devtool_runner() {
         'VALISE_TEST_RELEASE=$_valise_dev_release' \
         "VALISE_TEST_PLAN=\$_valise_dev_release/plans/$1.sh" \
         'export VALISE_TEST_RELEASE VALISE_TEST_PLAN' \
+        '_valise_dev_plans="$_valise_dev_release/plans/'"$1"'.sh"' \
+        '_valise_dev_int="$_valise_dev_release/plans/'"$1"'-interactive.sh"' \
         'valise_test_reload() {' \
         '  VALISE_MODULE_ROOT=$_valise_dev_release' \
         '  VALISE_MODE=strict' \
         '  VALISE_RELOAD=1' \
-        "  . \"\$_valise_dev_release/plans/$1.sh\"" \
-        '  _valise_dev_status=$?' \
+        '  _valise_dev_status=0' \
+        '  . "$_valise_dev_plans" || _valise_dev_status=$?' \
+        '  if [ "$_valise_dev_status" -eq 0 ] && [ -f "$_valise_dev_int" ]; then' \
+        '    . "$_valise_dev_int" || _valise_dev_status=$?' \
+        '  fi' \
         '  unset VALISE_RELOAD' \
         '  return "$_valise_dev_status"' \
         '}' \
         'VALISE_MODULE_ROOT=$_valise_dev_release' \
         'VALISE_MODE=strict' \
-        ". \"\$_valise_dev_release/plans/$1.sh\" || {" \
+        '. "$_valise_dev_plans" || {' \
         "  printf '%s\\n' 'valise: the modules failed to load' >&2" \
         '  exit 97' \
-        '}'
+        '}' \
+        'if [ -f "$_valise_dev_int" ]; then' \
+        '  . "$_valise_dev_int" || {' \
+        "    printf '%s\\n' 'valise: the interactive modules failed to load' >&2" \
+        '    exit 97' \
+        '  }' \
+        'fi'
+      # The body goes LAST: it calls valise_test_reload, which needs the plan
+      # paths, so they must survive until it runs.
       "$_dr_cat" "$4"
     } >"$3"
   fi
@@ -157,63 +177,242 @@ devtool_exec() {
 
 # --- env ---
 
-# env_export_capture <shell>: run the active release's env plan for <shell>
-# in a clean quarantined environment and print the exported scalar KEY=VALUE
-# pairs that differ from a baseline clean env. Only simple identifier names
-# are captured; functions and special vars are not representable in the
-# output formats and are skipped.
+# env_export_capture <shell> [release-dir]: run a release's env plan for
+# <shell> in a quarantined environment and print the exported scalar
+# KEY=VALUE pairs that differ from a baseline. The release defaults to the
+# active one; install_preview passes the tree it is about to install, which is
+# not active yet.
+#
+# Faithfulness rules, each of which a previous version broke:
+#   * HOME stays the caller's real HOME. A throwaway HOME made every
+#     HOME-derived scalar (GOPATH, CARGO_HOME, XDG_*) bake the probe
+#     directory's path - which is deleted before the bridge is even read -
+#     into the GUI session. Only the startup-file surface is isolated:
+#     ZDOTDIR points at an empty directory, and BASH_ENV/ENV point at
+#     /dev/null, so no user rc file runs.
+#   * The baseline runs the SAME interpreter with the SAME fixture env as the
+#     target, so shell-specific incidental variables (LOGNAME, SHLVL, ksh's
+#     A__z) cancel instead of being captured as exports.
+#   * The interpreter is resolved by devtool_interpreter BEFORE the sandbox
+#     starts, so a Homebrew bash/zsh/ksh is found. The probe PATH is fixed and
+#     calls its tools bare on purpose: it is a quarantined environment, not
+#     the caller's PATH, so there is nothing there to forge.
+#   * The dump is written through a dedicated fd with the plan's stdout
+#     suppressed, so a module that prints KEY=VALUE cannot inject a variable
+#     into the bridge.
+#   * Every failure - no interpreter, a plan that fails to source, a scratch
+#     file that cannot be made - is a failure of this function. Nothing is
+#     reported as a successful empty capture.
+#   * Values are separated by NUL (env -0) and converted to SOH before awk,
+#     because a value containing a newline would otherwise be split, sorted and
+#     reassembled wrong, and a continuation line shaped like NAME=value would
+#     be captured as a FABRICATED variable. A newline inside a value is
+#     detected and reported instead of truncated silently.
 env_export_capture() {
   _eec_shell=$1
-  _eec_active=$(active_release_dir) || return 1
+  if [ -n "${2:-}" ]; then
+    _eec_active=$2
+  else
+    _eec_active=$(active_release_dir) || return 1
+  fi
   _eec_plan="$_eec_active/plans/$_eec_shell.sh"
   [ -f "$_eec_plan" ] || _eec_plan="$_eec_active/plans/sh.sh"
   [ -f "$_eec_plan" ] || return 1
+  _eec_interp=$(devtool_interpreter "$_eec_shell") || {
+    printf 'valise: error: no %s interpreter is available for the env capture\n' "$_eec_shell" >&2
+    unset _eec_shell _eec_active _eec_plan
+    return 1
+  }
   _eec_scratch=$(trusted_mktemp dir "${TMPDIR:-/tmp}/valise-env-export.XXXXXX") || return 1
-  _eec_probe='_p=$1; _home=$2; _sh=$3; _root=$4
-_b=$(mktemp); _a=$(mktemp)
-env -i PATH=/usr/bin:/bin sh -c "env" 2>/dev/null | LC_ALL=C sort >"$_b"
-env -i HOME="$_home" PATH=/usr/bin:/bin VALISE_MODULE_ROOT="$_root" "$_sh" -c ". \"$_p\"; env" 2>/dev/null | LC_ALL=C sort >"$_a"
-comm -13 "$_b" "$_a" | grep -vE "^(_=|HOME=|PATH=|PWD=|SHLVL=|OLDPWD=|VALISE_MODULE_ROOT=)"
-rm -f "$_b" "$_a"'
-  env -i HOME="$_eec_scratch" PATH=/usr/bin:/bin \
-    sh -c "$_eec_probe" sh "$_eec_plan" "$_eec_scratch" "$_eec_shell" "$_eec_active" 2>/dev/null | \
-    awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ { print }'
-  _eec_rm=$(trusted_utility_path rm 2>/dev/null || :)
-  [ -z "$_eec_rm" ] || "$_eec_rm" -rf "$_eec_scratch" 2>/dev/null || :
-  unset _eec_shell _eec_active _eec_plan _eec_scratch _eec_probe _eec_rm
-  return 0
+  _eec_mkdir=$(trusted_utility_path mkdir) || { remove_tree "$_eec_scratch"; return 1; }
+  if ! "$_eec_mkdir" -p "$_eec_scratch/zdot" "$_eec_scratch/xdg/config" "$_eec_scratch/xdg/data" \
+    "$_eec_scratch/xdg/state" "$_eec_scratch/xdg/cache" "$_eec_scratch/tmp"; then
+    remove_tree "$_eec_scratch"
+    unset _eec_shell _eec_active _eec_plan _eec_interp _eec_scratch _eec_mkdir
+    return 1
+  fi
+  # The probe is a FILE, so no quoting layer can reinterpret a path. It takes
+  # the dump destination and the plan as ordinary arguments and hands the plan
+  # to the interpreter as a positional parameter, so nothing nests a -c script
+  # inside another string. `exec env -0` replaces the shell after the plan has
+  # been sourced, so the dump can only contain the post-plan environment: the
+  # plan's own stdout goes to /dev/null and cannot inject a KEY=VALUE line.
+  _eec_probe="$_eec_scratch/probe.sh"
+  printf '%s\n' \
+    '_mode=$1 _out=$2 _plan=$3 _interp=$4' \
+    '_fixture() {' \
+    '  env -i HOME="$EEC_HOME" ZDOTDIR="$EEC_ZDOT" BASH_ENV=/dev/null ENV=/dev/null \' \
+    '    PATH=/usr/bin:/bin TMPDIR="$EEC_TMP" \' \
+    '    XDG_CONFIG_HOME="$EEC_XC" XDG_DATA_HOME="$EEC_XD" XDG_STATE_HOME="$EEC_XS" \' \
+    '    XDG_CACHE_HOME="$EEC_XK" "$@"' \
+    '}' \
+    'if [ "$_mode" = plan ]; then' \
+    '  _fixture VALISE_MODULE_ROOT="$EEC_ROOT" "$_interp" -c '"'"'. "$1" >/dev/null 2>&1 || exit 96; exec env -0'"'"' probe "$_plan" >"$_out" 2>/dev/null' \
+    '  exit $?' \
+    'fi' \
+    '_fixture "$_interp" -c '"'"'exec env -0'"'"' >"$_out" 2>/dev/null' \
+    >"$_eec_probe" || {
+    remove_tree "$_eec_scratch"
+    unset _eec_shell _eec_active _eec_plan _eec_interp _eec_scratch _eec_mkdir _eec_probe
+    return 1
+  }
+  _eec_status=0
+  env -i PATH=/usr/bin:/bin \
+    EEC_HOME="${HOME:-/}" EEC_ZDOT="$_eec_scratch/zdot" EEC_TMP="$_eec_scratch/tmp" \
+    EEC_XC="$_eec_scratch/xdg/config" EEC_XD="$_eec_scratch/xdg/data" \
+    EEC_XS="$_eec_scratch/xdg/state" EEC_XK="$_eec_scratch/xdg/cache" \
+    EEC_ROOT="$_eec_active" \
+    sh "$_eec_probe" base "$_eec_scratch/base" "$_eec_plan" "$_eec_interp" || _eec_status=$?
+  if [ "$_eec_status" -eq 0 ]; then
+    env -i PATH=/usr/bin:/bin \
+      EEC_HOME="${HOME:-/}" EEC_ZDOT="$_eec_scratch/zdot" EEC_TMP="$_eec_scratch/tmp" \
+      EEC_XC="$_eec_scratch/xdg/config" EEC_XD="$_eec_scratch/xdg/data" \
+      EEC_XS="$_eec_scratch/xdg/state" EEC_XK="$_eec_scratch/xdg/cache" \
+      EEC_ROOT="$_eec_active" \
+      sh "$_eec_probe" plan "$_eec_scratch/target" "$_eec_plan" "$_eec_interp" || _eec_status=$?
+  fi
+  if [ "$_eec_status" -ne 0 ]; then
+    case "$_eec_status" in
+    96) printf 'valise: error: the env plan for shell %s failed to load\n' "$_eec_shell" >&2 ;;
+    *) printf 'valise: error: the env capture for shell %s failed (status %s)\n' "$_eec_shell" "$_eec_status" >&2 ;;
+    esac
+    remove_tree "$_eec_scratch"
+    unset _eec_shell _eec_active _eec_plan _eec_interp _eec_scratch _eec_mkdir _eec_probe _eec_status
+    return 1
+  fi
+  # Diff the two dumps as SOH records. Both sides come from the SAME
+  # interpreter and fixture environment, so incidental shell variables cancel
+  # instead of being captured. A key present on both sides with a DIFFERENT
+  # value is a real override and is kept; a key present only in the target is
+  # an export. Records are matched by FILENAME, never by record count, so an
+  # empty baseline cannot shift which side a record belongs to.
+  _eec_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+  _eec_tr=$(trusted_utility_path tr) || die "no trusted tr utility available"
+  _eec_result=0
+  _eec_diagnosed=0
+  "$_eec_tr" '\000' '\001' <"$_eec_scratch/base" >"$_eec_scratch/base.soh" || _eec_result=1
+  "$_eec_tr" '\000' '\001' <"$_eec_scratch/target" >"$_eec_scratch/target.soh" || _eec_result=1
+  if [ "$_eec_result" -eq 0 ]; then
+    BASE="$_eec_scratch/base.soh" TARGET="$_eec_scratch/target.soh" "$_eec_awk" '
+      BEGIN { RS = "\001"; ORS = "\001" }
+      function key_of(rec,   at) { at = index(rec, "="); return at ? substr(rec, 1, at - 1) : "" }
+      FILENAME == ENVIRON["BASE"] { base_key[key_of($0)] = $0; next }
+      FILENAME == ENVIRON["TARGET"] {
+        k = key_of($0)
+        if (k == "") next
+        if (k in base_key) { if (base_key[k] != $0) print $0; next }
+        print $0
+      }
+    ' "$_eec_scratch/base.soh" "$_eec_scratch/target.soh" \
+      >"$_eec_scratch/diff.soh" || _eec_result=1
+  fi
+  if [ "$_eec_result" -eq 0 ]; then
+    # A value containing a newline cannot be represented in environment.d
+    # (one KEY=VALUE per line), in a plist string, or in WSLENV. Truncating it
+    # silently would publish a WRONG value to the GUI session, so the capture
+    # refuses: name the owning key and fail. This is why the dumps are
+    # NUL/SOH separated - a line-based diff could not even detect the case.
+    _eec_diagnosed=0
+    if ! "$_eec_awk" '
+      BEGIN { RS = "\001"; bad = 0 }
+      {
+        if (index($0, "\n") == 0) next
+        name = $0; sub(/=.*/, "", name)
+        printf "valise: error: the env plan sets %s to a value containing a newline; GUI env formats cannot represent it\n", name > "/dev/stderr"
+        bad = 1
+      }
+      END { exit bad ? 1 : 0 }
+    ' "$_eec_scratch/diff.soh"; then
+      _eec_result=1
+      _eec_diagnosed=1
+    fi
+  fi
+  if [ "$_eec_result" -eq 0 ]; then
+    "$_eec_awk" '
+      BEGIN { RS = "\001"; ORS = "" }
+      {
+        name = $0; sub(/=.*/, "", name)
+        if (name !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next
+        if (name == "_" || name == "HOME" || name == "PATH" || name == "PWD" ||
+            name == "SHLVL" || name == "OLDPWD" || name == "VALISE_MODULE_ROOT" ||
+            name == "ZDOTDIR" || name == "BASH_ENV" || name == "ENV" ||
+            name == "XDG_CONFIG_HOME" || name == "XDG_DATA_HOME" ||
+            name == "XDG_STATE_HOME" || name == "XDG_CACHE_HOME" || name == "TMPDIR") next
+        print $0 "\n"
+      }
+    ' "$_eec_scratch/diff.soh"
+  fi
+  if [ "$_eec_result" -ne 0 ]; then
+    [ "$_eec_diagnosed" = 1 ] ||
+      printf 'valise: error: the env capture for shell %s could not be read\n' "$_eec_shell" >&2
+  fi
+  remove_tree "$_eec_scratch"
+  _eec_rc=$_eec_result
+  unset _eec_shell _eec_active _eec_plan _eec_interp _eec_scratch _eec_mkdir _eec_probe _eec_status
+  unset _eec_awk _eec_tr _eec_result _eec_diagnosed
+  return "$_eec_rc"
 }
 
 # env_export_emit <format> <capture-lines>: render captured KEY=VALUE pairs in
-# the requested GUI-bridge format.
+# the requested GUI-bridge format. Unknown formats fail without leaking the
+# private state used here.
 env_export_emit() {
   _eee_format=$1
   _eee_capture=$2
+  _eee_awk=$(trusted_utility_path awk) || {
+    unset _eee_format _eee_capture
+    return 1
+  }
+  _eee_rc=0
   case "$_eee_format" in
   environment.d)
-    # environment.d values are double-quoted when they contain whitespace or
-    # shell metacharacters; plain values stay bare. The leading comment marks
-    # the file as valise-owned so uninstall only removes its own bridge.
+    # environment.d(5) is read by systemd's environment generator, which
+    # performs $VAR/${VAR} expansion EVEN INSIDE double quotes. A literal `$`
+    # must therefore be written `$$`, or a value like `$HOME/bin` silently
+    # becomes the GUI session's home directory. Values are double-quoted when
+    # they contain whitespace or a metacharacter, with backslash and double
+    # quote escaped; plain values stay bare.
+    #
+    # The metacharacters are tested with an index() loop over a literal
+    # string: inside a POSIX bracket expression `\]` is backslash followed by a
+    # literal `]` that CLOSES the class, so a class spelled that way has
+    # implementation-defined meaning (BWK, gawk and BusyBox happen to agree;
+    # that is luck, not portability).
     printf '%s\n' '# written by valise (gui_env=systemd); do not edit'
-    printf '%s\n' "$_eee_capture" | awk -F= '
+    printf '%s\n' "$_eee_capture" | "$_eee_awk" -F= '
+      function needs_quoting(val,   i, c, metas) {
+        metas = " \t\n\"'"'"'\\$`!*?[]{}()<>|;&"
+        for (i = 1; i <= length(val); i++) {
+          c = substr(val, i, 1)
+          if (index(metas, c) > 0) return 1
+        }
+        return 0
+      }
       /^[A-Za-z_][A-Za-z0-9_]*=/ {
         key = $1
         sub(/^[^=]*=/, "")
         val = $0
-        if (val ~ /[[:space:]"'"'"'\\$`!*?\[\]{}()<>|;&]/) {
+        gsub(/\$/, "$$", val)
+        if (needs_quoting(val)) {
           gsub(/\\/, "\\\\", val); gsub(/"/, "\\\"", val)
           printf "%s=\"%s\"\n", key, val
         } else {
           printf "%s=%s\n", key, val
         }
       }
-    '
+    ' || _eee_rc=1
     ;;
   launchd)
-    # A LaunchAgent whose program runs one launchctl setenv per variable.
+    # A LaunchAgent whose program runs one launchctl setenv per variable. The
+    # command string is executed by /bin/sh, so every key and value is
+    # SINGLE-QUOTED for the shell FIRST and XML-escaped exactly once after.
+    # Without the shell quoting, a value containing a space split into extra
+    # argv words, and `;`, `$`, a backtick or a quote injected shell syntax -
+    # `plutil -lint` cannot see any of that, because the plist is well formed.
+    #
     # The comment line is the ownership marker: uninstall removes the plist
-    # only when this exact first line is present, so a foreign LaunchAgent
-    # that happens to use the same Label is never deleted.
+    # only when this exact line is present, so a foreign LaunchAgent that
+    # happens to use the same Label is never deleted.
     printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
       '<!-- written by valise (gui_env=launchd); do not edit -->' \
       '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
@@ -221,41 +420,61 @@ env_export_emit() {
       '  <key>Label</key><string>sh.valise.env</string>' \
       '  <key>ProgramArguments</key><array>' \
       '    <string>/bin/sh</string><string>-c</string>'
-    printf '%s\n' "$_eee_capture" | awk -F= '
+    printf '%s\n' "$_eee_capture" | "$_eee_awk" -F= '
+      function shq(s) { gsub(/'"'"'/, "'"'"'\\'"'"''"'"'", s); return "'"'"'" s "'"'"'" }
       BEGIN { cmd = "" }
       /^[A-Za-z_][A-Za-z0-9_]*=/ {
         key = $1; sub(/^[^=]*=/, ""); val = $0
-        # XML-escape the pair exactly once; the joined command is already
-        # escaped, so END must not re-escape it (double-escaping corrupts
-        # values containing & < > ").
-        esc = key " " val
-        gsub(/&/, "\\&amp;", esc); gsub(/</, "\\&lt;", esc); gsub(/>/, "\\&gt;", esc)
-        gsub(/"/, "\\&quot;", esc)
-        if (cmd == "") cmd = "launchctl setenv " esc
-        else cmd = cmd "; launchctl setenv " esc
+        pair = "launchctl setenv " shq(key) " " shq(val)
+        if (cmd == "") cmd = pair
+        else cmd = cmd "; " pair
       }
       END {
-        if (cmd != "") printf "    <string>%s</string>\n", cmd
+        # An empty capture must still produce a command /bin/sh can run: a
+        # bare `sh -c` with no command string exits 2 on every login.
+        if (cmd == "") cmd = ":"
+        gsub(/&/, "\\&amp;", cmd); gsub(/</, "\\&lt;", cmd); gsub(/>/, "\\&gt;", cmd)
+        gsub(/"/, "\\&quot;", cmd)
+        printf "    <string>%s</string>\n", cmd
       }
-    '
+    ' || _eee_rc=1
     printf '%s\n' '  </array>' \
       '  <key>RunAtLoad</key><true/>' \
       '</dict></plist>'
     ;;
   wsl)
-    # WSLENV carries names with flags, not values; PATH-like vars get /p
-    # (persist into Win32), everything else /l (WSL-only).
-    printf '%s\n' "$_eee_capture" | awk -F= '
-      /^[A-Za-z_][A-Za-z0-9_]*=/ {
-        key = $1
-        flag = (key ~ /PATH/) ? "/p" : "/l"
-        printf "%s%s\n", key, flag
+    # WSLENV carries NAMES with flags, not values, as one colon-joined string.
+    # Per Microsoft: /p translates a path between WSL and Win32, /l marks a
+    # colon-delimited path LIST, /u is Win32->WSL only, /w is WSL->Win32 only.
+    # A bare name is passed through untranslated. Deriving the flag from a
+    # substring of the key (`key ~ /PATH/`) is wrong twice over: it mislabels
+    # CLASSPATH/MANPATH as single paths, and it invents a rule the format does
+    # not have.
+    printf '%s\n' "$_eee_capture" | "$_eee_awk" -F= '
+      function is_path_list(val,   n, i, parts) {
+        if (index(val, ":") == 0) return 0
+        n = split(val, parts, ":")
+        for (i = 1; i <= n; i++) {
+          if (parts[i] == "" || substr(parts[i], 1, 1) != "/") return 0
+        }
+        return 1
       }
-    '
+      function is_path(val) { return val != "" && substr(val, 1, 1) == "/" }
+      BEGIN { out = "" }
+      /^[A-Za-z_][A-Za-z0-9_]*=/ {
+        key = $1; sub(/^[^=]*=/, ""); val = $0
+        if (is_path_list(val)) entry = key "/l"
+        else if (is_path(val)) entry = key "/p"
+        else entry = key
+        out = out (out == "" ? "" : ":") entry
+      }
+      END { if (out != "") printf "WSLENV=%s\n", out }
+    ' || _eee_rc=1
     ;;
-  *) return 1 ;;
+  *) _eee_rc=1 ;;
   esac
-  unset _eee_format _eee_capture
+  unset _eee_format _eee_capture _eee_awk
+  return "$_eee_rc"
 }
 
 cmd_env() {
@@ -263,13 +482,15 @@ cmd_env() {
   --help | -h) usage_env; return 0 ;;
   export)
     shift
+    case "${1:-}" in
+    --help | -h) usage_env; return 0 ;;
+    esac
     _ee_format=${1:-}
     case "$_ee_format" in
     environment.d|launchd|wsl) ;;
     *) die "usage: valise env export <environment.d|launchd|wsl>" ;;
     esac
     [ $# -eq 1 ] || die "usage: valise env export <environment.d|launchd|wsl>"
-    _ee_active=$(active_release_dir 2>/dev/null) || die "no active release: run valise install first"
     _ee_shell=sh
     case "${SHELL:-}" in
     */zsh|zsh) _ee_shell=zsh ;;
@@ -277,8 +498,8 @@ cmd_env() {
     */bash|bash) _ee_shell=bash ;;
     esac
     _ee_capture=$(env_export_capture "$_ee_shell") || die "cannot capture the env plan for shell $_ee_shell"
-    env_export_emit "$_ee_format" "$_ee_capture"
-    unset _ee_format _ee_active _ee_shell _ee_capture
+    env_export_emit "$_ee_format" "$_ee_capture" || die "cannot render the $_ee_format format"
+    unset _ee_format _ee_shell _ee_capture
     return 0
     ;;
   '') ;;
@@ -310,22 +531,40 @@ lint_report() {
   [ "$1" != FAIL ] || _lint_problems=$((_lint_problems + 1))
 }
 
-# _lint_path_scan <file> <module>: reject raw PATH assignments in an
-# env-phase module body. Covers 'PATH=...', 'export PATH=...', and
-# whitespace-prefixed variants; valise_path_prepend/append writes go through
-# the helper and are fine. The scan is a regex on source lines, so it is an
-# authoring-time advisory guard, not a security boundary: releases are sealed
-# by the manifest, and indirect writes (PATH+=, eval, ${PATH:=...}) are not
-# textually detectable here.
+# _lint_path_scan <file> <module>: reject raw PATH assignments in a module
+# body. The env plan is re-sourced at every startup entry point and the
+# interactive plan is re-sourced on a release switch (and on `source ~/.bashrc`
+# in a live shell), so a raw 'PATH=...:$PATH' duplicates entries in EVERY
+# phase. PATH changes go through valise_path_prepend/valise_path_append.
+#
+# The scan is a regex on source lines, so it is an authoring-time ADVISORY
+# guard, not a security boundary: releases are sealed by the manifest, and
+# indirect writes (PATH+=, eval, ${PATH:=...}) are not textually detectable.
+# Comment lines are skipped, and so are *.fish bodies: Fish mutates PATH with
+# `set -x PATH`, which this POSIX rule says nothing about.
 _lint_path_scan() {
   _lps_file=$1
   _lps_mod=$2
   [ -f "$_lps_file" ] || return 0
-  _lps_hits=$(grep -nE '(^|[;&|[:space:]])export[[:space:]]+PATH=|(^[[:space:]]*)PATH=' "$_lps_file" 2>/dev/null || :)
-  if [ -n "$_lps_hits" ]; then
-    lint_report FAIL "$_lps_mod: env-phase body assigns PATH directly (line $(printf '%s' "$_lps_hits" | head -n 1 | cut -d: -f1)); use valise_path_prepend/valise_path_append (requires=valise_path) so re-evaluation stays idempotent"
+  case "$_lps_file" in
+  *.fish) unset _lps_file _lps_mod; return 0 ;;
+  esac
+  _lps_grep=$(trusted_utility_path grep) || die "no trusted grep utility available"
+  # A separator or a command keyword before the assignment catches
+  # 'true; PATH=...', 'x && PATH=...', and 'export A=1 PATH=...' as well as the
+  # simple leading form. '#' comment lines are excluded by the same pattern.
+  _lps_hits=$("$_lps_grep" -nE \
+    '(^|[;&|]|[[:space:]])(export[[:space:]]+([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*)?PATH=' \
+    "$_lps_file" 2>/dev/null || :)
+  _lps_hits=$(printf '%s\n' "$_lps_hits" |
+    "$_lps_grep" -vE '^[0-9]+:[[:space:]]*#' 2>/dev/null || :)
+  if [ -n "${_lps_hits// /}" ]; then
+    _lps_head=$(trusted_utility_path head) || die "no trusted head utility available"
+    _lps_line=$(printf '%s\n' "$_lps_hits" | "$_lps_head" -n 1)
+    _lps_lineno=${_lps_line%%:*}
+    lint_report FAIL "$_lps_mod: body assigns PATH directly (line $_lps_lineno); use valise_path_prepend/valise_path_append (requires=valise_path) so re-evaluation stays idempotent"
   fi
-  unset _lps_file _lps_mod _lps_hits
+  unset _lps_file _lps_mod _lps_grep _lps_hits _lps_head _lps_line _lps_lineno
 }
 
 # lint_parse <class> <file> <label>
@@ -469,15 +708,12 @@ cmd_lint() {
         lint_parse "$_lint_class" "$_lint_dir/$_lint_file" "${_lint_rel:+$_lint_rel/}$_lint_file"
       done
     done
-    # Env-phase bodies must not mutate PATH with raw assignments: the env plan
-    # is re-sourced at every startup entry point, so a raw 'PATH=...:$PATH'
-    # would duplicate entries on re-evaluation. PATH changes go through
-    # valise_path_prepend/append (requires=valise_path).
-    if [ -n "$_lint_load" ] && [ "$_lint_phase" = env ]; then
-      case "$_lint_src" in
-      valise) [ "$_lint_mname" = valise_path ] || _lint_path_scan "$_lint_dir/$_lint_load" "$_lint_mname" ;;
-      *) _lint_path_scan "$_lint_dir/$_lint_load" "$_lint_mname" ;;
-      esac
+    # Raw PATH assignment is rejected in every phase: the env plan re-runs at
+    # every startup entry point and the interactive plan re-runs on a release
+    # switch, so either phase duplicates entries. PATH changes go through
+    # valise_path_prepend/valise_path_append (requires=valise_path).
+    if [ -n "$_lint_load" ]; then
+      _lint_path_scan "$_lint_dir/$_lint_load" "$_lint_mname"
     fi
   done <"$_dev_tmp/lint-rows"
   lint_report ok "$_lint_parsed syntax check(s)"

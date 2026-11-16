@@ -185,6 +185,7 @@ _module phase_env 'valise_path' phase_env_loaded any read-only 'phase_env_loaded
 valise_path_prepend /usr/local/bin'
 _module phase_interactive phase_env phase_interactive_loaded any read-only 'phase_interactive_loaded() { :; }'
 printf 'phase=interactive\n' >>"$_project/module.d/phase_interactive.meta"
+printf 'commands=phase_interactive_loaded\n' >>"$_project/module.d/phase_interactive.meta"
 
 unset _other_platform
 
@@ -305,6 +306,7 @@ else
 fi
 
 # A shell whose closure has no interactive modules gets no interactive plan.
+# A shell whose closure has no interactive modules gets no interactive plan.
 if [ -f "$_tmp/release-phase-env-only/plans/bash.sh" ] &&
   grep -F 'phase_env@' "$_tmp/release-phase-env-only/plans/bash.sh" >/dev/null &&
   { [ ! -e "$_tmp/release-phase-env-only/plans/bash-interactive.sh" ] ||
@@ -312,6 +314,51 @@ if [ -f "$_tmp/release-phase-env-only/plans/bash.sh" ] &&
   pass "no interactive modules land in the env-only shell closure plans"
 else
   fail "no interactive modules land in the env-only shell closure plans"
+fi
+
+# An interactive module may require an env module (the env plan loads first at
+# every entry point), which the phase bundle above already proves. The reverse
+# is broken and must be rejected: the env plan never contains the interactive
+# dependency, so the env module would load with it permanently absent.
+_cross_proj="$_tmp/proj-cross-phase"
+cp -R "$_project" "$_cross_proj"
+rm -rf "$_cross_proj/build"
+# A standalone interactive module: requiring the existing phase_interactive
+# would close a cycle instead of exercising the phase rule.
+_module_on() {
+  _mo_root=$1
+  _mo_name=$2
+  _mo_phase=$3
+  printf '%s\n' \
+    "name=$_mo_name" 'requires=' 'optional=' 'shells=posix' 'platforms=any' \
+    'side_effect=read-only' "exports=${_mo_name}_loaded" "load=modules/$_mo_name.sh" \
+    "phase=$_mo_phase" >"$_mo_root/module.d/$_mo_name.meta"
+  printf '%s_loaded() { :; }\n' "$_mo_name" >"$_mo_root/modules/$_mo_name.sh"
+  unset _mo_root _mo_name _mo_phase
+}
+_module_on "$_cross_proj" crossint interactive
+sed 's/^requires=.*/requires=crossint/' "$_cross_proj/module.d/phase_env.meta" >"$_tmp/cross.meta" &&
+  mv "$_tmp/cross.meta" "$_cross_proj/module.d/phase_env.meta"
+printf 'bundle\tshell\troots\ndefault\tbash\tphase_env\n' >"$_cross_proj/bundles.tsv"
+if ( cd "$_cross_proj" && "$_valise" build >"$_tmp/cross.out" 2>"$_tmp/cross.err" ); then
+  fail "compile rejects an env module that requires an interactive one"
+  cat "$_tmp/cross.out" >&2
+elif grep -F 'env module phase_env requires interactive module crossint' "$_tmp/cross.err" >/dev/null; then
+  pass "compile rejects an env module that requires an interactive one"
+else
+  fail "compile did not name both modules in the cross-phase diagnostic"
+  cat "$_tmp/cross.err" >&2
+fi
+
+# A command plan is phase-agnostic: a published command of an
+# interactive-phase module must find its own body in plans/commands/<m>.sh.
+if [ -f "$_tmp/release-phase/plans/commands/phase_interactive.sh" ] &&
+  grep -F '# plan=bash phase=all' "$_tmp/release-phase/plans/commands/phase_interactive.sh" >/dev/null &&
+  grep -F 'phase_interactive@' "$_tmp/release-phase/plans/commands/phase_interactive.sh" >/dev/null; then
+  pass "a command plan renders the whole closure regardless of phase"
+else
+  fail "a command plan was filtered by phase"
+  head -6 "$_tmp/release-phase/plans/commands/phase_interactive.sh" >&2 2>/dev/null || :
 fi
 
 # Runtime proof: the env plan loads env exports only and stays silent; the
