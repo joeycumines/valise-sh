@@ -85,9 +85,11 @@ usage_install() {
     "for bash; to ~/.bashrc and ~/.zshrc when that shell is \$SHELL or the file" \
     "exists; to ~/.zprofile when zsh is installed or the file exists; and to" \
     "~/.zshenv, because every zsh invocation reads it. Stage 1 (the env plan) goes" \
-    "into all of them; stage 2 (the interactive plan) goes only into the shell's" \
-    "rc-stage file - ~/.bashrc, ~/.zshrc, or the \$ENV shim - so interactive setup" \
-    "cannot run before your own rc file. Symlinked files are left alone. The \$ENV" \
+    "into all of them; stage 2 (the interactive plan) goes into the shell's" \
+    "rc-stage file - ~/.bashrc, ~/.zshrc, or the \$ENV shim - and into the bash" \
+    "login file, placed last, so an interactive login reaches it. Stage 2 never" \
+    "goes into ~/.zshenv or ~/.zprofile, so interactive setup cannot run before" \
+    "your own rc file. Symlinked files are left alone. The \$ENV" \
     "shim is written to \$XDG_CONFIG_HOME/valise/env.sh and points an sh/ksh" \
     "subshell at itself. A Fish conf.d hook is written when Fish is installed." \
     "Each install replaces the block in place, keeping every other byte. Each" \
@@ -187,7 +189,9 @@ usage_env() {
     "environment against a baseline. It fails naming the variable when a value" \
     "cannot be represented (a newline, or a control byte outside XML 1.0), and it" \
     "names every excluded variable on stderr - PATH and the XDG roots are not" \
-    "bridged, because a GUI session sets its own." \
+    "bridged, because a GUI session sets its own. An empty value cannot be" \
+    "bridged to environment.d, and is refused by name; unset the variable instead." \
+    "The bridge file is written mode 0600." \
     "" \
     "environment.d emits KEY=VALUE lines for ~/.config/environment.d/," \
     "launchd emits a ~/Library/LaunchAgents plist running launchctl setenv per" \

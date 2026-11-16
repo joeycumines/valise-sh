@@ -366,7 +366,18 @@ run_lane() {
     # later run.
     _stage2_file=$(_e2e_rc_file_for "$_shell_name" "$_tmp_home")
     _stage1_only=$(_e2e_stage1_only_file "$_class" "$_tmp_home")
-    if [ "$_stage1_only" = "$_stage2_file" ]; then
+    if [ "$_class" = bash ] && [ "$_shell_name" = bash ]; then
+      # A login bash reads ONLY its login file (never .bashrc), so that file is
+      # the one place a login shell can reach the interactive stage. In a fresh
+      # home it is .profile, and it carries the interactive stage at its end;
+      # .bashrc carries it too for non-login interactive shells.
+      if grep -q 'case \$- in \*i\*)' "$_tmp_home/.profile" 2>/dev/null &&
+        grep -q 'case \$- in \*i\*)' "$_tmp_home/.bashrc" 2>/dev/null; then
+        pass "$_lane/$_shell_name: the bash login file and .bashrc both carry the interactive stage"
+      else
+        fail "$_lane/$_shell_name: the bash login file does not carry the interactive stage"
+      fi
+    elif [ "$_stage1_only" = "$_stage2_file" ]; then
       :
     elif grep -q 'case \$- in \*i\*)' "$_stage1_only" 2>/dev/null; then
       fail "$_lane/$_shell_name: $_stage1_only carries the interactive stage"

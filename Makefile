@@ -19,7 +19,7 @@ TEST_ENV_PATH = /usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
 TEST_RUNNER = umask 022; PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_CONSUMER_PROFILE="$${VALISE_CONSUMER_PROFILE:-}" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_REQUIRED_PARSERS="$(VALISE_REQUIRED_PARSERS)" MACOS_PROFILE_PARSER_SEARCH_PATH="$${MACOS_PROFILE_PARSER_SEARCH_PATH:-}" T07_TEST_CHILD_SHELL="$${T07_TEST_CHILD_SHELL:-/bin/bash}" T07_TEST_CHILD_SHELL_ARGS="$${T07_TEST_CHILD_SHELL_ARGS:-}" T07_TEST_CHILD_PATH="$${T07_TEST_CHILD_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
 RUNTIME_TEST_RUNNER = umask 022; PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_LINUX_IMAGE="$${VALISE_LINUX_IMAGE:-}" VALISE_BSD_IMAGE="$${VALISE_BSD_IMAGE:-}" VALISE_RUNTIME_SEARCH_PATH="$${VALISE_RUNTIME_SEARCH_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
 
-check: syntax test test-fish-syntax test-docs test-detection-contract-busybox test-loader-multi-root-lanes test-e2e
+check: syntax test test-fish-syntax test-docs test-detection-contract-busybox test-loader-multi-root-lanes test-e2e test-startup-state
 
 FISH ?= $(shell PATH="$(TEST_ENV_PATH)" command -v fish 2>/dev/null)
 
@@ -196,6 +196,9 @@ test-contrib-modules: tests/contrib-modules.test.sh entrypoints/profile.sh lib/m
 
 test-non-macos-runtime: tests/non-macos-runtime.test.sh manifests/parser-support.tsv entrypoints/profile.sh lib/capabilities.sh lib/metadata.sh lib/loader.sh module.d/valise_platform_posix.meta module.d/valise_platform_linux.meta module.d/valise_platform_bsd.meta modules/platform/posix.sh modules/platform/linux/capabilities.sh modules/platform/bsd/capabilities.sh
 	@$(RUNTIME_TEST_RUNNER)
+
+test-startup-state: tests/startup-state.test.sh bin/valise $(VALISE_CLI_LIBS) lib/compiler.awk lib/capabilities.sh
+	@$(TEST_RUNNER)
 
 test-cli-posix: tests/cli-posix.test.sh bin/valise $(VALISE_CLI_LIBS)
 	@$(TEST_RUNNER)

@@ -218,6 +218,28 @@ _claim_present "projects.md warns the dry run does not execute module bodies" \
 _claim_present "installation.md states the bridge mode" \
   "0600" "docs/installation.md"
 
+# Round-two corrections: each claim below was reproduced or refuted with a probe.
+_claim_absent "no doc says the ENV stanza acts only when ENV is empty (the $ and ~ cases are left unchanged)" \
+  "The stanza acts only when"
+_claim_absent "no doc says the systemd generator runs once" \
+  "the environment generator runs once"
+_claim_absent "no doc says a non-interactive bash reads neither .bashrc nor .profile over ssh" \
+  "reads neither \`~/.bashrc\` nor \`~/.profile\`"
+_claim_absent "no doc says stage 2 is never in ~/.profile (a login bash reads it)" \
+  "never into \`~/.zshenv\` or \`~/.profile\`"
+_claim_present "installation.md says a login bash reads the interactive stage from its login file" \
+  "a login bash never reads \`~/.bashrc\`" "docs/installation.md"
+_claim_present "installation.md states the ENV stanza leaves a \$ or ~ value unchanged" \
+  "the stanza leaves \`ENV\`" "docs/installation.md"
+_claim_present "installation.md documents the refusal of unrepresentable bridge values" \
+  "refuses them by name" "docs/installation.md"
+_claim_present "installation.md documents the PATH re-evaluation in a later startup file" \
+  "changed \`PATH\`" "docs/installation.md"
+_claim_present "architecture.md names the bash remote-shell build dependence" \
+  "depends" "docs/architecture.md"
+_claim_present "installation.md keeps the unverified systemd reload behaviour flagged as unexercised" \
+  "was not" "docs/installation.md"
+
 printf '\n=== doc-link case-sensitivity summary (%s) ===\n' "$TREE_ROOT"
 printf 'Total: %d  Pass: %d  Fail: %d\n' "$_total" "$_pass" "$_fail"
 

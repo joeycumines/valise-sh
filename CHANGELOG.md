@@ -73,6 +73,21 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 
 ### Fixed
 
+- A GUI env bridge can no longer carry a value that adds variables or is truncated: a newline followed by an assignment-shaped line, a U+FFFE or U+FFFF, and (for `environment.d`) an empty value are refused by name before the active release changes. The first offending key is named where the dump can name it.
+- The env capture keeps your TMPDIR and XDG roots exactly as set or unset, so a module's derived export and its `:=` default match a real session.
+- The env capture uses `/bin/sh` for the `sh` class, so it works on a host without dash.
+- A required env dependency that failed in one startup file no longer lets its interactive dependent run in a later file, including after a zsh login repair pass; a failed env evaluation is no longer treated as a success.
+- An interactive bash login shell reaches the interactive plan through its login file (`.bash_profile`, `.bash_login`, or `.profile`), placed last, so `bash --login -i` loads it.
+- A later startup file that changes `PATH` re-asserts the env plan, so a `valise_path_prepend` entry survives a user rc file that resets PATH.
+- Switching A to B to A in one shell restores A's interactive definitions, including when B has no interactive plan.
+- A module's export is replaced only by the same module on reload; a different module exporting the same name, or a caller's function, is reported instead of silently replaced.
+- `valise_test_reload` runs a dependent once its failed dependency is repaired.
+- `gui_env=off` removes the owned bridge files as one set: a failed removal leaves every file in place.
+- A failed bridge publish during `release use` restores the previous-release record, so `release rollback` does not select the active release.
+- `apply --dry-run` reports a bridge mode for another platform as skipped, as the write path does.
+- `valise doctor` no longer reports a fresh install's env-only startup blocks as legacy.
+- The dev-commands test suite again removes its scratch directory on a normal exit.
+
 - `valise lint` aborted with `Bad substitution` under a `#!/bin/sh` that is
   dash (the primary Linux case), because the PATH scan used a bash-only
   parameter expansion. The scan now uses a POSIX test, and the suite RUNS the

@@ -307,35 +307,88 @@ write_gui_env_bridge() {
 }
 
 
-# remove_gui_env_bridge: delete the valise-owned bridge files, if any. A
-# user-owned file at a bridge path is reported and left alone.
+# _rgb_candidate <mode> <file>: 0 when <file> is a regular, valise-owned bridge
+# that may be removed. A symlink or a user-owned file is reported and left alone.
+_rgb_candidate() {
+  if [ -L "$2" ]; then
+    info "warning: leaving $2: it is a symlink"
+    return 1
+  fi
+  [ -f "$2" ] || return 1
+  if bridge_is_valise_owned "$1" "$2"; then
+    return 0
+  fi
+  info "warning: leaving $2: it is not the valise GUI env bridge"
+  return 1
+}
+
+# remove_gui_env_bridge: remove every valise-owned bridge file, as one set. The
+# two files can coexist (a migrated or shared home), so a removal that fails on
+# the second file must not have already deleted the first. Phase 1 renames each
+# owned file aside, and a failed rename puts the renamed files back; phase 2
+# deletes the set-aside files, and reports any delete that fails with its path.
 remove_gui_env_bridge() {
   if ! _rgb_rm=$(trusted_utility_path rm); then
     printf 'valise: error: no trusted rm utility is available to remove the GUI env bridge\n' >&2
     return 1
   fi
+  if ! _rgb_mv=$(trusted_utility_path mv); then
+    printf 'valise: error: no trusted mv utility is available to remove the GUI env bridge\n' >&2
+    unset _rgb_rm
+    return 1
+  fi
+  _rgb_sys=$(gui_env_file systemd 2>/dev/null) || _rgb_sys=
+  _rgb_lad=$(gui_env_file launchd 2>/dev/null) || _rgb_lad=
+  _rgb_sys_aside=
+  _rgb_lad_aside=
   _rgb_rc=0
-  for _rgb_mode in systemd launchd; do
-    _rgb_file=$(gui_env_file "$_rgb_mode" 2>/dev/null) || continue
-    [ -n "$_rgb_file" ] || continue
-    if [ -L "$_rgb_file" ]; then
-      info "warning: leaving $_rgb_file: it is a symlink"
-    elif [ -f "$_rgb_file" ]; then
-      if bridge_is_valise_owned "$_rgb_mode" "$_rgb_file"; then
-        if "$_rgb_rm" -f "$_rgb_file"; then
-          info "removed the $_rgb_mode bridge: $_rgb_file"
-        else
-          # Reporting success while the file is still there is the failure mode
-          # this guards: say so and let the caller decide.
-          printf 'valise: error: cannot remove the %s GUI env bridge: %s\n' "$_rgb_mode" "$_rgb_file" >&2
-          _rgb_rc=1
-        fi
-      else
-        info "warning: leaving $_rgb_file: it is not the valise GUI env bridge"
-      fi
+  if [ -n "$_rgb_sys" ] && _rgb_candidate systemd "$_rgb_sys"; then
+    _rgb_sys_aside="$_rgb_sys.valise-remove.$$"
+    "$_rgb_mv" -f "$_rgb_sys" "$_rgb_sys_aside" 2>/dev/null || {
+      printf 'valise: error: cannot remove the systemd GUI env bridge: %s\n' "$_rgb_sys" >&2
+      _rgb_sys_aside=
+      _rgb_rc=1
+    }
+  fi
+  if [ "$_rgb_rc" -eq 0 ] && [ -n "$_rgb_lad" ] && _rgb_candidate launchd "$_rgb_lad"; then
+    _rgb_lad_aside="$_rgb_lad.valise-remove.$$"
+    "$_rgb_mv" -f "$_rgb_lad" "$_rgb_lad_aside" 2>/dev/null || {
+      printf 'valise: error: cannot remove the launchd GUI env bridge: %s\n' "$_rgb_lad" >&2
+      _rgb_lad_aside=
+      _rgb_rc=1
+    }
+  fi
+  if [ "$_rgb_rc" -ne 0 ]; then
+    # Phase 1 failed: put back every file already set aside, so no bridge is
+    # removed while the other one remains.
+    if [ -n "$_rgb_sys_aside" ] && ! "$_rgb_mv" -f "$_rgb_sys_aside" "$_rgb_sys" 2>/dev/null; then
+      printf 'valise: error: the systemd GUI env bridge was moved aside and could not be put back: %s\n' "$_rgb_sys_aside" >&2
     fi
-  done
-  unset _rgb_rm _rgb_mode _rgb_file
+    if [ -n "$_rgb_lad_aside" ] && ! "$_rgb_mv" -f "$_rgb_lad_aside" "$_rgb_lad" 2>/dev/null; then
+      printf 'valise: error: the launchd GUI env bridge was moved aside and could not be put back: %s\n' "$_rgb_lad_aside" >&2
+    fi
+    unset _rgb_rm _rgb_mv _rgb_sys _rgb_lad _rgb_sys_aside _rgb_lad_aside _rgb_rc
+    return 1
+  fi
+  # Phase 2: the set is committed. A delete that fails leaves its moved file
+  # behind, and that path is named.
+  if [ -n "$_rgb_sys_aside" ]; then
+    if "$_rgb_rm" -f "$_rgb_sys_aside"; then
+      info "removed the systemd bridge: $_rgb_sys"
+    else
+      printf 'valise: error: cannot remove the systemd GUI env bridge: %s\n' "$_rgb_sys_aside" >&2
+      _rgb_rc=1
+    fi
+  fi
+  if [ -n "$_rgb_lad_aside" ]; then
+    if "$_rgb_rm" -f "$_rgb_lad_aside"; then
+      info "removed the launchd bridge: $_rgb_lad"
+    else
+      printf 'valise: error: cannot remove the launchd GUI env bridge: %s\n' "$_rgb_lad_aside" >&2
+      _rgb_rc=1
+    fi
+  fi
+  unset _rgb_rm _rgb_mv _rgb_sys _rgb_lad _rgb_sys_aside _rgb_lad_aside
   return "$_rgb_rc"
 }
 
@@ -508,6 +561,13 @@ release_activate() {
   if [ -L "$VALISE_ACTIVE_LINK" ]; then
     _ra_old_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
   fi
+  # The switch rewrites the previous-release record to the outgoing release. If
+  # the bridge publish then fails, that record is put back as well as the link.
+  _ra_had_previous=0
+  _ra_old_previous=
+  if _ra_old_previous=$(read_previous_record); then
+    _ra_had_previous=1
+  fi
   switch_active_link "$_ra_dir"
   if [ "$_ra_bridge" -eq 1 ] && [ -n "${HOME:-}" ] && [ "$(cli_os_name)" != unknown ]; then
     if ! gui_env_bridge_publish; then
@@ -516,6 +576,7 @@ release_activate() {
       _ra_ln=$(trusted_utility_path ln 2>/dev/null || :)
       if [ -n "$_ra_old_target" ] && [ -n "$_ra_ln" ] &&
         "$_ra_ln" -sfn "$_ra_old_target" "$VALISE_ACTIVE_LINK" 2>/dev/null; then
+        restore_previous_record "$_ra_had_previous" "$_ra_old_previous"
         die "cannot publish the GUI env bridge for $_ra_id; the active release was left as ${_ra_old_target##*/}"
       fi
       die "cannot publish the GUI env bridge for $_ra_id; the active release was changed but its bridge was not"
@@ -528,6 +589,19 @@ release_activate() {
   fi
   release_lock
   unset _ra_id _ra_dir _ra_root _ra_parent _ra_manifest _ra_config_parent _ra_mkdir _ra_bridge _ra_old_target _ra_ln
+  unset _ra_had_previous _ra_old_previous
+}
+
+# restore_previous_record <had 0|1> <release-id>: put the previous-release record
+# back to what it was before a switch; remove it when none existed.
+restore_previous_record() {
+  if [ "$1" -eq 1 ]; then
+    write_previous_record "$2"
+  else
+    _rpr_rm=$(trusted_utility_path rm 2>/dev/null || :)
+    [ -z "$_rpr_rm" ] || "$_rpr_rm" -f "$(previous_record_path)" 2>/dev/null || :
+    unset _rpr_rm
+  fi
 }
 
 cmd_release_rollback() {
@@ -1024,10 +1098,18 @@ EOF
     printf '  none (gui_env=off)\n'
     ;;
   systemd | launchd)
+    # The write path (gui_env_bridge_stage) writes systemd only on Linux and
+    # launchd only on macOS; the preview must promise exactly that.
+    _ip_need=
+    case "$_ip_gui_mode" in
+    systemd) _ip_need=linux ;;
+    launchd) _ip_need=darwin ;;
+    esac
     _ip_gui=
-    _ip_gui=$(gui_env_file "$_ip_gui_mode" 2>/dev/null) || _ip_gui=
-    if [ -z "$_ip_gui" ]; then
-      printf '  skipped (%s is not this platform)\n' "$_ip_gui_mode"
+    if [ "$(cli_os_name)" != "$_ip_need" ]; then
+      printf '  skipped (gui_env=%s is not supported on %s)\n' "$_ip_gui_mode" "$(cli_os_name)"
+    elif ! _ip_gui=$(gui_env_file "$_ip_gui_mode" 2>/dev/null) || [ -z "$_ip_gui" ]; then
+      printf '  skipped (no bridge path for gui_env=%s)\n' "$_ip_gui_mode"
     elif [ -L "$_ip_gui" ]; then
       printf '  left alone (symlink): %s\n' "$_ip_gui"
     elif [ -e "$_ip_gui" ] && ! bridge_is_valise_owned "$_ip_gui_mode" "$_ip_gui"; then

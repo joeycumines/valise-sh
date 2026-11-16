@@ -52,17 +52,24 @@ contract, [module-abi.md](module-abi.md) the metadata,
    guarded by a release-id-keyed load guard), and stage 2 sources
    `plans/<class>-interactive.sh` only when `$-` contains `i`. **Stage 2 is
    written only into the shell's rc-stage file** — `~/.bashrc`, `~/.zshrc`, or
-   the `$ENV` shim — because an interactive zsh already has `i` in `$-` while
-   it reads `~/.zshenv`, and running interactive setup there would precede the
-   user's own `.zshrc`. Stage 1 goes into every entry point that can carry
+   the `$ENV` shim, and into the one file a login bash reads (`~/.bash_profile`,
+   else `~/.bash_login`, else `~/.profile`), placed last, because a login bash
+   never reads `~/.bashrc`. It is never written into `~/.zshenv` or
+   `~/.zprofile`: an interactive zsh already has `i` in `$-` while it reads
+   `~/.zshenv`, and running interactive setup there would precede the user's
+   own `.zshrc`. Stage 1 goes into every entry point that can carry
    env: `~/.profile`, the login files, `~/.zshenv`, `~/.zprofile`, and the
    `$ENV` shim. Non-interactive contexts therefore get the env plan, silently,
    but only in shells that read a startup file in that mode: zsh via
    `~/.zshenv`, and sh/ksh interactive subshells via `$ENV`. **bash is the
-   exception** — a non-interactive `bash -c`, and an `ssh host cmd` whose
-   remote shell is bash, reads neither `~/.bashrc` nor `~/.profile`, and
-   valise does not set `BASH_ENV`, so such a context gets no valise env. The
-   plan contains the load order; it reads no metadata. Fish verifies the
+   exception**: a non-interactive `bash -c` reads no startup file, and valise
+   does not set `BASH_ENV`, so it gets no valise env. An `ssh host cmd` depends
+   on how bash was built: bash can read `~/.bashrc` for a remote command when
+   its remote-shell detection is compiled in (the bash manual documents it).
+   valise does not rely on that behaviour. Sourcing `plans/<class>-interactive.sh`
+   by itself bypasses the availability the env plan carries forward; the managed
+   block is the supported entry point. The plan contains the load order; it
+   reads no metadata. Fish verifies the
    release, then runs the native Fish loader over the release's Fish metadata.
 
 There is one release shape. The plan is generated ahead of time so that

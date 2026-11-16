@@ -27,7 +27,7 @@ _cleanup() {
   chmod -R u+w "$_tmp" 2>/dev/null || :
   rm -rf -- "$_tmp"
 }
-trap 'printf "KEPT: %s\n" "$_tmp" >&2' EXIT
+trap '_cleanup' EXIT
 trap '_cleanup; exit 130' INT
 trap '_cleanup; exit 143' TERM
 
@@ -1175,6 +1175,203 @@ if [ -z "$(ls -A "$_tmp" | grep '^valise-dev\.\|^valise-env-export\.' || :)" ]; 
 else
   fail "lint, test, run, and env export leave no scratch behind in TMPDIR"
   ls -A "$_tmp" >&2
+fi
+
+# The developer runner must start each reload with fresh availability. A
+# dependency that fails on the first load, whose prerequisite is then created,
+# must run its interactive dependent when valise_test_reload runs again. The
+# optional edges keep the initial load successful, as a real optional module is.
+_rp="$_tmp/reload-proj"
+mkdir -p "$_rp/module.d" "$_rp/modules" "$_rp/tests"
+printf '%s\n' 'bundle=default' 'variant=default' >"$_rp/valise.conf"
+printf 'default\tbash\treload_root\n' >"$_rp/bundles.tsv"
+_meta "$_rp/module.d/reload_root.meta" name=reload_root version=1.0.0 side_effect=read-only \
+  'requires=' 'optional=flaky_child' shells=bash platforms=any exports=reload_root_fn \
+  load=modules/reload_root.sh tests=tests/reload.sh
+printf 'reload_root_fn() { :; }\n' >"$_rp/modules/reload_root.sh"
+_meta "$_rp/module.d/flaky_child.meta" name=flaky_child version=1.0.0 side_effect=read-only \
+  requires=flaky_dep 'optional=' shells=bash platforms=any phase=interactive exports=flaky_child_fn \
+  load=modules/flaky_child.sh tests=
+printf 'flaky_child_fn() { :; }\necho ran >>"$HOME/child.log"\n' >"$_rp/modules/flaky_child.sh"
+_meta "$_rp/module.d/flaky_dep.meta" name=flaky_dep version=1.0.0 side_effect=read-only \
+  'requires=' 'optional=' shells=bash platforms=any exports=flaky_dep_fn \
+  load=modules/flaky_dep.sh tests=
+printf '%s\n' '[ -f "$HOME/flaky-prereq" ] || return 1' 'flaky_dep_fn() { :; }' >"$_rp/modules/flaky_dep.sh"
+printf '%s\n' 'if [ -s "$HOME/child.log" ]; then echo "child ran before the prerequisite"; exit 1; fi' \
+  ': >"$HOME/flaky-prereq"' 'valise_test_reload || { echo "reload failed"; exit 1; }' \
+  '[ -s "$HOME/child.log" ] || { echo "the repaired dependency did not run its dependent"; exit 1; }' \
+  >"$_rp/tests/reload.sh"
+if _v "$_rp" test --shell=bash >"$_tmp/reload.out" 2>&1 &&
+  grep -F 'valise test: 1 passed, 0 failed' "$_tmp/reload.out" >/dev/null; then
+  pass "valise_test_reload runs a dependent once its failed dependency is repaired"
+else
+  fail "valise_test_reload kept a repaired dependency unavailable"
+  cat "$_tmp/reload.out" >&2
+fi
+
+# --- GUI env capture fidelity and refusal (review findings on env export) ---
+# One fixture project, one module whose body is replaced per case, applied with
+# gui_env=off so `apply` never captures; `env export` is the thing under test.
+_cp="$_tmp/capture-proj"
+_cap_home="$_tmp/cap-home"
+mkdir -p "$_cp/module.d" "$_cp/modules" "$_cap_home" "$_tmp/fakebin"
+printf '%s\n' 'bundle=default' 'variant=default' 'gui_env=off' >"$_cp/valise.conf"
+printf 'default\tsh\tcapmod\ndefault\tbash\tcapmod\n' >"$_cp/bundles.tsv"
+_meta "$_cp/module.d/capmod.meta" name=capmod version=1.0.0 side_effect=read-only \
+  'requires=' 'optional=' shells=posix platforms=any exports= load=modules/capmod.sh tests=
+ln -sf /bin/bash "$_tmp/fakebin/sh"
+# _cap_body: the module body for the next case, read from stdin.
+_cap_body() { cat >"$_cp/modules/capmod.sh"; }
+# _cap_apply: install the current body (no capture: gui_env=off).
+_cap_apply() {
+  env -i HOME="$_cap_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_cap_home/.local/share" \
+    XDG_CONFIG_HOME="$_cap_home/.config" XDG_STATE_HOME="$_cap_home/.local/state" SHELL=/bin/bash \
+    TMPDIR="$_tmp" "$_valise" -C "$_cp" apply >"$_tmp/cap-apply.out" 2>&1
+}
+# _cap_export <format> [VAR=value...]: run `env export` for the active release.
+_cap_export() {
+  _ce_format=$1
+  shift
+  env -i HOME="$_cap_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_cap_home/.local/share" \
+    XDG_CONFIG_HOME="$_cap_home/.config" XDG_STATE_HOME="$_cap_home/.local/state" SHELL=/bin/bash \
+    TMPDIR="$_tmp" "$@" "$_valise" -C "$_cp" env export "$_ce_format" \
+    >"$_tmp/cap-export.out" 2>"$_tmp/cap-export.err"
+  _ce_rc=$?
+  unset _ce_format
+  return "$_ce_rc"
+}
+
+# Scenario A: a plan derived from the caller's TMPDIR keeps the caller's path.
+mkdir -p "$_tmp/caller-tmp"
+_cap_body <<'EOF'
+CAP_CACHE="$TMPDIR/tool-cache"
+export CAP_CACHE
+EOF
+if _cap_apply && _cap_export environment.d "TMPDIR=$_tmp/caller-tmp" &&
+  grep -Fx "CAP_CACHE=$_tmp/caller-tmp/tool-cache" "$_tmp/cap-export.out" >/dev/null; then
+  pass "env export keeps the caller's TMPDIR for a derived export"
+else
+  fail "env export replaced the caller's TMPDIR with another path"
+  cat "$_tmp/cap-export.out" "$_tmp/cap-export.err" >&2 2>/dev/null || :
+fi
+
+# Scenario B: an UNSET XDG_CONFIG_HOME stays unset in the plan, so its default applies.
+_cap_body <<'EOF'
+: "${XDG_CONFIG_HOME:=$HOME/custom-config}"
+CAP_CFG="$XDG_CONFIG_HOME/tool"
+export CAP_CFG
+EOF
+if env -i HOME="$_cap_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_cap_home/.local/share" \
+  XDG_STATE_HOME="$_cap_home/.local/state" SHELL=/bin/bash TMPDIR="$_tmp" \
+  "$_valise" -C "$_cp" apply >"$_tmp/cap-apply.out" 2>&1 &&
+  env -i HOME="$_cap_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_cap_home/.local/share" \
+  XDG_STATE_HOME="$_cap_home/.local/state" SHELL=/bin/bash TMPDIR="$_tmp" \
+  "$_valise" -C "$_cp" env export environment.d >"$_tmp/cap-unset.out" 2>"$_tmp/cap-unset.err" &&
+  grep -Fx "CAP_CFG=$_cap_home/custom-config/tool" "$_tmp/cap-unset.out" >/dev/null; then
+  pass "env export applies a module's default for an unset XDG root"
+else
+  fail "env export gave an unset XDG root a value the session would not see"
+  cat "$_tmp/cap-unset.out" "$_tmp/cap-unset.err" >&2 2>/dev/null || :
+fi
+
+# Scenario C: a SET XDG cache root reaches the plan unchanged. The cache root is
+# used because valise locates its own active link under XDG_CONFIG_HOME, so
+# overriding that variable for the valise command would move the release.
+_cap_body <<'EOF'
+CAP_CACHE_X="$XDG_CACHE_HOME/x"
+export CAP_CACHE_X
+EOF
+if _cap_apply && _cap_export environment.d "XDG_CACHE_HOME=$_tmp/caller-cache" &&
+  grep -Fx "CAP_CACHE_X=$_tmp/caller-cache/x" "$_tmp/cap-export.out" >/dev/null; then
+  pass "env export uses the caller's set XDG root"
+else
+  fail "env export did not use the caller's set XDG root"
+  cat "$_tmp/cap-export.out" "$_tmp/cap-export.err" >&2 2>/dev/null || :
+fi
+
+# Scenario D: control-byte, newline, and noncharacter values are refused by name,
+# and the forged record is never published. Each case is its own module body.
+_refuse_case() {
+  _rc_name=$1
+  _rc_expect=$2
+  if _cap_apply && ! _cap_export environment.d &&
+    grep -F "$_rc_expect" "$_tmp/cap-export.err" >/dev/null &&
+    ! grep -q FORGED "$_tmp/cap-export.out"; then
+    pass "$_rc_name is refused"
+  else
+    fail "$_rc_name was not refused as an unrepresentable value"
+    cat "$_tmp/cap-export.out" "$_tmp/cap-export.err" >&2 2>/dev/null || :
+  fi
+}
+_cap_body <<'EOF'
+X='a
+FORGED=1'
+export X
+EOF
+_refuse_case "a newline followed by an assignment-shaped tail" 'newline or control character'
+_cap_body <<'EOF'
+CAP_SOH=$(printf 'a\001b')
+export CAP_SOH
+EOF
+_refuse_case "an SOH byte (0x01)" 'CAP_SOH'
+_cap_body <<'EOF'
+CAP_ESC=$(printf 'a\033b')
+export CAP_ESC
+EOF
+_refuse_case "an ESC byte (0x1b)" 'CAP_ESC'
+_cap_body <<'EOF'
+CAP_NONCHAR=$(printf '\357\277\276')
+export CAP_NONCHAR
+EOF
+_refuse_case "U+FFFE, an XML noncharacter" 'CAP_NONCHAR'
+_cap_body <<'EOF'
+CAP_NONCHAR=$(printf '\357\277\277')
+export CAP_NONCHAR
+EOF
+_refuse_case "U+FFFF, an XML noncharacter" 'CAP_NONCHAR'
+
+# Scenario E: representable values still export: valid multibyte UTF-8, TAB, DEL.
+_cap_body <<'EOF'
+CAP_UTF=$(printf 'caf\303\251')
+CAP_TAB=$(printf 'a\tb')
+CAP_DEL=$(printf 'a\177b')
+export CAP_UTF CAP_TAB CAP_DEL
+EOF
+if _cap_apply && _cap_export environment.d && grep -F 'CAP_UTF=' "$_tmp/cap-export.out" >/dev/null &&
+  grep -F 'CAP_DEL=' "$_tmp/cap-export.out" >/dev/null && grep -F 'CAP_TAB=' "$_tmp/cap-export.out" >/dev/null; then
+  pass "valid UTF-8, TAB, and DEL values are still exported"
+else
+  fail "a representable value was refused or dropped"
+  cat "$_tmp/cap-export.out" "$_tmp/cap-export.err" >&2 2>/dev/null || :
+fi
+
+# Scenario F: an empty value cannot reach environment.d; it is refused by name,
+# while launchd still bridges it.
+_cap_body <<'EOF'
+CAP_EMPTY=
+export CAP_EMPTY
+EOF
+_refuse_case "an empty value for environment.d" 'CAP_EMPTY'
+if _cap_apply && _cap_export launchd && grep -F 'CAP_EMPTY' "$_tmp/cap-export.out" >/dev/null; then
+  pass "an empty value is still bridged to launchd"
+else
+  fail "launchd dropped an empty value"
+fi
+
+# Scenario G: production capture does not need dash. A `sh` that is bash, with no
+# dash anywhere on PATH, must still capture for a /bin/sh login.
+_cap_body <<'EOF'
+CAP_SHV=ok
+export CAP_SHV
+EOF
+if _cap_apply && env -i HOME="$_cap_home" PATH="$_tmp/fakebin:/usr/bin" XDG_DATA_HOME="$_cap_home/.local/share" \
+  XDG_CONFIG_HOME="$_cap_home/.config" XDG_STATE_HOME="$_cap_home/.local/state" SHELL=/bin/sh TMPDIR="$_tmp" \
+  "$_valise" -C "$_cp" env export environment.d >"$_tmp/cap-sh.out" 2>"$_tmp/cap-sh.err" &&
+  grep -Fx 'CAP_SHV=ok' "$_tmp/cap-sh.out" >/dev/null; then
+  pass "env export captures for a /bin/sh login without dash on PATH"
+else
+  fail "env export needed a dash that the sh login does not use"
+  cat "$_tmp/cap-sh.err" >&2 2>/dev/null || :
 fi
 
 printf '\n=== developer commands summary ===\n'

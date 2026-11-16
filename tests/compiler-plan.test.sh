@@ -436,9 +436,9 @@ VALISE_MODULE_ROOT="$_tmp/release-reload" /bin/bash -c '
   VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "reload_ok=%s owned=%s\n" "$(command -v reload_probe_loaded >/dev/null && echo yes)" "${_valise_plan_owned:-unset}"
 ' >"$_tmp/owned-reload.out" 2>"$_tmp/owned-reload.err"
-if grep -Fx 'reload_ok=yes owned=reload_probe_loaded' "$_tmp/owned-reload.out" >/dev/null &&
+if grep -Fx 'reload_ok=yes owned=reload_probe:reload_probe_loaded' "$_tmp/owned-reload.out" >/dev/null &&
   [ ! -s "$_tmp/owned-reload.err" ]; then
-  pass "a reload clears only the exports valise installed and reports no conflict"
+  pass "a reload clears only the exports valise installed, recorded against their provider module, and reports no conflict"
 else
   fail "a reload did not record or clear its own exports correctly"
   cat "$_tmp/owned-reload.out" "$_tmp/owned-reload.err" >&2

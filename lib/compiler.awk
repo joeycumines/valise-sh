@@ -332,6 +332,18 @@ END {
         }
     }
 
+    # The export-ownership ledger names a provider by its display name, so two
+    # different modules that share one display name cannot share a closure: the
+    # ledger could not tell them apart on reload.
+    for (oi = 1; oi <= ordered_count; oi++) {
+        closure_display = mod_display[ordered[oi]]
+        if (closure_display in closure_display_seen) {
+            print "ERROR: two modules are named " closure_display " in one closure; qualified providers must not share a display name" > "/dev/stderr"
+            exit 1
+        }
+        closure_display_seen[closure_display] = 1
+    }
+
     # Partition the closure by phase. Every plan shares this dependency order;
     # a module renders only into the plan of its own phase (phase=all disables
     # the filter). The interactive plan stays empty when no module opts in, and
@@ -419,18 +431,16 @@ END {
     # establish ownership, which is what an unconditional unset assumed.
     if (reload_export_count > 0) {
         printf "if [ \"${VALISE_RELOAD:-}\" = 1 ]; then\n"
-        printf "  for %sexport in", prefix
-        for (i = 1; i <= reload_export_count; i++) {
-            printf " %s", reload_exports[i]
+        for (oi = 1; oi <= plan_count; oi++) {
+            name = plan_ordered[oi]
+            n_pe = split(mod_exports[name], pe_values, " ")
+            for (pei = 1; pei <= n_pe; pei++) {
+                if (pe_values[pei] == "") continue
+                printf "  case \" ${_valise_plan_owned:-} \" in\n"
+                printf "  *\" %s:%s \"*) unset -f %s 2>/dev/null || : ;;\n", mod_display[name], pe_values[pei], pe_values[pei]
+                printf "  esac\n"
+            }
         }
-        printf "; do\n"
-        printf "    case \" ${_valise_plan_owned:-} \" in\n"
-        printf "    *\" $%sexport \"*)\n", prefix
-        printf "      unset -f \"$%sexport\" 2>/dev/null || :\n", prefix
-        printf "      ;;\n"
-        printf "    esac\n"
-        printf "  done\n"
-        printf "  unset %sexport\n", prefix
         printf "fi\n"
     }
 
@@ -574,8 +584,10 @@ END {
                 printf "%s  done\n", body_indent
                 printf "%sfi\n", body_indent
                 # A module that succeeded owns its exports for the lifetime of
-                # the process: record them so the VALISE_RELOAD prelude may
-                # clear exactly these and never a caller's colliding function.
+                # the process. Each token is <module>:<export>, so the VALISE_RELOAD
+                # prelude clears an export only for the SAME provider that
+                # installed it: another module's export, and a caller's colliding
+                # function, are reported on load instead of being replaced.
                 printf "%sif [ \"$%sstatus\" -eq 0 ]; then\n", body_indent, prefix
                 printf "%s  for %sexport in", body_indent, prefix
                 for (ei = 1; ei <= export_count; ei++) {
@@ -583,8 +595,8 @@ END {
                 }
                 printf "; do\n"
                 printf "%s    case \" ${_valise_plan_owned:-} \" in\n", body_indent
-                printf "%s    *\" $%sexport \"*) ;;\n", body_indent, prefix
-                printf "%s    *) _valise_plan_owned=\"${_valise_plan_owned:+$_valise_plan_owned }$%sexport\" ;;\n", body_indent, prefix
+                printf "%s    *\" %s:$%sexport \"*) ;;\n", body_indent, mod_display[name], prefix
+                printf "%s    *) _valise_plan_owned=\"${_valise_plan_owned:+$_valise_plan_owned }%s:$%sexport\" ;;\n", body_indent, mod_display[name], prefix
                 printf "%s    esac\n", body_indent
                 printf "%s  done\n", body_indent
                 printf "%s  unset %sexport\n", body_indent, prefix

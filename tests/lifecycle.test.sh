@@ -10,11 +10,13 @@
 set -eu
 
 _total=0
+_skip=0
 _pass=0
 _fail=0
 
 pass() { _total=$((_total + 1)); _pass=$((_pass + 1)); printf '  PASS: %s\n' "$1"; }
 fail() { _total=$((_total + 1)); _fail=$((_fail + 1)); printf '  FAIL: %s\n' "$1" >&2; }
+skip() { _total=$((_total + 1)); _skip=$((_skip + 1)); printf '  SKIP: %s\n' "$1"; }
 
 _repo=$(cd "$(dirname "$0")/.." && pwd -P)
 _valise="$_repo/bin/valise"
@@ -395,12 +397,15 @@ else
   ls -l "$_shim" >&2 2>/dev/null || :
   cat "$_shim" >&2 2>/dev/null || :
 fi
+# The harness home is a bash login (SHELL=/bin/bash), and a login bash reads
+# only .profile, so .profile carries the interactive stage as well as stage 1
+# and the ENV stanza. A non-bash login file is covered by the e2e stage lanes.
 if grep -q '# BEGIN valise managed block' "$_home/.profile" &&
-  ! grep -q 'case \$- in \*i\*)' "$_home/.profile" &&
+  grep -q 'case \$- in \*i\*)' "$_home/.profile" &&
   grep -qF "ENV='$_shim'" "$_home/.profile"; then
-  pass "~/.profile carries stage 1 only and wires ENV at the shim"
+  pass "~/.profile carries the interactive stage as the bash login file and wires ENV at the shim"
 else
-  fail "~/.profile does not carry exactly stage 1 plus the ENV stanza"
+  fail "~/.profile does not carry the interactive stage and the ENV stanza"
   cat "$_home/.profile" >&2 2>/dev/null || :
 fi
 # A bash/zsh install must produce the same wiring: the harness runs
@@ -621,6 +626,121 @@ if _v "$_proj" doctor >"$_tmp/clean-doctor.out" 2>&1; then
 else
   fail "doctor passes when valise is loaded only by managed blocks"
   cat "$_tmp/clean-doctor.out" >&2
+fi
+
+# --- GUI bridge transactions (review findings: removal, release use, preview) ---
+# _bridge_proj <dest> <gui_env> <salt>: a copy of the sample project with the
+# given bridge mode, and a salt so each copy builds a distinct release.
+_bridge_proj() {
+  rm -rf "$1"
+  cp -R "$_proj" "$1"
+  printf 'gui_env=%s\n' "$2" >>"$1/valise.conf"
+  printf '# salt %s\n' "$3" >>"$1/modules/main.sh"
+}
+_state_previous() { printf '%s\n' "$_home/.local/state/valise/previous"; }
+
+# Removal: both owned bridges exist; the LaunchAgents directory refuses the second
+# removal. A failed removal must leave BOTH files exactly as they were.
+_use_home bridge-remove
+mkdir -p "$_home/.config/environment.d" "$_home/Library/LaunchAgents"
+printf '%s\n' '# written by valise (gui_env=systemd); do not edit' 'E2E_KEEP=one' \
+  >"$_home/.config/environment.d/10-valise.conf"
+printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+  '<!-- written by valise (gui_env=launchd); do not edit -->' '<plist version="1.0"><dict/></plist>' \
+  >"$_home/Library/LaunchAgents/sh.valise.env.plist"
+_rm_sys_before=$(cksum <"$_home/.config/environment.d/10-valise.conf")
+_rm_lad_before=$(cksum <"$_home/Library/LaunchAgents/sh.valise.env.plist")
+chmod 555 "$_home/Library/LaunchAgents"
+if _v "$_proj" apply >"$_tmp/rm-fail.out" 2>&1; then
+  rm_apply_status=0
+else
+  rm_apply_status=1
+fi
+chmod 755 "$_home/Library/LaunchAgents"
+if [ "$rm_apply_status" -ne 0 ] &&
+  [ -f "$_home/.config/environment.d/10-valise.conf" ] &&
+  [ "$(cksum <"$_home/.config/environment.d/10-valise.conf")" = "$_rm_sys_before" ] &&
+  [ "$(cksum <"$_home/Library/LaunchAgents/sh.valise.env.plist")" = "$_rm_lad_before" ]; then
+  pass "a failed bridge removal leaves every owned bridge file byte-identical"
+else
+  fail "a failed bridge removal changed an owned bridge file"
+  cat "$_tmp/rm-fail.out" >&2
+fi
+
+# Release use: the publish of the bridge fails, because the bridge file is
+# immutable. The active link must return to the outgoing release, and the
+# previous-release record must still name the release before that one, so a
+# rollback afterwards does not select the release that is already active.
+if [ "$(uname -s)" != Darwin ]; then
+  skip "release use publish failure: needs chflags uchg (macOS)"
+else
+  _use_home publish-fail
+  _bridge_proj "$_tmp/bp-a" launchd a
+  _v "$_tmp/bp-a" apply >"$_tmp/pf-a.out" 2>&1 || :
+  _id_a=$(_active_id)
+  _bridge_proj "$_tmp/bp-b" launchd b
+  _v "$_tmp/bp-b" apply --no-integration >"$_tmp/pf-b.out" 2>&1 || :
+  _id_b=$(_active_id)
+  _lad="$_home/Library/LaunchAgents/sh.valise.env.plist"
+  if [ -n "$_id_a" ] && [ -n "$_id_b" ] && [ "$_id_a" != "$_id_b" ] && [ -f "$_lad" ] &&
+    [ "$(cat "$(_state_previous)")" = "$_id_a" ]; then
+    _lad_before=$(cksum <"$_lad")
+    chflags uchg "$_lad"
+    if _v "$_proj" release use "$_id_a" >"$_tmp/pf-use.out" 2>&1; then
+      pf_use=0
+    else
+      pf_use=1
+    fi
+    chflags nouchg "$_lad"
+    if [ "$pf_use" -ne 0 ] && [ "$(_active_id)" = "$_id_b" ] &&
+      [ "$(cat "$(_state_previous)")" = "$_id_a" ] && [ "$(cksum <"$_lad")" = "$_lad_before" ]; then
+      pass "a failed bridge publish on release use keeps the outgoing release and its previous record"
+    else
+      fail "a failed bridge publish on release use left the previous-release record pointing at the active release"
+      cat "$_tmp/pf-use.out" >&2
+    fi
+  else
+    fail "could not set up two installed releases for the release-use publish failure"
+    cat "$_tmp/pf-a.out" "$_tmp/pf-b.out" >&2
+  fi
+
+  # Install after a switch: the same immutable bridge makes the publish fail after
+  # the link moved. The install transaction must restore the link AND the record.
+  _bridge_proj "$_tmp/bp-c" launchd c
+  _id_before=$(_active_id)
+  _prev_before=$(cat "$(_state_previous)")
+  chflags uchg "$_lad"
+  if _v "$_tmp/bp-c" apply >"$_tmp/pf-install.out" 2>&1; then
+    pf_install=0
+  else
+    pf_install=1
+  fi
+  chflags nouchg "$_lad"
+  if [ "$pf_install" -ne 0 ] && [ "$(_active_id)" = "$_id_before" ] &&
+    [ "$(cat "$(_state_previous)")" = "$_prev_before" ]; then
+    pass "a failed bridge publish during install restores the link and the previous-release record"
+  else
+    fail "a failed bridge publish during install left the link or the previous-release record changed"
+    cat "$_tmp/pf-install.out" >&2
+  fi
+fi
+
+# Preview: a mode for the OTHER platform is reported as skipped, and nothing is
+# created. The write path refuses that mode on this platform, so the preview must.
+_use_home preview-platform
+case "$(uname -s)" in
+  Darwin) _pv_platform=darwin; _pv_other=systemd ;;
+  *) _pv_platform=linux; _pv_other=launchd ;;
+esac
+_bridge_proj "$_tmp/bp-pv" "$_pv_other" pv
+if _v "$_tmp/bp-pv" apply --dry-run >"$_tmp/pv.out" 2>&1 &&
+  grep -F "skipped (gui_env=$_pv_other is not supported on $_pv_platform)" "$_tmp/pv.out" >/dev/null &&
+  ! grep -E 'would (create|regenerate): .*10-valise\.conf' "$_tmp/pv.out" >/dev/null &&
+  ! grep -E 'would (create|regenerate): .*sh\.valise\.env\.plist' "$_tmp/pv.out" >/dev/null; then
+  pass "a dry run reports a bridge mode for another platform as skipped"
+else
+  fail "a dry run promised a bridge this platform would not write"
+  cat "$_tmp/pv.out" >&2
 fi
 
 printf '\n=== install lifecycle summary ===\n'

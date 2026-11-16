@@ -20,10 +20,12 @@
 #     only after a plan was sourced successfully, so a shell started before the
 #     first install, while the release was missing, or after a plan failed tries
 #     again from the next startup file the shell reads.
-#   stage 2 (rc files only)  sources the interactive plan when the shell is
-#     interactive (`case $- in *i*`). It goes ONLY in the shell's rc-stage file
-#     (.bashrc, .zshrc, or the $ENV shim), never in .zshenv/.zprofile/.profile:
-#     an interactive zsh already has `i` in `$-` while it reads .zshenv, so a
+#   stage 2 (rc-stage files)  sources the interactive plan when the shell is
+#     interactive (`case $- in *i*`). It goes in the shell's rc-stage file
+#     (.bashrc, .zshrc, or the $ENV shim), and in the one file a login bash
+#     reads (.bash_profile, else .bash_login, else .profile), placed last, since
+#     a login bash never reads .bashrc. It is NEVER in .zshenv or .zprofile: an
+#     interactive zsh already has `i` in `$-` while it reads .zshenv, so a
 #     stage 2 there would run interactive setup BEFORE the user's .zshrc - and
 #     the release-id guard would then suppress the correct, later run. Checking
 #     `$-` proves the shell is interactive; it does not prove the right
@@ -52,11 +54,18 @@
 #     one more stage-1 pass at the next startup file (~/.zprofile), which
 #     restores the compiled PATH, and is then spent.
 #
-# Stage 2 runs only when stage 1 succeeded (or was already loaded for this
-# release): the interactive plan consumes the env plan's unavailable-module
-# list (`_valise_plan_carried`), so a required interactive module whose env
-# dependency failed is blocked exactly as it would be in one combined plan, and
-# the interactive guard is never marked loaded against an incomplete env.
+# Stage 2 runs only when stage 1 succeeded for THIS release. The result of the
+# last env evaluation for a release is kept in the process (_valise_env_rel,
+# _valise_env_ok, _valise_env_carry), so a later startup file whose release
+# guard skips the env stage still hands stage 2 the real unavailable-module
+# list (`_valise_plan_carried`) and the real success state. A required
+# interactive module whose env dependency failed is therefore blocked exactly
+# as it would be in one combined plan, in every startup file. A failed env
+# evaluation also drops `_valise_profile_loaded`, so a later file re-runs the
+# env plan rather than trusting an earlier success. A PATH that differs from
+# the one the last successful env evaluation left (a user rc file that resets
+# PATH, or macOS path_helper) also re-runs it, so the compiled PATH is
+# re-asserted in the shell that actually runs; the module bodies re-run then.
 #
 # Both stages must stay silent, so ssh host-cmd sessions (which read .bashrc
 # non-interactively) are safe. The shell class is named by the first of
@@ -102,26 +111,43 @@ print_posix_integration() {
     '    _valise_want=1' \
     '  elif [ "${_valise_env_repair:-}" = armed ] || [ "${_valise_env_tried:-}" != "$_valise_release_id" ]; then' \
     '    _valise_want=1' \
+    '  elif [ "${_valise_env_path-}" != "$PATH" ]; then' \
+    '    _valise_want=1' \
     '  fi' \
     '  if [ "${_valise_env_repair:-}" = armed ]; then _valise_env_repair=done; fi' \
-    '  if [ "$_valise_want" -eq 1 ] && [ -f "$_valise_active/plans/$_valise_plan.sh" ]; then' \
-    '    _valise_had=${VALISE_RELOAD+x}' \
-    '    _valise_old=${VALISE_RELOAD-}' \
-    '    if [ "$_valise_seen" -eq 1 ]; then' \
-    '      VALISE_RELOAD=1' \
-    '    fi' \
-    '    VALISE_MODULE_ROOT="$_valise_active"' \
-    '    . "$_valise_active/plans/$_valise_plan.sh"' \
-    '    _valise_rc=$?' \
-    '    unset VALISE_MODULE_ROOT' \
-    '    if [ -n "$_valise_had" ]; then VALISE_RELOAD=$_valise_old; else unset VALISE_RELOAD; fi' \
-    '    _valise_env_tried=$_valise_release_id' \
-    '    if [ "$_valise_rc" -eq 0 ]; then' \
-    '      _valise_profile_loaded=$_valise_release_id' \
-    '      case $- in' \
-    '      *l*) [ -n "${_valise_env_repair:-}" ] || _valise_env_repair=armed ;;' \
-    '      esac' \
+    '  if [ "$_valise_want" -eq 1 ]; then' \
+    '    if [ -f "$_valise_active/plans/$_valise_plan.sh" ]; then' \
+    '      _valise_had=${VALISE_RELOAD+x}' \
+    '      _valise_old=${VALISE_RELOAD-}' \
+    '      if [ "$_valise_seen" -eq 1 ]; then' \
+    '        VALISE_RELOAD=1' \
+    '      fi' \
+    '      VALISE_MODULE_ROOT="$_valise_active"' \
+    '      . "$_valise_active/plans/$_valise_plan.sh"' \
+    '      _valise_rc=$?' \
+    '      unset VALISE_MODULE_ROOT' \
+    '      if [ -n "$_valise_had" ]; then VALISE_RELOAD=$_valise_old; else unset VALISE_RELOAD; fi' \
+    '      _valise_env_tried=$_valise_release_id' \
+    '      _valise_env_rel=$_valise_release_id' \
+    '      _valise_env_carry=${_valise_plan_carried:-}' \
+    '      if [ "$_valise_rc" -eq 0 ]; then' \
+    '        _valise_env_ok=1' \
+    '        _valise_env_path=$PATH' \
+    '        _valise_profile_loaded=$_valise_release_id' \
+    '        case $- in' \
+    '        *l*) [ -n "${_valise_env_repair:-}" ] || _valise_env_repair=armed ;;' \
+    '        esac' \
+    '      else' \
+    '        _valise_env_ok=0' \
+    '        _valise_stage1_ok=0' \
+    '        unset _valise_profile_loaded' \
+    '      fi' \
     '    else' \
+    '      _valise_stage1_ok=0' \
+    '    fi' \
+    '  else' \
+    '    _valise_plan_carried=${_valise_env_carry:-}' \
+    '    if [ "${_valise_env_rel:-}" != "$_valise_release_id" ] || [ "${_valise_env_ok:-0}" != 1 ]; then' \
     '      _valise_stage1_ok=0' \
     '    fi' \
     '  fi'
@@ -129,21 +155,24 @@ print_posix_integration() {
     printf '%s\n' \
       '  if [ "$_valise_stage1_ok" -eq 1 ]; then' \
       '  case $- in *i*)' \
-      '    if [ -f "$_valise_active/plans/$_valise_plan-interactive.sh" ] &&' \
-      '      { [ "${_valise_interactive_loaded:-}" != "$_valise_release_id" ] ||' \
-      '        [ "${VALISE_RELOAD:-}" = 1 ]; }; then' \
-      '      _valise_had=${VALISE_RELOAD+x}' \
-      '      _valise_old=${VALISE_RELOAD-}' \
-      '      if [ "$_valise_seen" -eq 1 ]; then' \
-      '        VALISE_RELOAD=1' \
+      '    if [ "${_valise_interactive_loaded:-}" != "$_valise_release_id" ] ||' \
+      '      [ "${VALISE_RELOAD:-}" = 1 ]; then' \
+      '      if [ -f "$_valise_active/plans/$_valise_plan-interactive.sh" ]; then' \
+      '        _valise_had=${VALISE_RELOAD+x}' \
+      '        _valise_old=${VALISE_RELOAD-}' \
+      '        if [ "$_valise_seen" -eq 1 ]; then' \
+      '          VALISE_RELOAD=1' \
+      '        fi' \
+      '        VALISE_MODULE_ROOT="$_valise_active"' \
+      '        . "$_valise_active/plans/$_valise_plan-interactive.sh"' \
+      '        _valise_rc=$?' \
+      '        unset VALISE_MODULE_ROOT' \
+      '        if [ -n "$_valise_had" ]; then VALISE_RELOAD=$_valise_old; else unset VALISE_RELOAD; fi' \
+      '        _valise_int_tried=$_valise_release_id' \
+      '        if [ "$_valise_rc" -eq 0 ]; then _valise_interactive_loaded=$_valise_release_id; fi' \
+      '      else' \
+      '        _valise_interactive_loaded=$_valise_release_id' \
       '      fi' \
-      '      VALISE_MODULE_ROOT="$_valise_active"' \
-      '      . "$_valise_active/plans/$_valise_plan-interactive.sh"' \
-      '      _valise_rc=$?' \
-      '      unset VALISE_MODULE_ROOT' \
-      '      if [ -n "$_valise_had" ]; then VALISE_RELOAD=$_valise_old; else unset VALISE_RELOAD; fi' \
-      '      _valise_int_tried=$_valise_release_id' \
-      '      if [ "$_valise_rc" -eq 0 ]; then _valise_interactive_loaded=$_valise_release_id; fi' \
       '    fi' \
       '    ;;' \
       '  esac' \
@@ -275,18 +304,39 @@ integration_shell_files() {
 #   env  stage 1 only. Every file the shell reads before its rc stage gets this,
 #        so the env plan applies everywhere and interactive setup cannot run
 #        before the rc file it belongs to.
-#   all  both stages. Only the shell's rc-stage file gets this: ~/.bashrc,
-#        ~/.zshrc, or the $ENV shim (which sh/ksh interactive subshells read).
+#   all  both stages. The shell's rc-stage file gets this: ~/.bashrc,
+#        ~/.zshrc, or the $ENV shim (which sh/ksh interactive subshells read),
+#        and the file a login bash reads (see print_posix_integration), so an
+#        interactive bash login reaches the interactive stage.
 #
 # posix_startup_targets <home>
 # prints one "<stage>\t<path>" record per line.
 posix_startup_targets() {
-  printf 'env\t%s\n' "$1/.profile"
+  # A login bash reads the FIRST of .bash_profile, .bash_login and .profile that
+  # exists, and never .bashrc. The file it reads therefore carries the
+  # interactive stage whenever bash has an rc chain, placed at its END: a
+  # `. ~/.bashrc` the user wrote above the block has already run, and the
+  # release-keyed guard keeps the interactive plan from loading twice.
+  _pst_bash_rc=0
+  case "${SHELL:-}" in
+  */bash | bash) _pst_bash_rc=1 ;;
+  esac
+  if [ -e "$1/.bashrc" ] || [ -L "$1/.bashrc" ]; then _pst_bash_rc=1; fi
+  _pst_bash_stage=env
+  [ "$_pst_bash_rc" -eq 0 ] || _pst_bash_stage=all
+  _pst_bash_login=$1/.profile
   if [ -e "$1/.bash_profile" ] || [ -L "$1/.bash_profile" ]; then
-    printf 'env\t%s\n' "$1/.bash_profile"
+    _pst_bash_login=$1/.bash_profile
   elif [ -e "$1/.bash_login" ] || [ -L "$1/.bash_login" ]; then
-    printf 'env\t%s\n' "$1/.bash_login"
+    _pst_bash_login=$1/.bash_login
   fi
+  # .profile is always written: sh, ksh and dash read it at login. It is the
+  # bash login file only when no .bash_profile or .bash_login exists.
+  if [ "$_pst_bash_login" != "$1/.profile" ]; then
+    printf 'env\t%s\n' "$1/.profile"
+  fi
+  printf '%s\t%s\n' "$_pst_bash_stage" "$_pst_bash_login"
+  unset _pst_bash_rc _pst_bash_stage _pst_bash_login
   case "${SHELL:-}" in
   */bash | bash) printf 'all\t%s\n' "$1/.bashrc" ;;
   *) if [ -e "$1/.bashrc" ] || [ -L "$1/.bashrc" ]; then printf 'all\t%s\n' "$1/.bashrc"; fi ;;
@@ -519,10 +569,31 @@ cmd_doctor() {
       # Every startup file valise manages is inspected, not only ~/.profile: an
       # upgrade from a single-stage install may have left a legacy block in
       # .bashrc, .zshrc or .zprofile alone.
+      # The file a login bash reads carries the interactive stage when bash has an
+      # rc chain (see posix_startup_targets), so it is judged by the gate exactly
+      # like the rc-stage files. Every other env-only file is the current shape.
+      _doctor_bash_rc=0
+      case "${SHELL:-}" in
+      */bash | bash) _doctor_bash_rc=1 ;;
+      esac
+      if [ -e "$HOME/.bashrc" ] || [ -L "$HOME/.bashrc" ]; then _doctor_bash_rc=1; fi
+      _doctor_bash_login=.profile
+      if [ -e "$HOME/.bash_profile" ] || [ -L "$HOME/.bash_profile" ]; then
+        _doctor_bash_login=.bash_profile
+      elif [ -e "$HOME/.bash_login" ] || [ -L "$HOME/.bash_login" ]; then
+        _doctor_bash_login=.bash_login
+      fi
       for _doctor_name in $VALISE_STARTUP_NAMES; do
         _doctor_file="$HOME/$_doctor_name"
         [ -f "$_doctor_file" ] && [ ! -L "$_doctor_file" ] || continue
         integration_has_posix_block "$_doctor_file" || continue
+        case "$_doctor_name" in
+        .bashrc | .zshrc) ;;
+        "$_doctor_bash_login")
+          [ "$_doctor_bash_rc" -eq 1 ] || continue
+          ;;
+        *) continue ;;
+        esac
         if ! "$_doctor_awk" '
           /^# BEGIN valise managed block$/ { inblock = 1 }
           inblock && /case \$- in \*i\*\)/ { gate = 1 }
@@ -592,7 +663,7 @@ cmd_doctor() {
           ;;
         esac
       fi
-      unset _doctor_awk _doctor_name _doctor_file _doctor_shim _doctor_env _doctor_env_norm _doctor_bridge_mode
+      unset _doctor_awk _doctor_name _doctor_file _doctor_shim _doctor_env _doctor_env_norm _doctor_bridge_mode _doctor_bash_rc _doctor_bash_login
     else
       printf '  info: skipping the shell integration check\n'
     fi
