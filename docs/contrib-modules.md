@@ -104,7 +104,9 @@ link entry is owned by the current user (the pipx and uv shape) while still
 rejecting unowned entries and group- or other-writable regular files.
 
 The engine also ships modules a project can require: `valise_path`
-(`valise_path_prepend` and `valise_path_append`), `valise_editor`,
+(`valise_path_prepend` and `valise_path_append`, the core PATH helpers all
+most use cases need, plus `valise_path_contains`, `valise_path_remove`, and
+`valise_path_normalize` for inspection and cleanup), `valise_editor`,
 `valise_history`, `valise_pager`, `valise_xdg`, and the `valise_platform_*`
 modules. [shared-modules.md](shared-modules.md) lists them.
 

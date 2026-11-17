@@ -116,11 +116,13 @@ usage_doctor() {
     "" \
     "Report the environment, the active release, and the shell integration." \
     "" \
-    "Warnings name archetype pitfalls: a legacy single-stage managed block in any" \
-    "startup file valise manages, a sh/ksh login shell whose \$ENV is unset or does" \
+    "Warnings name archetype pitfalls: a legacy single-stage managed block in the" \
+    "rc-stage files valise manages (~/.bashrc, ~/.zshrc, and the bash login file" \
+    "when bash has an rc chain), a sh/ksh login shell whose \$ENV is unset or does" \
     "not point at the valise shim, a missing ~/.zshenv block when zsh is installed," \
-    "and a GUI-session bridge the active release asked for but that is missing. A" \
-    "release with gui_env=off is not warned about: that is the deliberate default." \
+    "and a GUI-session bridge the active release asked for but that is missing on" \
+    "the platform where that mode is written. A release with gui_env=off is not" \
+    "warned about: that is the deliberate default." \
     "" \
     "  --pre-install     Skip the active-release and integration checks, for use" \
     "                    before the first install." \
@@ -187,11 +189,11 @@ usage_env() {
     "isolates only the startup-file surface, evaluates the plan the way a login" \
     "shell would (module side effects included), and diffs the exported scalar" \
     "environment against a baseline. It fails naming the variable when a value" \
-    "cannot be represented (a newline, or a control byte outside XML 1.0), and it" \
-    "names every excluded variable on stderr - PATH and the XDG roots are not" \
-    "bridged, because a GUI session sets its own. An empty value cannot be" \
-    "bridged to environment.d, and is refused by name; unset the variable instead." \
-    "The bridge file is written mode 0600." \
+    "cannot be represented (a newline, a control byte outside XML 1.0, U+FFFE or" \
+    "U+FFFF, invalid UTF-8, or an empty value for environment.d), and it names" \
+    "every excluded variable on stderr - PATH, TMPDIR and the XDG roots are not" \
+    "bridged, because a GUI session sets its own. The bridge file is written mode" \
+    "0600." \
     "" \
     "environment.d emits KEY=VALUE lines for ~/.config/environment.d/," \
     "launchd emits a ~/Library/LaunchAgents plist running launchctl setenv per" \

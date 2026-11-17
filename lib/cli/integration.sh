@@ -111,7 +111,7 @@ print_posix_integration() {
     '    _valise_want=1' \
     '  elif [ "${_valise_env_repair:-}" = armed ] || [ "${_valise_env_tried:-}" != "$_valise_release_id" ]; then' \
     '    _valise_want=1' \
-    '  elif [ "${_valise_env_path-}" != "$PATH" ]; then' \
+    '  elif [ "${_valise_env_path-}" != "${PATH-}" ]; then' \
     '    _valise_want=1' \
     '  fi' \
     '  if [ "${_valise_env_repair:-}" = armed ]; then _valise_env_repair=done; fi' \
@@ -144,6 +144,8 @@ print_posix_integration() {
     '      fi' \
     '    else' \
     '      _valise_stage1_ok=0' \
+    '      _valise_env_ok=0' \
+    '      unset _valise_profile_loaded' \
     '    fi' \
     '  else' \
     '    _valise_plan_carried=${_valise_env_carry:-}' \
@@ -168,7 +170,6 @@ print_posix_integration() {
       '        _valise_rc=$?' \
       '        unset VALISE_MODULE_ROOT' \
       '        if [ -n "$_valise_had" ]; then VALISE_RELOAD=$_valise_old; else unset VALISE_RELOAD; fi' \
-      '        _valise_int_tried=$_valise_release_id' \
       '        if [ "$_valise_rc" -eq 0 ]; then _valise_interactive_loaded=$_valise_release_id; fi' \
       '      else' \
       '        _valise_interactive_loaded=$_valise_release_id' \
@@ -179,7 +180,7 @@ print_posix_integration() {
       '  fi'
   fi
   printf '%s\n' \
-    '  unset _valise_release_id _valise_want _valise_had _valise_old _valise_rc _valise_seen _valise_stage1_ok' \
+    '  unset _valise_release_id _valise_want _valise_had _valise_old _valise_rc _valise_seen _valise_stage1_ok _valise_int_tried' \
     'fi' \
     'unset _valise_plan_carried'
   if [ -n "$_pix_shim_literal" ]; then
@@ -190,7 +191,7 @@ print_posix_integration() {
       '  case "${ENV:-}" in' \
       "  '') ENV=$_pix_shim_literal; export ENV ;;" \
       '  *"\$"* | "~"*) : ;;' \
-      "  *) [ -e \"\$ENV\" ] || { ENV=$_pix_shim_literal; export ENV; } ;;" \
+      "  *) [ -e \"\$ENV\" ] || [ -L \"\$ENV\" ] || { ENV=$_pix_shim_literal; export ENV; } ;;" \
       '  esac' \
       'fi'
   fi
@@ -274,9 +275,9 @@ integration_has_managed_block() {
 integration_shell_files() {
   case "$1" in
   bash)
-    if [ -e "$2/.bash_profile" ]; then
+    if [ -e "$2/.bash_profile" ] || [ -L "$2/.bash_profile" ]; then
       printf '%s\n' "$2/.bash_profile"
-    elif [ -e "$2/.bash_login" ]; then
+    elif [ -e "$2/.bash_login" ] || [ -L "$2/.bash_login" ]; then
       printf '%s\n' "$2/.bash_login"
     else
       printf '%s\n' "$2/.profile"
@@ -451,6 +452,7 @@ cmd_doctor() {
 
   # Check active symlink
   _doctor_active_ok=0
+  _doctor_active_target=
   if [ -L "$VALISE_ACTIVE_LINK" ]; then
     _target=$(active_release_dir 2>/dev/null || :)
     if [ -n "$_target" ]; then
@@ -648,22 +650,35 @@ cmd_doctor() {
       # a startup file, only the environment.d (systemd) or LaunchAgent
       # (launchd) bridge can carry the env plan into the session. This is only
       # worth reporting when the ACTIVE RELEASE asked for a bridge: gui_env=off
-      # is the deliberate default and must not warn on every such machine.
-      if _doctor_bridge_mode=$(gui_env_mode "$_doctor_active_target" 2>/dev/null); then
-        case "$_doctor_bridge_mode" in
-        systemd)
-          if [ ! -f "$(gui_env_file systemd 2>/dev/null)" ]; then
-            printf '  warn: the active release sets gui_env=systemd but there is no environment.d/10-valise.conf; run valise install again\n'
+      # is the deliberate default and must not warn on every such machine. The
+      # mode is also platform-gated, exactly like the write path
+      # (gui_env_bridge_stage) and the preview: systemd is only written on
+      # Linux and launchd only on macOS, so warning about a bridge the platform
+      # can never write would send the user to an install that skips it.
+      if [ "$_doctor_active_ok" -eq 1 ]; then
+        if _doctor_bridge_mode=$(gui_env_mode "$_doctor_active_target" 2>/dev/null); then
+          _doctor_bridge_os=
+          case "$_doctor_bridge_mode" in
+          systemd) _doctor_bridge_os=linux ;;
+          launchd) _doctor_bridge_os=darwin ;;
+          esac
+          if [ -n "$_doctor_bridge_os" ] && [ "$(cli_os_name)" = "$_doctor_bridge_os" ]; then
+            case "$_doctor_bridge_mode" in
+            systemd)
+              if [ ! -f "$(gui_env_file systemd 2>/dev/null)" ]; then
+                printf '  warn: the active release sets gui_env=systemd but there is no environment.d/10-valise.conf; run valise install again\n'
+              fi
+              ;;
+            launchd)
+              if [ ! -f "$(gui_env_file launchd 2>/dev/null)" ]; then
+                printf '  warn: the active release sets gui_env=launchd but there is no ~/Library/LaunchAgents/sh.valise.env.plist; run valise install again\n'
+              fi
+              ;;
+            esac
           fi
-          ;;
-        launchd)
-          if [ ! -f "$(gui_env_file launchd 2>/dev/null)" ]; then
-            printf '  warn: the active release sets gui_env=launchd but there is no ~/Library/LaunchAgents/sh.valise.env.plist; run valise install again\n'
-          fi
-          ;;
-        esac
+        fi
       fi
-      unset _doctor_awk _doctor_name _doctor_file _doctor_shim _doctor_env _doctor_env_norm _doctor_bridge_mode _doctor_bash_rc _doctor_bash_login
+      unset _doctor_awk _doctor_name _doctor_file _doctor_shim _doctor_env _doctor_env_norm _doctor_bridge_mode _doctor_bridge_os _doctor_bash_rc _doctor_bash_login _doctor_active_target _doctor_active_ok
     else
       printf '  info: skipping the shell integration check\n'
     fi

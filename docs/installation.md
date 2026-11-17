@@ -185,14 +185,17 @@ write the files once.
 the startup files the running shell actually reads for valise integration,
 including the `.bash_profile` or `.bash_login` that bash reads instead of
 `~/.profile`, and warns about archetype pitfalls: a legacy single-stage
-managed block anywhere valise manages a startup file (no interactivity gate,
-upgrade recommended), a sh/ksh login shell whose `$ENV` is unset or does not
+managed block in an rc-stage file valise manages (`.bashrc`, `.zshrc`, or the
+bash login file when bash has an rc chain) - no interactivity gate, upgrade
+recommended - a sh/ksh login shell whose `$ENV` is unset or does not
 point at the valise shim, a missing `~/.zshenv` block whenever zsh is
 installed, and a GUI-session bridge the ACTIVE RELEASE asked for but that is
-missing (`environment.d/10-valise.conf` for `gui_env=systemd`, the
-`sh.valise.env.plist` LaunchAgent for `gui_env=launchd`). It does not warn
-about a missing bridge when the release declares `gui_env=off`, which is the
-deliberate default. It exits nonzero when the active release is missing or
+missing on the platform where that mode is written
+(`environment.d/10-valise.conf` for `gui_env=systemd` on Linux, the
+`sh.valise.env.plist` LaunchAgent for `gui_env=launchd` on macOS). It does not
+warn about a missing bridge when the release declares `gui_env=off`, which is
+the deliberate default, nor about a bridge mode the current platform never
+writes. It exits nonzero when the active release is missing or
 fails verification, and when no startup file carries the integration.
 
 Two options adjust its scope:

@@ -53,7 +53,7 @@ cleanup() { rm -rf "$_tmp" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
 _ALL_MODULES='valise_path valise_editor valise_pager valise_xdg valise_history'
-_ALL_EXPORTS='valise_path_prepend valise_path_append valise_editor_defaults valise_pager_defaults valise_xdg_defaults valise_history_defaults'
+_ALL_EXPORTS='valise_path_prepend valise_path_append valise_path_contains valise_path_remove valise_path_normalize valise_editor_defaults valise_pager_defaults valise_xdg_defaults valise_history_defaults'
 
 printf '\n=== contrib modules load strict ===\n'
 
@@ -87,6 +87,94 @@ assert_contains 'valise_path_prepend moves repeats without dupes' "$_path_out" '
 assert_contains 'valise_path_append moves repeats to the end' "$_path_out" 'append=/b:/usr/bin:/bin:/c:/a'
 assert_contains 'valise_path reload is idempotent' "$_path_out" 'idempotent=/b:/usr/bin:/bin:/c:/a'
 assert_contains 'valise_path drops empty components' "$_path_out" 'normalized=/usr/bin:/bin'
+
+# --- valise_path_contains / valise_path_remove / valise_path_normalize ---
+# These assertions fail before the helpers exist (command not found).
+
+_ext_out=$(
+  VALISE_ROOT="$ROOT_DIR" \
+    VALISE_MODULE_ROOT="$ROOT_DIR" \
+    VALISE_MODULES='valise_path' \
+    VALISE_MODE=strict \
+    /bin/sh -c '. "$VALISE_ROOT/entrypoints/profile.sh" || exit 99
+      PATH=/usr/bin:/bin:/usr/bin
+      valise_path_contains /usr/bin && printf "contains-present=yes\n" || printf "contains-present=NO\n"
+      valise_path_contains /nope && printf "contains-absent=YES\n" || printf "contains-absent=no\n"
+      valise_path_contains "" && printf "contains-empty=YES\n" || printf "contains-empty=no\n"
+      valise_path_contains "a:b" && printf "contains-colon=YES\n" || printf "contains-colon=no\n"
+      valise_path_contains /usr && printf "contains-partial=YES\n" || printf "contains-partial=no\n"
+      valise_path_remove /usr/bin; printf "remove-one=%s rc-ok\n" "$PATH"
+      valise_path_remove /nope; printf "remove-absent-rc=%s\n" "$?"
+      PATH=/a:/b:/a:/c::/b:
+      valise_path_remove /a; printf "remove-dupes=%s\n" "$PATH"
+      PATH=:/x::/y:
+      valise_path_remove /x; printf "remove-norm=%s\n" "$PATH"
+      PATH=:/x::/y:
+      valise_path_normalize; printf "normalize=%s\n" "$PATH"
+      PATH=/x:/y:/x
+      valise_path_normalize; printf "normalize-dedupe=%s\n" "$PATH"
+      PATH=/usr/bin:/bin
+      valise_path_remove "a:b" 2>/dev/null; printf "remove-colon-rc=%s path=%s\n" "$?" "$PATH"
+      valise_path_contains "/a*b" && printf "contains-glob=YES\n" || printf "contains-glob=no\n"
+      PATH=/a*b:/usr/bin
+      valise_path_contains "/a*b" && printf "contains-glob-literal=yes\n" || printf "contains-glob-literal=NO\n"
+      valise_path_remove "/a*b"; printf "remove-glob-literal=%s\n" "$PATH"
+      PATH=/usr/bin:/bin
+      valise_path_prepend "/x?y"; valise_path_contains "/x?y" && printf "prepend-glob-contains=yes\n" || printf "prepend-glob-contains=NO\n"; printf "prepend-glob-path=%s\n" "$PATH"
+      PATH=/a:/b
+      valise_path_remove /a /b
+      valise_path_append /b; printf "append-after-empty=%s\n" "${PATH-EMPTY}"
+      valise_path_remove /b
+      valise_path_prepend /c; printf "prepend-after-empty=%s\n" "${PATH-EMPTY}"'
+)
+assert_contains 'valise_path_contains finds a present entry' "$_ext_out" 'contains-present=yes'
+assert_contains 'valise_path_contains rejects an absent entry' "$_ext_out" 'contains-absent=no'
+assert_contains 'valise_path_contains rejects an empty argument' "$_ext_out" 'contains-empty=no'
+assert_contains 'valise_path_contains rejects a colon-bearing argument' "$_ext_out" 'contains-colon=no'
+assert_contains 'valise_path_contains does not match a partial entry' "$_ext_out" 'contains-partial=no'
+assert_contains 'valise_path_remove removes every occurrence' "$_ext_out" 'remove-one=/bin rc-ok'
+assert_contains 'valise_path_remove of an absent entry succeeds' "$_ext_out" 'remove-absent-rc=0'
+assert_contains 'valise_path_remove dedupes and normalizes' "$_ext_out" 'remove-dupes=/b:/c'
+assert_contains 'valise_path_remove also drops empty components' "$_ext_out" 'remove-norm=/y'
+assert_contains 'valise_path_normalize drops empty components' "$_ext_out" 'normalize=/x:/y'
+assert_contains 'valise_path_normalize keeps first occurrence of dupes' "$_ext_out" 'normalize-dedupe=/x:/y'
+assert_contains 'valise_path_remove rejects a colon argument and leaves PATH untouched' "$_ext_out" 'remove-colon-rc=1 path=/usr/bin:/bin'
+assert_contains 'valise_path_contains on an absent glob does not match' "$_ext_out" 'contains-glob=no'
+assert_contains 'valise_path_contains matches a metacharacter entry byte-exactly' "$_ext_out" 'contains-glob-literal=yes'
+assert_contains 'valise_path_remove removes a metacharacter entry byte-exactly' "$_ext_out" 'remove-glob-literal=/usr/bin'
+assert_contains 'valise_path_prepend adds a metacharacter entry literally and contains finds it' "$_ext_out" 'prepend-glob-contains=yes'
+assert_contains 'valise_path_prepend does not glob the metacharacter argument' "$_ext_out" 'prepend-glob-path=/x?y:/usr/bin:/bin'
+assert_contains 'valise_path_append after PATH emptied adds no leading empty component' "$_ext_out" 'append-after-empty=/b'
+assert_contains 'valise_path_prepend after PATH emptied adds no leading empty component' "$_ext_out" 'prepend-after-empty=/c'
+
+_setu_out=$(
+  VALISE_ROOT="$ROOT_DIR" \
+    VALISE_MODULE_ROOT="$ROOT_DIR" \
+    VALISE_MODULES='valise_path' \
+    VALISE_MODE=strict \
+    /bin/sh -c '. "$VALISE_ROOT/entrypoints/profile.sh" || exit 99
+      set -u
+      unset PATH
+      valise_path_contains /x && printf "setu-contains=YES\n" || printf "setu-contains=no\n"
+      valise_path_normalize && printf "setu-normalize=ok\n" || printf "setu-normalize=FAIL\n"
+      valise_path_prepend /a && printf "setu-prepend=%s\n" "$PATH" || printf "setu-prepend=FAIL\n"
+      valise_path_remove /a && printf "setu-remove=%s\n" "${PATH-unset}" || printf "setu-remove=FAIL\n"'
+)
+assert_contains 'helpers tolerate an unset PATH under set -u (contains)' "$_setu_out" 'setu-contains=no'
+assert_contains 'helpers tolerate an unset PATH under set -u (normalize)' "$_setu_out" 'setu-normalize=ok'
+assert_contains 'helpers tolerate an unset PATH under set -u (prepend)' "$_setu_out" 'setu-prepend=/a'
+assert_contains 'helpers tolerate an unset PATH under set -u (remove)' "$_setu_out" 'setu-remove='
+
+_state_out2=$(
+  VALISE_ROOT="$ROOT_DIR" \
+    VALISE_MODULE_ROOT="$ROOT_DIR" \
+    VALISE_MODULES='valise_path' \
+    VALISE_MODE=strict \
+    /bin/sh -c '. "$VALISE_ROOT/entrypoints/profile.sh" || exit 99; IFS=","; set -f; PATH=/usr/bin:/bin; valise_path_remove /nope; valise_path_normalize; valise_path_contains /usr/bin; printf "ifs=%s\n" "$IFS"; case $- in *f*) printf "noglob=yes\n" ;; *) printf "noglob=NO\n" ;; esac; printf "leftover=%s\n" "${_contrib_path_mode-_contrib_path_mode-unset}${_pr_p-_pr_p-unset}${_vp_rc-_vp_rc-unset}${_vp_f-_vp_f-unset}${_vp_p-_vp_p-unset}${_vp_arg-_vp_arg-unset}${_vp_kept-_vp_kept-unset}${_vp_rem-_vp_rem-unset}${_vp_out-_vp_out-unset}"'
+)
+assert_contains 'valise_path_remove/normalize/contains preserve caller IFS' "$_state_out2" 'ifs=,'
+assert_contains 'valise_path_remove/normalize/contains preserve noglob option' "$_state_out2" 'noglob=yes'
+assert_contains 'valise_path helpers leave no temp variables behind' "$_state_out2" 'leftover=_contrib_path_mode-unset_pr_p-unset_vp_rc-unset_vp_f-unset_vp_p-unset_vp_arg-unset_vp_kept-unset_vp_rem-unset_vp_out-unset'
 
 _state_out=$(
   VALISE_ROOT="$ROOT_DIR" \

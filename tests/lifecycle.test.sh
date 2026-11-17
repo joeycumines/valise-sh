@@ -133,7 +133,7 @@ _have_fish=0
 for _f in /opt/homebrew/bin/fish /usr/local/bin/fish /usr/bin/fish /bin/fish; do
   [ ! -x "$_f" ] || _have_fish=1
 done
-if [ "$_have_fish" -eq 1 ]; then
+if [ "$_have_fish" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
   _use_home fishdir
   mkdir -p "$_home/.config/fish/conf.d"
   chmod 555 "$_home/.config/fish/conf.d"
@@ -148,6 +148,8 @@ if [ "$_have_fish" -eq 1 ]; then
     cat "$_tmp/fishdir.err" >&2
   fi
   chmod 755 "$_home/.config/fish/conf.d"
+elif [ "$_have_fish" -eq 1 ]; then
+  printf '  SKIP: Fish hook directory preflight (chmod 555 is ineffective for uid 0)\n'
 else
   printf '  SKIP: Fish hook directory preflight (no trusted fish)\n'
 fi
@@ -157,6 +159,10 @@ _use_home bindir
 mkdir -p "$_tmp/ro-bin"
 chmod 555 "$_tmp/ro-bin"
 for _bad in "$_tmp/not-a-dir/bin" "$_tmp/ro-bin/bin"; do
+  if [ "$(id -u)" -eq 0 ] && [ "$_bad" = "$_tmp/ro-bin/bin" ]; then
+    printf '  SKIP: unwritable command directory preflight for %s (chmod 555 is ineffective for uid 0)\n' "$_bad"
+    continue
+  fi
   _bin_override=$_bad
   if _v "$_proj" apply >/dev/null 2>"$_tmp/bindir.err"; then
     fail "an unusable command directory stops install before anything changes ($_bad)"
@@ -641,6 +647,10 @@ _state_previous() { printf '%s\n' "$_home/.local/state/valise/previous"; }
 
 # Removal: both owned bridges exist; the LaunchAgents directory refuses the second
 # removal. A failed removal must leave BOTH files exactly as they were.
+# chmod 555 cannot make a directory unwritable for uid 0, so skip as root.
+if [ "$(id -u)" -eq 0 ]; then
+  skip "a failed bridge removal leaves every owned bridge file byte-identical and no aside file (needs non-root: chmod 555 is ineffective for uid 0)"
+else
 _use_home bridge-remove
 mkdir -p "$_home/.config/environment.d" "$_home/Library/LaunchAgents"
 printf '%s\n' '# written by valise (gui_env=systemd); do not edit' 'E2E_KEEP=one' \
@@ -660,11 +670,14 @@ chmod 755 "$_home/Library/LaunchAgents"
 if [ "$rm_apply_status" -ne 0 ] &&
   [ -f "$_home/.config/environment.d/10-valise.conf" ] &&
   [ "$(cksum <"$_home/.config/environment.d/10-valise.conf")" = "$_rm_sys_before" ] &&
-  [ "$(cksum <"$_home/Library/LaunchAgents/sh.valise.env.plist")" = "$_rm_lad_before" ]; then
-  pass "a failed bridge removal leaves every owned bridge file byte-identical"
+  [ "$(cksum <"$_home/Library/LaunchAgents/sh.valise.env.plist")" = "$_rm_lad_before" ] &&
+  ! find "$_home/.config/environment.d" "$_home/Library/LaunchAgents" -name '.valise-remove.*' -print -quit | grep -q .; then
+  pass "a failed bridge removal leaves every owned bridge file byte-identical and no aside file"
 else
-  fail "a failed bridge removal changed an owned bridge file"
+  fail "a failed bridge removal changed an owned bridge file or left an aside file"
   cat "$_tmp/rm-fail.out" >&2
+  find "$_home/.config/environment.d" "$_home/Library/LaunchAgents" -name '.valise-remove.*' >&2 || :
+fi
 fi
 
 # Release use: the publish of the bridge fails, because the bridge file is
@@ -743,6 +756,145 @@ else
   cat "$_tmp/pv.out" >&2
 fi
 
+# Preview parity for gui_env=off: install REMOVES a valise-owned bridge an
+# earlier release wrote, so the dry run must say so instead of "none".
+_use_home preview-off
+mkdir -p "$_home/.config/environment.d"
+printf '%s\n' '# written by valise (gui_env=systemd); do not edit' 'E2E_KEEP=one' \
+  >"$_home/.config/environment.d/10-valise.conf"
+_bridge_proj "$_tmp/bp-off" off offpv
+if _v "$_tmp/bp-off" apply --dry-run >"$_tmp/pv-off.out" 2>&1 &&
+  grep -F "  would remove: $_home/.config/environment.d/10-valise.conf" "$_tmp/pv-off.out" >/dev/null; then
+  pass "a dry run reports a valise-owned bridge that gui_env=off would remove"
+else
+  fail "a dry run hid the bridge removal gui_env=off performs"
+  cat "$_tmp/pv-off.out" >&2
+fi
+# ...and a foreign file at the bridge path is reported as left alone, not removed.
+printf '%s\n' 'E2E_FOREIGN=one' >"$_home/.config/environment.d/10-valise.conf"
+if _v "$_tmp/bp-off" apply --dry-run >"$_tmp/pv-off2.out" 2>&1 &&
+  grep -F "  left alone (not the valise bridge): $_home/.config/environment.d/10-valise.conf" "$_tmp/pv-off2.out" >/dev/null &&
+  ! grep -F "  would remove: $_home/.config/environment.d/10-valise.conf" "$_tmp/pv-off2.out" >/dev/null; then
+  pass "a dry run leaves a foreign bridge file alone under gui_env=off"
+else
+  fail "a dry run promised to remove a foreign bridge file under gui_env=off"
+  cat "$_tmp/pv-off2.out" >&2
+fi
+
+# A failed bridge publish must not leave a 0600 staging file behind in the
+# bridge directory. Portable injection that works even as uid 0: make the
+# bridge's parent directory contain a non-empty directory named exactly like
+# the staging template cannot work (mktemp names are random), so instead the
+# launchd target on macOS is made immutable with chflags and the systemd
+# target on Linux is made unwritable for non-root; as root on macOS the
+# existing chflags lane above already covers the publish-failure path, so this
+# lane asserts the no-staging-file property there.
+if [ "$(uname -s)" = Darwin ]; then
+  _use_home stage-leak
+  _bridge_proj "$_tmp/bp-leak" launchd leak
+  _v "$_tmp/bp-leak" apply >/dev/null 2>&1 || :
+  _leak_lad="$_home/Library/LaunchAgents/sh.valise.env.plist"
+  if [ -f "$_leak_lad" ]; then
+    chflags uchg "$_leak_lad"
+    _bridge_proj "$_tmp/bp-leak2" launchd leak2
+    if _v "$_tmp/bp-leak2" apply >"$_tmp/leak3.out" 2>&1; then
+      leak_apply=0
+    else
+      leak_apply=1
+    fi
+    chflags nouchg "$_leak_lad" 2>/dev/null || :
+    if [ "$leak_apply" -ne 0 ] &&
+      ! find "$_home/Library/LaunchAgents" -name '.valise-gui.*' -print -quit | grep -q .; then
+      pass "a failed bridge publish leaves no .valise-gui staging file behind"
+    else
+      fail "a failed bridge publish left a .valise-gui staging file behind"
+      cat "$_tmp/leak3.out" >&2
+      find "$_home/Library/LaunchAgents" -name '.valise-gui.*' >&2 || :
+    fi
+  else
+    skip "a failed bridge publish leaves no .valise-gui staging file behind (no bridge staged)"
+  fi
+elif [ "$(id -u)" -ne 0 ]; then
+  _use_home stage-leak
+  _bridge_proj "$_tmp/bp-leak" systemd leak
+  _v "$_tmp/bp-leak" apply --no-integration >/dev/null 2>&1 || :
+  mkdir -p "$_home/.config/environment.d"
+  chmod 555 "$_home/.config/environment.d"
+  if _v "$_tmp/bp-leak" apply >"$_tmp/leak3.out" 2>&1; then
+    leak_apply=0
+  else
+    leak_apply=1
+  fi
+  chmod 755 "$_home/.config/environment.d" 2>/dev/null || :
+  if [ "$leak_apply" -ne 0 ] &&
+    ! find "$_home/.config/environment.d" -name '.valise-gui.*' -print -quit | grep -q .; then
+    pass "a failed bridge publish leaves no .valise-gui staging file behind"
+  else
+    fail "a failed bridge publish left a .valise-gui staging file behind"
+    cat "$_tmp/leak3.out" >&2
+    find "$_home/.config/environment.d" -name '.valise-gui.*' >&2 || :
+  fi
+else
+  skip "a failed bridge publish leaves no .valise-gui staging file behind (needs macOS chflags or non-root Linux)"
+fi
+
+# Uninstall must finish (active link, records, releases removed) and exit
+# nonzero when the bridge removal fails, instead of aborting mid-uninstall.
+# Portable injection: macOS chflags on the LaunchAgent; Linux non-root
+# read-only environment.d.
+if [ "$(uname -s)" = Darwin ]; then
+  _use_home uninstall-bridge-fail
+  _bridge_proj "$_tmp/bp-un" launchd un
+  _v "$_tmp/bp-un" apply >/dev/null 2>&1 || :
+  _un_lad="$_home/Library/LaunchAgents/sh.valise.env.plist"
+  if [ -f "$_un_lad" ]; then
+    chflags uchg "$_un_lad"
+    if _v "$_proj" uninstall >"$_tmp/un-bridge.out" 2>&1; then
+      un_rc=0
+    else
+      un_rc=1
+    fi
+    chflags nouchg "$_un_lad" 2>/dev/null || :
+    if [ "$un_rc" -ne 0 ] &&
+      [ ! -L "$_home/.config/valise/active" ] &&
+      [ ! -e "$_home/.local/share/valise/releases" ] &&
+      grep -q 'warning: the GUI env bridge could not be removed completely' "$_tmp/un-bridge.out"; then
+      pass "uninstall finishes and reports nonzero when the bridge removal fails"
+    else
+      fail "uninstall aborted mid-flight or hid the bridge failure"
+      cat "$_tmp/un-bridge.out" >&2
+    fi
+  else
+    skip "uninstall finishes and reports nonzero when the bridge removal fails (no bridge staged)"
+  fi
+elif [ "$(id -u)" -ne 0 ]; then
+  _use_home uninstall-bridge-fail
+  _bridge_proj "$_tmp/bp-un" systemd un
+  _v "$_tmp/bp-un" apply >/dev/null 2>&1 || :
+  if [ -f "$_home/.config/environment.d/10-valise.conf" ]; then
+    chmod 555 "$_home/.config/environment.d"
+    if _v "$_proj" uninstall >"$_tmp/un-bridge.out" 2>&1; then
+      un_rc=0
+    else
+      un_rc=1
+    fi
+    chmod 755 "$_home/.config/environment.d" 2>/dev/null || :
+    if [ "$un_rc" -ne 0 ] &&
+      [ ! -L "$_home/.config/valise/active" ] &&
+      [ ! -e "$_home/.local/share/valise/releases" ] &&
+      grep -q 'warning: the GUI env bridge could not be removed completely' "$_tmp/un-bridge.out"; then
+      pass "uninstall finishes and reports nonzero when the bridge removal fails"
+    else
+      fail "uninstall aborted mid-flight or hid the bridge failure"
+      cat "$_tmp/un-bridge.out" >&2
+    fi
+  else
+    skip "uninstall finishes and reports nonzero when the bridge removal fails (no bridge staged)"
+  fi
+else
+  skip "uninstall finishes and reports nonzero when the bridge removal fails (needs macOS chflags or non-root Linux)"
+fi
+
 printf '\n=== install lifecycle summary ===\n'
-printf 'Total: %d  Pass: %d  Fail: %d\n' "$_total" "$_pass" "$_fail"
+printf 'Total: %d  Pass: %d  Fail: %d  Skip: %d\n' "$_total" "$_pass" "$_fail" "$_skip"
 [ "$_fail" -eq 0 ] || exit 1

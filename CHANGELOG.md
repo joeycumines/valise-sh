@@ -3,9 +3,7 @@
 Notable user-facing changes are recorded here. Versions before 1.0 may include
 module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 
-## [Unreleased]
-
-## [0.4.0] - 2026-11-17
+## [0.4.0] - 2026-11-18
 
 0.4.0 adds phase-separated plans, GUI-session environment bridges, and fixes
 for startup state, environment capture, and release transactions.
@@ -32,6 +30,18 @@ for startup state, environment capture, and release transactions.
   removes it. The mode is recorded in the release, and `valise doctor` warns
   when the platform has a GUI session but no bridge file.
 - `sp_cap_is_interactive` and `sp_cap_is_tty` in the capability library.
+- The `valise_path` module (version 1.1.0) adds `valise_path_contains`,
+  `valise_path_remove`, and `valise_path_normalize` beside the existing
+  `valise_path_prepend` / `valise_path_append`. Prepend and append remain the
+  core: they add a directory to the front or back of PATH exactly once, which
+  is all most use cases need. The new helpers cover inspection and cleanup:
+  `valise_path_contains` tests whether a directory is exactly one PATH entry,
+  `valise_path_remove` removes every occurrence of the named entries and drops
+  empty components, and `valise_path_normalize` drops empty components and
+  duplicates in place. All five are idempotent, safe under `set -u` with an
+  unset `PATH`, preserve the caller's `IFS` and noglob option, match entries
+  byte-exactly when they contain pattern metacharacters, and reject empty or
+  colon-bearing arguments with a diagnostic.
 
 ### Changed
 
@@ -125,6 +135,33 @@ for startup state, environment capture, and release transactions.
   `make check` no longer requires the removed empty `helpers/` and `install/`
   directories. The end-to-end suite filters bash's `cannot set terminal
   process group` warning alongside `no job control in this shell`.
+- A failed GUI-bridge publish no longer leaves a mode-0600 `.valise-gui.*`
+  staging file in the bridge directory, and an aborted install removes one it
+  had staged.
+- Bridge removal now uses an unpredictable mktemp aside name instead of a
+  PID-suffixed one, so it cannot clobber a user file at that path.
+- `valise uninstall` no longer aborts mid-way when the GUI-bridge removal
+  fails: it finishes the remaining cleanup and exits nonzero with a warning.
+- `valise release use` rolls the active link and the previous-release record
+  back also when no release was active before, and rolls both back when
+  command-stub reconciliation fails.
+- `apply --dry-run` reports `would remove: <path>` for a valise-owned bridge
+  that `gui_env=off` would delete, and reports a foreign or symlinked bridge
+  as left alone.
+- `integration_preflight` checks the GUI-bridge directory only on the
+  platform that actually writes that bridge mode.
+- The env capture treats a failed `tr`/`wc` count as a refusal instead of
+  coercing it to zero, pins `LC_ALL=C` on every awk step, replays a plan
+  diagnostic whose final line has no newline, and no longer passes an unused
+  `EEC_ROOT` to the probe.
+- `valise test`/`valise run` no longer leak `VALISE_MODULE_ROOT` and
+  `_valise_plan_carried` into the module body, so a test can catch a module
+  that reads them at runtime instead of load time.
+- The managed block tolerates an unset `PATH` under `set -u`, treats a
+  dangling `$ENV` symlink as absent, and clears the env success markers when
+  the env plan file disappears mid-startup.
+- Compile rejects two modules that share a display name in one closure (the
+  export-ownership ledger names providers by display name).
 
 ## [0.3.0] - 2026-11-06
 

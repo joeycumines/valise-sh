@@ -1219,7 +1219,12 @@ printf '%s\n' 'bundle=default' 'variant=default' 'gui_env=off' >"$_cp/valise.con
 printf 'default\tsh\tcapmod\ndefault\tbash\tcapmod\n' >"$_cp/bundles.tsv"
 _meta "$_cp/module.d/capmod.meta" name=capmod version=1.0.0 side_effect=read-only \
   'requires=' 'optional=' shells=posix platforms=any exports= load=modules/capmod.sh tests=
-ln -sf /bin/bash "$_tmp/fakebin/sh"
+# The fakebin `sh` must resolve like the real bash/zsh/ksh interpreters do -
+# from PATH - so link the bash found on PATH instead of hardcoding /bin/bash.
+_cap_bash=$(command -v bash 2>/dev/null || :)
+[ -n "$_cap_bash" ] || _cap_bash=/bin/bash
+ln -sf "$_cap_bash" "$_tmp/fakebin/sh"
+unset _cap_bash
 # _cap_body: the module body for the next case, read from stdin.
 _cap_body() { cat >"$_cp/modules/capmod.sh"; }
 # _cap_apply: install the current body (no capture: gui_env=off).
@@ -1364,7 +1369,7 @@ _cap_body <<'EOF'
 CAP_SHV=ok
 export CAP_SHV
 EOF
-if _cap_apply && env -i HOME="$_cap_home" PATH="$_tmp/fakebin:/usr/bin" XDG_DATA_HOME="$_cap_home/.local/share" \
+if _cap_apply && env -i HOME="$_cap_home" PATH="$_tmp/fakebin" XDG_DATA_HOME="$_cap_home/.local/share" \
   XDG_CONFIG_HOME="$_cap_home/.config" XDG_STATE_HOME="$_cap_home/.local/state" SHELL=/bin/sh TMPDIR="$_tmp" \
   "$_valise" -C "$_cp" env export environment.d >"$_tmp/cap-sh.out" 2>"$_tmp/cap-sh.err" &&
   grep -Fx 'CAP_SHV=ok' "$_tmp/cap-sh.out" >/dev/null; then

@@ -154,6 +154,23 @@ case "$_doctor_out" in
   *"platform:"*) pass "doctor reports platform" ;;
   *) fail "doctor reports platform" ;;
 esac
+# With no active release, doctor must still finish every check and exit with
+# the ordinary "some checks failed" status, not an unbound-variable crash
+# under set -eu (integration.sh references the active target only when the
+# active link resolved).
+_doctor_rc=0
+"$_valise" doctor >"$_test_home/doctor-noactive.out" 2>"$_test_home/doctor-noactive.err" || _doctor_rc=$?
+if [ "$_doctor_rc" -ne 0 ] &&
+  grep -q 'FAIL: no active release configured' "$_test_home/doctor-noactive.out" &&
+  grep -q 'platform:' "$_test_home/doctor-noactive.out" &&
+  ! grep -q 'unbound variable' "$_test_home/doctor-noactive.err" &&
+  grep -q 'some checks failed' "$_test_home/doctor-noactive.err"; then
+  pass "doctor without an active release fails cleanly, without an unbound-variable crash"
+else
+  fail "doctor without an active release crashed or reported the wrong outcome (rc=$_doctor_rc)"
+  cat "$_test_home/doctor-noactive.out" "$_test_home/doctor-noactive.err" >&2
+fi
+unset _doctor_out _doctor_rc
 
 # --- Release list (empty) ---
 check_output_contains "release list on empty state" "no releases installed" "$_valise" release list

@@ -19,6 +19,18 @@ pass() { _total=$((_total + 1)); _pass=$((_pass + 1)); printf '  PASS: %s\n' "$1
 fail() { _total=$((_total + 1)); _fail=$((_fail + 1)); printf '  FAIL: %s\n' "$1" >&2; }
 skip() { _total=$((_total + 1)); _skip=$((_skip + 1)); printf '  SKIP: %s\n' "$1"; }
 
+# Every scenario below drives a real interpreter. Without the shell installed,
+# an absence assertion passes vacuously and a presence assertion fails, so the
+# whole zsh/bash part of the lane is skipped with a named reason instead.
+if [ ! -x /bin/zsh ]; then
+  skip "zsh scenarios: /bin/zsh is not installed"
+  printf '\n%s: %d total, %d pass, %d fail, %d skip\n' "startup-state" "$_total" "$_pass" "$_fail" "$_skip"
+  exit 0
+fi
+if [ ! -x /bin/bash ]; then
+  skip "bash scenarios need /bin/bash in addition to /bin/zsh"
+fi
+
 _repo=$(cd "$(dirname "$0")/.." && pwd -P)
 _valise="$_repo/bin/valise"
 _tmp=$(mktemp -d "${TMPDIR:-/tmp}/valise-startup-state.XXXXXX")
@@ -109,9 +121,9 @@ unset _b_shell
 
 _os=$(uname -s)
 case "$_os" in
-Darwin) _sh_bin=/bin/sh ;;
-*) _sh_bin=/bin/sh ;;
+  Darwin|Linux|*BSD) : ;;
 esac
+unset _os
 
 # _build <bundle> <out-dir>: build one bundle of the fixture into <out-dir>.
 _build() {
@@ -270,9 +282,14 @@ fi
 
 # Scenario 6: a release with no env plan file must run no interactive module,
 # even though its interactive plan is present. The stage-1 failure must block
-# stage 2 instead of letting it run on a missing env stage.
+# stage 2 instead of letting it run on a missing env stage. The fixture release
+# is salted so it gets its own store id: deleting plans/zsh.sh from the shared
+# release-a would also break every later scenario that reinstalls it.
+rm -f "$_project/modules/envdep.sh.salt6"
+printf '%s\n' '# salt 6' >>"$_project/modules/envdep.sh"
+_build startup "$_tmp/release-missing" || { fail "build the missing-plan fixture bundle"; exit 1; }
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/zsh
+_install "$_tmp/release-missing" "$_home" /bin/zsh
 _active=$(eval "$(grep '^_valise_active_link=' "$_home/.zshenv")"; printf '%s' "$_valise_active_link")
 _rel_real=$(cd "$_active" && pwd -P)
 chmod -R u+w "$_rel_real" 2>/dev/null || :
@@ -395,6 +412,13 @@ else
   fail "A -> B -> A returned the wrong implementation (got: $(tail -n 1 "$_tmp/s12.out"))"
 fi
 
+if [ ! -x /bin/bash ]; then
+  skip "bash scenarios 13-15: /bin/bash is not installed"
+  printf '\n%s: %d total, %d pass, %d fail, %d skip\n' "startup-state" "$_total" "$_pass" "$_fail" "$_skip"
+  [ "$_fail" -eq 0 ] || exit 1
+  exit 0
+fi
+
 # Scenario 13: a fresh bash home (no login or rc files) with bash as the login
 # shell. `bash --login -i` reads only the login file, never .bashrc, so the
 # interactive plan must be reachable from that login file.
@@ -455,10 +479,15 @@ fi
 _reset_home "$_home"
 printf '# BEGIN valise managed block\n: single stage\n# END valise managed block\n' >"$_home/.zshrc"
 _home_env "$_home" SHELL=/bin/zsh -- "$_valise" doctor >"$_tmp/s16b.out" 2>&1 || :
-if grep -q 'zshrc has a legacy single-stage block' "$_tmp/s16b.out"; then
+# doctor exits nonzero via die on findings, so || : is expected here; what
+# must NOT happen is a set -u unbound-variable crash before the footer.
+if grep -q 'zshrc has a legacy single-stage block' "$_tmp/s16b.out" &&
+  grep -q 'some checks failed' "$_tmp/s16b.out" &&
+  ! grep -q 'unbound variable' "$_tmp/s16b.out"; then
   pass "doctor still reports a genuine single-stage rc-file block"
 else
   fail "doctor did not report a genuine single-stage rc-file block"
+  cat "$_tmp/s16b.out" >&2
 fi
 
 printf '\n%s: %d total, %d pass, %d fail, %d skip\n' "startup-state" "$_total" "$_pass" "$_fail" "$_skip"

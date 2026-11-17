@@ -317,12 +317,18 @@ Raw PATH assignments (`PATH=...:$PATH`, `export PATH=...`) are rejected by
 `valise lint` in **every** phase, not only `env`: the env plan re-runs at every
 startup entry point and the interactive plan re-runs on a release switch (and
 on an explicit `source ~/.bashrc`), so a raw assignment duplicates entries in
-either one. PATH changes go through `valise_path_prepend` /
-`valise_path_append` (declare `requires=valise_path`), which are idempotent
-under re-evaluation: sourcing the env plan twice, or in a nested shell, reaches
-the same fixed point instead of growing duplicate entries, and an entry that
-was reordered is moved back to the front. The engine's own `valise_path` module
-is the exempt implementer of those helpers.
+either one. PATH changes go through the `valise_path` module's helpers
+(declare `requires=valise_path`), which are idempotent under re-evaluation:
+sourcing the env plan twice, or in a nested shell, reaches the same fixed
+point instead of growing duplicate entries, and an entry that was reordered
+is moved back to the front. The core helpers are `valise_path_prepend` and
+`valise_path_append` — adding a directory to the front or back of PATH once —
+and that is all most use cases need. The module also exports
+`valise_path_contains` (test whether a directory is exactly one PATH entry),
+`valise_path_remove` (remove every occurrence of the named entries and drop
+empty components), and `valise_path_normalize` (drop empty components and
+duplicate entries in place) for inspection and cleanup. The engine's own
+`valise_path` module is the exempt implementer of those helpers.
 
 The lint scan is a line-based authoring aid, not a security boundary: releases
 are sealed by the manifest, and indirect writes (`PATH+=`, `eval`,

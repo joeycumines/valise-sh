@@ -42,8 +42,8 @@ capture_interpreter() {
   *) return 1 ;;
   esac
   case "$_ci_path" in
-  /*) printf '%s\n' "$_ci_path" ;;
-  *) return 1 ;;
+  /*) printf '%s\n' "$_ci_path"; unset _ci_path ;;
+  *) unset _ci_path; return 1 ;;
   esac
 }
 
@@ -138,20 +138,23 @@ devtool_runner() {
         '  if [ "$_valise_dev_status" -eq 0 ] && [ -f "$_valise_dev_int" ]; then' \
         '    . "$_valise_dev_int" || _valise_dev_status=$?' \
         '  fi' \
-        '  unset VALISE_RELOAD' \
+        '  unset VALISE_RELOAD VALISE_MODULE_ROOT' \
         '  return "$_valise_dev_status"' \
         '}' \
         'VALISE_MODULE_ROOT=$_valise_dev_release' \
         'VALISE_MODE=strict' \
+        '_valise_plan_carried=' \
         '. "$_valise_dev_plans" || {' \
         "  printf '%s\\n' 'valise: the modules failed to load' >&2" \
         '  exit 97' \
         '}' \
         'if [ -f "$_valise_dev_int" ]; then' \
+        '  VALISE_MODULE_ROOT=$_valise_dev_release' \
         '  . "$_valise_dev_int" || {' \
         "    printf '%s\\n' 'valise: the interactive modules failed to load' >&2" \
         '    exit 97' \
         '  }' \
+        '  unset VALISE_MODULE_ROOT' \
         'fi'
       # The body goes LAST: it calls valise_test_reload, which needs the plan
       # paths, so they must survive until it runs.
@@ -324,8 +327,7 @@ env_export_capture() {
   # so a value containing spaces survives intact.
   _eec_status=0
   set -- PATH=/usr/bin:/bin HOME="${HOME:-/}" \
-    EEC_HOME="${HOME:-/}" EEC_ZDOT="$_eec_scratch/zdot" EEC_PLAN_ERR="$_eec_plan_err" \
-    EEC_ROOT="$_eec_active"
+    EEC_HOME="${HOME:-/}" EEC_ZDOT="$_eec_scratch/zdot" EEC_PLAN_ERR="$_eec_plan_err"
   if [ "${TMPDIR+x}" = x ]; then set -- "$@" TMPDIR="$TMPDIR"; fi
   if [ "${XDG_CONFIG_HOME+x}" = x ]; then set -- "$@" XDG_CONFIG_HOME="$XDG_CONFIG_HOME"; fi
   if [ "${XDG_DATA_HOME+x}" = x ]; then set -- "$@" XDG_DATA_HOME="$XDG_DATA_HOME"; fi
@@ -347,7 +349,7 @@ env_export_capture() {
       # code sent them to /dev/null and reported only "failed to load".
       if [ -s "$_eec_plan_err" ]; then
         printf 'valise: the plan reported:\n' >&2
-        while IFS= read -r _eec_line; do printf '  %s\n' "$_eec_line" >&2; done <"$_eec_plan_err"
+        while IFS= read -r _eec_line || [ -n "$_eec_line" ]; do printf '  %s\n' "$_eec_line" >&2; done <"$_eec_plan_err"
       fi
       ;;
     *) printf 'valise: error: the env capture for shell %s failed (status %s)\n' "$_eec_shell" "$_eec_status" >&2 ;;
@@ -393,9 +395,12 @@ env_export_capture() {
       # above 0x7F is refused rather than published unchecked. ASCII is valid UTF-8
       # by definition and still exports.
       _eec_high=$(LC_ALL=C "$_eec_tr" -d '\000-\177' <"$_eec_scratch/target" 2>/dev/null |
-        "$_eec_wc" -c | "$_eec_tr" -d '[:space:]') || _eec_result=1
-      case "${_eec_high:-0}" in
-      '' | 0) ;;
+        "$_eec_wc" -c) || _eec_result=1
+      _eec_high=${_eec_high#"${_eec_high%%[![:space:]]*}"}
+      _eec_high=${_eec_high%"${_eec_high##*[![:space:]]}"}
+      case "${_eec_high:-}" in
+      '' | *[!0-9]*) _eec_result=1 ; _eec_diagnosed=1 ;;
+      0) ;;
       *)
         printf 'valise: error: the env plan produced a non-ASCII value, and no trusted iconv is available to check it as UTF-8\n' >&2
         _eec_result=1
@@ -408,14 +413,22 @@ env_export_capture() {
     for _eec_dump in base target; do
       _eec_dump_file="$_eec_scratch/$_eec_dump"
       _eec_lf=$(LC_ALL=C "$_eec_tr" -cd '\012' <"$_eec_dump_file" 2>/dev/null |
-        "$_eec_wc" -c | "$_eec_tr" -d '[:space:]') || _eec_result=1
+        "$_eec_wc" -c) || _eec_result=1
       _eec_c0=
       [ "$_eec_result" -ne 0 ] ||
         _eec_c0=$(LC_ALL=C "$_eec_tr" -cd '\001-\010\013-\037' <"$_eec_dump_file" 2>/dev/null |
-          "$_eec_wc" -c | "$_eec_tr" -d '[:space:]') || _eec_result=1
+          "$_eec_wc" -c) || _eec_result=1
       [ "$_eec_result" -eq 0 ] || break
-      case "${_eec_lf:-0}" in '' | *[!0-9]*) _eec_lf=0 ;; esac
-      case "${_eec_c0:-0}" in '' | *[!0-9]*) _eec_c0=0 ;; esac
+      # wc -c pads with leading spaces on BSD, so strip whitespace in shell
+      # before the digit check: a failed tr/wc (empty or non-digit) is a
+      # refusal, never a clean 0.
+      _eec_lf=${_eec_lf#"${_eec_lf%%[![:space:]]*}"}
+      _eec_lf=${_eec_lf%"${_eec_lf##*[![:space:]]}"}
+      _eec_c0=${_eec_c0#"${_eec_c0%%[![:space:]]*}"}
+      _eec_c0=${_eec_c0%"${_eec_c0##*[![:space:]]}"}
+      case "${_eec_lf:-}" in '' | *[!0-9]*) _eec_result=1 ;; esac
+      case "${_eec_c0:-}" in '' | *[!0-9]*) _eec_result=1 ;; esac
+      [ "$_eec_result" -eq 0 ] || break
       if [ "$_eec_lf" -eq 0 ] && [ "$_eec_c0" -eq 0 ]; then
         continue
       fi
@@ -428,7 +441,7 @@ env_export_capture() {
       _eec_diagnosed=1
       "$_eec_tr" '\000' '\012' <"$_eec_dump_file" >"$_eec_scratch/$_eec_dump.lf" || break
       _eec_named=0
-      "$_eec_awk" '
+      LC_ALL=C "$_eec_awk" '
         BEGIN { lastkey = ""; printed = 0 }
         {
           keyline = ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/)
@@ -473,7 +486,7 @@ env_export_capture() {
     # override and is kept; a key present only in the target is an export.
     # Records are matched by FILENAME, never by record count, so an empty
     # baseline cannot shift which side a record belongs to.
-    BASE="$_eec_scratch/base.lf" TARGET="$_eec_scratch/target.lf" "$_eec_awk" '
+    LC_ALL=C BASE="$_eec_scratch/base.lf" TARGET="$_eec_scratch/target.lf" "$_eec_awk" '
       function key_of(rec,   at) { at = index(rec, "="); return at ? substr(rec, 1, at - 1) : "" }
       FILENAME == ENVIRON["BASE"] { base_key[key_of($0)] = $0; next }
       FILENAME == ENVIRON["TARGET"] {
@@ -495,7 +508,7 @@ env_export_capture() {
       _eec_nc2=$(printf '\357\277\277')
       if LC_ALL=C "$_eec_grep" -q -F -e "$_eec_nc1" -e "$_eec_nc2" "$_eec_scratch/diff" 2>/dev/null; then
         _eec_nc_key=$(LC_ALL=C "$_eec_grep" -F -e "$_eec_nc1" -e "$_eec_nc2" "$_eec_scratch/diff" 2>/dev/null |
-          "$_eec_awk" -F= 'NR == 1 { print $1; exit }')
+          LC_ALL=C "$_eec_awk" -F= 'NR == 1 { print $1; exit }')
         printf 'valise: error: %s is set to a value containing U+FFFE or U+FFFF, which XML 1.0 forbids; GUI env formats cannot represent it
 ' \
           "${_eec_nc_key:-an env variable}" >&2
@@ -509,7 +522,7 @@ env_export_capture() {
     # the variables this capture itself overwrote; EXCLUDED_* records how many
     # real exports were dropped, so `valise env export` can say what it left
     # out instead of silently publishing a partial environment.
-    "$_eec_awk" '
+    LC_ALL=C "$_eec_awk" '
       {
         name = $0; sub(/=.*/, "", name)
         if (name !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next
@@ -538,7 +551,7 @@ env_export_capture() {
   _eec_rc=$_eec_result
   unset _eec_shell _eec_active _eec_plan _eec_interp _eec_env _eec_sh _eec_awk _eec_scratch _eec_mkdir _eec_probe \
     _eec_env_abs _eec_plan_err _eec_status _eec_line
-  unset _eec_tr _eec_iconv _eec_result _eec_diagnosed _eec_dump _eec_named _eec_high _eec_grep _eec_nc1 _eec_nc2 _eec_nc_key
+  unset _eec_tr _eec_wc _eec_iconv _eec_result _eec_diagnosed _eec_dump _eec_named _eec_high _eec_grep _eec_nc1 _eec_nc2 _eec_nc_key
   return "$_eec_rc"
 }
 
@@ -567,7 +580,7 @@ env_export_emit() {
     # literal `]` that CLOSES the class, so a class spelled that way has
     # implementation-defined meaning (BWK, gawk and BusyBox happen to agree;
     # that is luck, not portability).
-    printf '%s\n' "$_eee_capture" | "$_eee_awk" -F= '
+    printf '%s\n' "$_eee_capture" | LC_ALL=C "$_eee_awk" -F= '
       function needs_quoting(val,   i, c, metas) {
         metas = " \t\n\"'"'"'\\$`!*?[]{}()<>|;&"
         for (i = 1; i <= length(val); i++) {
@@ -620,7 +633,7 @@ env_export_emit() {
       '  <key>Label</key><string>sh.valise.env</string>' \
       '  <key>ProgramArguments</key><array>' \
       '    <string>/bin/sh</string><string>-c</string>'
-    printf '%s\n' "$_eee_capture" | "$_eee_awk" -F= '
+    printf '%s\n' "$_eee_capture" | LC_ALL=C "$_eee_awk" -F= '
       function shq(s) { gsub(/'"'"'/, "'"'"'\\'"'"''"'"'", s); return "'"'"'" s "'"'"'" }
       BEGIN { cmd = "" }
       /^[A-Za-z_][A-Za-z0-9_]*=/ {
@@ -650,7 +663,7 @@ env_export_emit() {
     # substring of the key (`key ~ /PATH/`) is wrong twice over: it mislabels
     # CLASSPATH/MANPATH as single paths, and it invents a rule the format does
     # not have.
-    printf '%s\n' "$_eee_capture" | "$_eee_awk" -F= '
+    printf '%s\n' "$_eee_capture" | LC_ALL=C "$_eee_awk" -F= '
       function is_path_list(val,   n, i, parts) {
         if (index(val, ":") == 0) return 0
         n = split(val, parts, ":")
@@ -673,8 +686,9 @@ env_export_emit() {
     ;;
   *) _eee_rc=1 ;;
   esac
-  unset _eee_format _eee_capture _eee_awk
-  return "$_eee_rc"
+  _eee_status=$_eee_rc
+  unset _eee_format _eee_capture _eee_awk _eee_rc
+  return "$_eee_status"
 }
 
 cmd_env() {

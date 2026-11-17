@@ -143,7 +143,7 @@ See [contrib-modules.md](contrib-modules.md) for the list.
 
 | Module | Version | Exports | Source | Status |
 |---|---|---|---|---|
-| `valise_path` | 1.0.0 | `valise_path_prepend`, `valise_path_append` | `modules/system/valise_path.sh` | active |
+| `valise_path` | 1.1.0 | `valise_path_prepend`, `valise_path_append`, `valise_path_contains`, `valise_path_remove`, `valise_path_normalize` | `modules/system/valise_path.sh` | active |
 | `valise_editor` | 1.0.0 | `valise_editor_defaults` | `modules/system/valise_editor.sh` | active |
 | `valise_pager` | 1.0.0 | `valise_pager_defaults` | `modules/system/valise_pager.sh` | active |
 | `valise_xdg` | 1.0.0 | `valise_xdg_defaults` | `modules/system/valise_xdg.sh` | active |
