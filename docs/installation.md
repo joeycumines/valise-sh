@@ -256,8 +256,8 @@ interrupted install never leaves a stub valise does not know about. It only
 touches files listed there, and it refuses a release whose `commands=` holds
 a name the build would have rejected:
 
-- A file valise did not write is never replaced. Install reports the
-  command as not published, and `valise doctor` reports the collision.
+- A file valise did not write is never replaced. Install reports that the
+  command is not published, and `valise doctor` reports the collision.
 - A stub that was edited after valise wrote it is left in place and
   dropped from the ledger.
 

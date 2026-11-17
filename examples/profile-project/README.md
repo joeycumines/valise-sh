@@ -82,7 +82,7 @@ integration: /home/you/.zprofile: managed block present
 active release: ad98ea2ba30bb6c6d4f08b6dec59585228cdf855b814543a37f80ee0f0518773
 active bundle: default
 active variant: default
-active built by valise: 0.3.0
+active built by valise: 0.4.0
 build output: /path/to/profile-project/build/release (bundle default, variant default)
 drift: active release matches build output
 ```

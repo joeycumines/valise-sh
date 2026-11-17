@@ -2,7 +2,7 @@
 
 ## Current status
 
-`valise-sh` is at **0.3.0**. Before 1.0, the CLI, module ABI, and release
+`valise-sh` is at **0.4.0**. Before 1.0, the CLI, module ABI, and release
 format do not have a backward-compatibility guarantee. Pin the version you
 use, read the release notes, and run `valise lint` and `valise test` on your
 project before upgrading. A project can set `requires_valise=` in

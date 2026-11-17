@@ -50,19 +50,19 @@ contract, [module-abi.md](module-abi.md) the metadata,
    (`bash`, `zsh`, `ksh`, or `sh`) and sources it. The block is two-stage:
    stage 1 always sources `plans/<class>.sh` (the convergent env plan,
    guarded by a release-id-keyed load guard), and stage 2 sources
-   `plans/<class>-interactive.sh` only when `$-` contains `i`. **Stage 2 is
-   written only into the shell's rc-stage file** — `~/.bashrc`, `~/.zshrc`, or
-   the `$ENV` shim, and into the one file a login bash reads (`~/.bash_profile`,
-   else `~/.bash_login`, else `~/.profile`), placed last, because a login bash
-   never reads `~/.bashrc`. It is never written into `~/.zshenv` or
-   `~/.zprofile`: an interactive zsh already has `i` in `$-` while it reads
-   `~/.zshenv`, and running interactive setup there would precede the user's
-   own `.zshrc`. Stage 1 goes into every entry point that can carry
-   env: `~/.profile`, the login files, `~/.zshenv`, `~/.zprofile`, and the
-   `$ENV` shim. Non-interactive contexts therefore get the env plan, silently,
-   but only in shells that read a startup file in that mode: zsh via
-   `~/.zshenv`, and sh/ksh interactive subshells via `$ENV`. **bash is the
-   exception**: a non-interactive `bash -c` reads no startup file, and valise
+   `plans/<class>-interactive.sh` only when `$-` contains `i`. Stage 2 is
+   written only into the shell's rc-stage file (`~/.bashrc`, `~/.zshrc`, or
+   the `$ENV` shim) and into the one file a login bash reads
+   (`~/.bash_profile`, else `~/.bash_login`, else `~/.profile`), placed last,
+   because a login bash never reads `~/.bashrc`. It is never written into
+   `~/.zshenv` or `~/.zprofile`: an interactive zsh already has `i` in `$-`
+   while it reads `~/.zshenv`, and running interactive setup there would
+   precede the user's own `.zshrc`. Stage 1 goes into every entry point that
+   can carry env: `~/.profile`, the login files, `~/.zshenv`, `~/.zprofile`,
+   and the `$ENV` shim. Non-interactive contexts therefore get the env plan
+   silently, but only in shells that read a startup file in that mode: zsh via
+   `~/.zshenv`, and sh/ksh interactive subshells via `$ENV`. Bash is the
+   exception: a non-interactive `bash -c` reads no startup file, and valise
    does not set `BASH_ENV`, so it gets no valise env. An `ssh host cmd` depends
    on how bash was built: bash can read `~/.bashrc` for a remote command when
    its remote-shell detection is compiled in (the bash manual documents it).
