@@ -731,6 +731,15 @@ else
       fail "a failed bridge publish on release use left the previous-release record pointing at the active release"
       cat "$_tmp/pf-use.out" >&2
     fi
+    # Moving the outgoing bridge aside CREATES an .valise-outgoing.* name with
+    # mktemp before the mv runs. An immutable bridge makes that mv fail, and the
+    # created file must not be stranded in the bridge directory.
+    if [ "$(_find_count "$_home/Library/LaunchAgents" '.valise-outgoing.*')" = 0 ]; then
+      pass "a failed bridge publish strands no .valise-outgoing aside file"
+    else
+      fail "a failed bridge publish left an .valise-outgoing aside file behind"
+      find "$_home/Library/LaunchAgents" -name '.valise-outgoing.*' >&2 || :
+    fi
   else
     fail "could not set up two installed releases for the release-use publish failure"
     cat "$_tmp/pf-a.out" "$_tmp/pf-b.out" >&2
@@ -834,6 +843,54 @@ else
     fail "a failed bridge publish during install left the link or the previous-release record changed"
     cat "$_tmp/pf-install.out" >&2
   fi
+
+  # The REMOVE direction of the same transaction. The incoming release sets
+  # gui_env=off, so gui_env_bridge_stage stages `_gui_action=remove` and leaves
+  # _gui_target EMPTY - a guard keyed on _gui_target cannot see the outgoing
+  # bridge, and remove_gui_env_bridge would then delete it for good. A reconcile
+  # failure afterwards rolls the link back to a release whose bridge is already
+  # gone: the exact inconsistency the transaction exists to prevent, in the
+  # other direction. This lane has its OWN home and bridge path so it leaves no
+  # state for the lanes below.
+  _use_home remove-dir
+  _bridge_proj "$_tmp/bp-o1" launchd o1
+  _v "$_tmp/bp-o1" apply >"$_tmp/rd-1.out" 2>&1 || :
+  _id_o1=$(_active_id)
+  _bridge_proj "$_tmp/bp-o2" off o2
+  printf '%s\n' 'name=tool_extra' 'side_effect=read-only' 'shells=posix' 'platforms=any' \
+    'exports=extra' 'commands=extra' 'load=modules/extra.sh' >"$_tmp/bp-o2/module.d/tool_extra.meta"
+  printf 'extra() { echo extra; }\n' >"$_tmp/bp-o2/modules/extra.sh"
+  awk -F '	' -v OFS='	' 'NF == 3 && $1 == "default" { $3 = $3 " tool_extra" } { print }' \
+    "$_tmp/bp-o2/bundles.tsv" >"$_tmp/bp-o2/bundles.new"
+  mv "$_tmp/bp-o2/bundles.new" "$_tmp/bp-o2/bundles.tsv"
+  _v "$_tmp/bp-o2" apply >"$_tmp/rd-2.out" 2>&1 || :
+  _id_o2=$(_active_id)
+  # Back to r1 so r2 is not active and reconcile has to ADD `extra`.
+  _v "$_tmp/bp-o1" apply >"$_tmp/rd-3.out" 2>&1 || :
+  _lad_rd="$_home/Library/LaunchAgents/sh.valise.env.plist"
+  if [ -n "$_id_o1" ] && [ -n "$_id_o2" ] && [ "$_id_o1" != "$_id_o2" ] &&
+    [ "$(_active_id)" = "$_id_o1" ] && [ -f "$_lad_rd" ]; then
+    _lad_o1=$(cksum <"$_lad_rd")
+    chflags uchg "$_home/.local/bin"
+    if _v "$_tmp/bp-o1" release use "$_id_o2" >"$_tmp/rd-use.out" 2>&1; then
+      rd_use=0
+    else
+      rd_use=1
+    fi
+    chflags nouchg "$_home/.local/bin" 2>/dev/null || :
+    if [ "$rd_use" -ne 0 ] && [ "$(_active_id)" = "$_id_o1" ] &&
+      [ -f "$_lad_rd" ] && [ "$(cksum <"$_lad_rd")" = "$_lad_o1" ]; then
+      pass "a reconcile failure from a bridge-owning release to gui_env=off restores the outgoing bridge"
+    else
+      fail "a reconcile failure from a bridge-owning release to gui_env=off destroyed the outgoing bridge"
+      cat "$_tmp/rd-use.out" >&2
+      printf 'active=%s (want %s)\n' "$(_active_id)" "$_id_o1" >&2
+      if [ -f "$_lad_rd" ]; then cksum <"$_lad_rd" >&2; else printf 'bridge=GONE\n' >&2; fi
+    fi
+  else
+    fail "could not set up the bridge-owning to gui_env=off reconcile-failure case"
+    cat "$_tmp/rd-1.out" "$_tmp/rd-2.out" "$_tmp/rd-3.out" >&2
+  fi
 fi
 
 # Preview: a mode for the OTHER platform is reported as skipped, and nothing is
@@ -913,6 +970,19 @@ if [ "$(uname -s)" = Darwin ]; then
     skip "a failed bridge publish leaves no .valise-gui staging file behind (no bridge staged)"
   fi
 elif [ "$(id -u)" -ne 0 ]; then
+  # On Linux without chattr there is no way to make gui_env_bridge_publish fail
+  # AFTER the 0600 staging file exists: the only levers (an unwritable bridge
+  # DIRECTORY, or an unowned target) are both rejected earlier, by
+  # integration_preflight and gui_env_bridge_stage's ownership test, so mktemp
+  # never runs and no staging file can be left behind. The previous version of
+  # this lane made the directory read-only, which does exactly that: preflight
+  # aborts with 'cannot write the GUI env bridge in <dir>' and the assertion
+  # passed without exercising the cleanup it was written for.
+  #
+  # What IS provable here: the preflight refusal happens BEFORE anything is
+  # staged, so no staging file exists when it aborts. That is the property this
+  # lane now asserts on Linux; the publish-failure cleanup is covered by the
+  # chflags lane above (macOS), which can fail the mv itself.
   _use_home stage-leak
   _bridge_proj "$_tmp/bp-leak" systemd leak
   _v "$_tmp/bp-leak" apply --no-integration >/dev/null 2>&1 || :
@@ -925,10 +995,11 @@ elif [ "$(id -u)" -ne 0 ]; then
   fi
   chmod 755 "$_home/.config/environment.d" 2>/dev/null || :
   if [ "$leak_apply" -ne 0 ] &&
+    grep -q 'cannot write the GUI env bridge in' "$_tmp/leak3.out" &&
     [ "$(_find_count "$_home/.config/environment.d" '.valise-gui.*')" = 0 ]; then
-    pass "a failed bridge publish leaves no .valise-gui staging file behind"
+    pass "an unwritable bridge directory is refused at preflight, before anything is staged"
   else
-    fail "a failed bridge publish left a .valise-gui staging file behind"
+    fail "an unwritable bridge directory was not refused at preflight, or a staging file was left behind"
     cat "$_tmp/leak3.out" >&2
     find "$_home/.config/environment.d" -name '.valise-gui.*' >&2 || :
   fi

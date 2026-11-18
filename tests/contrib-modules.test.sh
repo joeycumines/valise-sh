@@ -229,11 +229,14 @@ done
 [ -z "$_mx_dir" ] || rm -rf "$_mx_dir"
 
 # --- A metacharacter PATH entry beside a REAL lookalike file on disk ---
-# The lane above used paths that do not exist, so pathname expansion had nothing
-# to match and could not distort the comparison. With a real file present, an
-# unquoted word-split of the PATH list expanded `/gd/a*b` to that file and the
-# literal entry was never compared: contains reported it absent and remove then
-# targeted the wrong entry. Every membership test must run with globbing off.
+# Every fixture here creates the file the pattern would match, because pathname
+# expansion only fires against a real file: a fixture using a path that does not
+# exist cannot tell a glob-expanding implementation from a literal one. This is
+# the second such lane; the first (`_mx_dir`) covers the nocasematch matrix
+# above, and both are needed because they run under different shell options.
+# The module itself no longer touches noglob - it strips components with
+# ${var%%:*}/${var#*:} - so these lanes assert the resulting values, not the
+# shell options.
 _gd_dir=$(mktemp -d "${TMPDIR:-/tmp}/valise-glob.XXXXXX") || _gd_dir=
 if [ -z "$_gd_dir" ]; then
   fail "could not create a scratch directory for the glob-collision lane"

@@ -611,17 +611,65 @@ release_activate() {
   # rollback can put back the exact bytes that described the outgoing release.
   # Without this, a publish that succeeded followed by a failed reconcile left
   # the link on the old release and the bridge on the new one.
+  # At most two owned bridges exist for one home (systemd and launchd), so each
+  # aside is tracked with the path it came from in parallel variables. The
+  # asides live in the SAME directory as their bridge, so mv is a rename and
+  # cannot fail across filesystems.
   _ra_aside=
+  _ra_aside_tgt=
+  _ra_aside2=
+  _ra_aside2_tgt=
   _ra_rm=$(trusted_utility_path rm 2>/dev/null || :)
   _ra_ln=$(trusted_utility_path ln 2>/dev/null || :)
   _ra_mv=$(trusted_utility_path mv 2>/dev/null || :)
   _ra_published=0
-  if [ "${_gui_action:-none}" != none ] && [ -n "${_gui_target:-}" ] && [ -n "$_ra_mv" ] &&
+  if [ "${_gui_action:-none}" = remove ]; then
+    # The INCOMING release wants no bridge (gui_env=off, or a mode this platform
+    # cannot write, which stages as `remove`). gui_env_bridge_stage leaves
+    # _gui_target EMPTY for that action, so a guard keyed on _gui_target cannot
+    # see the OUTGOING bridge - and remove_gui_env_bridge would then delete it
+    # for good. A failing reconcile afterwards would roll the link back to a
+    # release whose bridge is already gone: the exact inconsistency this
+    # transaction exists to prevent, in the other direction. Both owned
+    # candidates are therefore set aside first.
+    for _ra_cand_mode in systemd launchd; do
+      _ra_cand=$(gui_env_file "$_ra_cand_mode" 2>/dev/null) || _ra_cand=
+      [ -n "$_ra_cand" ] || continue
+      [ -f "$_ra_cand" ] && [ ! -L "$_ra_cand" ] || continue
+      bridge_is_valise_owned "$_ra_cand_mode" "$_ra_cand" || continue
+      [ -n "$_ra_mv" ] || continue
+      _ra_cand_parent=$(path_parent "$_ra_cand")
+      _ra_new_aside=$(trusted_mktemp_at "$_ra_cand_parent" file "$_ra_cand_parent/.valise-outgoing.XXXXXX") || _ra_new_aside=
+      [ -n "$_ra_new_aside" ] || continue
+      if ! "$_ra_mv" -f "$_ra_cand" "$_ra_new_aside" 2>/dev/null; then
+        # mktemp created the file; never strand it.
+        [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_new_aside" 2>/dev/null || :
+        continue
+      fi
+      if [ -z "$_ra_aside" ]; then
+        _ra_aside=$_ra_new_aside
+        _ra_aside_tgt=$_ra_cand
+      else
+        _ra_aside2=$_ra_new_aside
+        _ra_aside2_tgt=$_ra_cand
+      fi
+    done
+    unset _ra_cand_mode _ra_cand _ra_cand_parent _ra_new_aside
+  elif [ "${_gui_action:-none}" != none ] && [ -n "${_gui_target:-}" ] && [ -n "$_ra_mv" ] &&
     [ -f "$_gui_target" ] && bridge_is_valise_owned "$_gui_mode" "$_gui_target"; then
     _ra_aside_parent=$(path_parent "$_gui_target")
     _ra_aside=$(trusted_mktemp_at "$_ra_aside_parent" file "$_ra_aside_parent/.valise-outgoing.XXXXXX") || _ra_aside=
     if [ -n "$_ra_aside" ]; then
-      "$_ra_mv" -f "$_gui_target" "$_ra_aside" 2>/dev/null || _ra_aside=
+      # trusted_mktemp_at already CREATED the file. If the move then fails (an
+      # immutable bridge is the deterministic case: BSD refuses to rename it),
+      # clearing the variable would strand that empty file in the bridge
+      # directory forever, so it is removed here first.
+      if "$_ra_mv" -f "$_gui_target" "$_ra_aside" 2>/dev/null; then
+        _ra_aside_tgt=$_gui_target
+      else
+        [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_aside" 2>/dev/null || :
+        _ra_aside=
+      fi
     fi
   fi
   # A rollback below must leave the link, the previous-release record, the
@@ -632,6 +680,9 @@ release_activate() {
   # CLEARS _gui_target/_gui_mode on every path; a rollback after a successful
   # publish needs them to put the outgoing bytes back.
   _ra_gui_target=${_gui_target:-}
+  # gui_env_bridge_publish sets _gui_action=none on every path, so the action
+  # that was performed is captured here for the rollback to reason about.
+  _ra_action=${_gui_action:-none}
   _ra_reconcile_err=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-reconcile.XXXXXX") || _ra_reconcile_err=
   switch_active_link "$_ra_dir"
   _ra_publish_failed=0
@@ -699,18 +750,46 @@ release_activate() {
           printf 'valise: error: the command stubs could not be brought back to the restored release\n' >&2
         fi
       fi
-      # The bridge follows the release that is active again: put the outgoing
-      # bytes back, or remove the one this activation published when there was
-      # no predecessor.
-      if [ -n "$_ra_aside" ] && [ -n "$_ra_mv" ] && [ -n "$_ra_gui_target" ]; then
-        "$_ra_mv" -f "$_ra_aside" "$_ra_gui_target" 2>/dev/null ||
-          printf 'valise: error: the outgoing GUI env bridge could not be put back: %s\n' "$_ra_aside" >&2
-        _ra_aside=
-      elif [ "$_ra_published" -eq 1 ] && [ -n "$_ra_rm" ] && [ -n "$_ra_gui_target" ]; then
+      # The bridge follows the release that is active again. Each aside goes
+      # back to the exact path it was taken from, which is the only correct
+      # destination for a remove-direction backup (there _gui_target is empty).
+      if [ -n "$_ra_aside" ] && [ -n "$_ra_aside_tgt" ] && [ -n "$_ra_mv" ] &&
+        "$_ra_mv" -f "$_ra_aside" "$_ra_aside_tgt" 2>/dev/null; then
+        _ra_aside= _ra_aside_tgt=
+      elif [ -n "$_ra_aside" ]; then
+        printf 'valise: error: the outgoing GUI env bridge could not be put back: %s\n' "$_ra_aside" >&2
+      elif [ "$_ra_published" -eq 1 ] && [ -n "$_ra_rm" ] && [ -n "$_ra_gui_target" ] &&
+        [ "$_ra_action" != remove ]; then
         # No predecessor existed, so the bridge this activation wrote must go.
         "$_ra_rm" -f "$_ra_gui_target" 2>/dev/null || :
       fi
+      if [ -n "$_ra_aside2" ] && [ -n "$_ra_aside2_tgt" ] && [ -n "$_ra_mv" ] &&
+        "$_ra_mv" -f "$_ra_aside2" "$_ra_aside2_tgt" 2>/dev/null; then
+        _ra_aside2= _ra_aside2_tgt=
+      elif [ -n "$_ra_aside2" ]; then
+        printf 'valise: error: the outgoing GUI env bridge could not be put back: %s\n' "$_ra_aside2" >&2
+      fi
     fi
+    # Whatever happened above, an aside must not outlive this function
+    # silently. This also covers _ra_rolled=0, where the link rollback itself
+    # failed and the bridge bytes are the only record of the outgoing release
+    # left: moving them back is attempted, and if that is impossible the path is
+    # named rather than stranded (deleting it would destroy the only surviving
+    # copy of the outgoing release's bridge).
+    for _ra_pair in 1 2; do
+      if [ "$_ra_pair" -eq 1 ]; then
+        _ra_a=$_ra_aside _ra_t=$_ra_aside_tgt
+      else
+        _ra_a=$_ra_aside2 _ra_t=$_ra_aside2_tgt
+      fi
+      [ -n "$_ra_a" ] || continue
+      if [ -n "$_ra_mv" ] && [ -n "$_ra_t" ] &&
+        "$_ra_mv" -f "$_ra_a" "$_ra_t" 2>/dev/null; then
+        continue
+      fi
+      printf 'valise: error: the outgoing GUI env bridge is preserved at %s\n' "$_ra_a" >&2
+    done
+    unset _ra_pair _ra_a _ra_t
     if [ "$_ra_publish_failed" -eq 1 ]; then
       _ra_fail_msg="cannot publish the GUI env bridge for $_ra_id"
     else
@@ -721,15 +800,17 @@ release_activate() {
     fi
     die "$_ra_fail_msg; the active release was changed"
   fi
-  # Committed: the aside copy is no longer needed.
-  if [ -n "$_ra_aside" ] && [ -n "$_ra_rm" ]; then
-    "$_ra_rm" -f "$_ra_aside" 2>/dev/null || :
-  fi
-  _ra_aside=
+  # Committed: both aside copies are no longer needed.
+  for _ra_pair in "$_ra_aside" "$_ra_aside2"; do
+    [ -z "$_ra_pair" ] || [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_pair" 2>/dev/null || :
+  done
+  unset _ra_pair
+  _ra_aside= _ra_aside_tgt= _ra_aside2= _ra_aside2_tgt=
   release_lock
   unset _ra_id _ra_dir _ra_root _ra_parent _ra_manifest _ra_config_parent _ra_mkdir _ra_bridge _ra_old_target _ra_ln _ra_rm _ra_mv _ra_had_link
   unset _ra_had_previous _ra_old_previous _ra_aside _ra_aside_parent _ra_published
   unset _ra_publish_failed _ra_reconcile_failed _ra_rolled _ra_restored _ra_fail_msg _ra_gui_target _ra_reconcile_err _ra_rc_err_target _ra_t
+  unset _ra_aside_tgt _ra_aside2 _ra_aside2_tgt _ra_action
 }
 
 # restore_previous_record <had 0|1> <release-id>: put the previous-release record
@@ -898,14 +979,29 @@ EOF
       # symlink or a foreign shim can never abort the install, but a regular
       # valise shim must be readable, marker-paired and writable - otherwise
       # the install would abort AFTER the active link moved.
-      if [ -e "$_ipf_shim" ] && [ ! -L "$_ipf_shim" ] &&
-        integration_has_managed_block "$_ipf_shim" 2>/dev/null; then
+      #
+      # The TYPE and READABILITY tests decide FIRST. Testing the block marker
+      # first would run awk on the shim and short-circuit on an unreadable file
+      # or a directory, making these two checks dead code and letting an
+      # unreadable valise shim through to be misreported later as foreign.
+      _ipf_shim_writable=0
+      if [ -e "$_ipf_shim" ] && [ ! -L "$_ipf_shim" ]; then
         [ -f "$_ipf_shim" ] || die "ENV shim is not a regular file: $_ipf_shim"
         [ -r "$_ipf_shim" ] || die "cannot read the ENV shim: $_ipf_shim"
-        integration_markers_paired "$_ipf_shim" ||
-          die "unpaired valise managed block markers in $_ipf_shim (restore or remove the BEGIN and END lines, then retry)"
+        # A shim that is not valise's is left alone, so writing it is not
+        # attempted and its parent directory need not be writable.
+        if integration_has_posix_block "$_ipf_shim" 2>/dev/null; then
+          integration_markers_paired "$_ipf_shim" ||
+            die "unpaired valise managed block markers in $_ipf_shim (restore or remove the BEGIN and END lines, then retry)"
+          _ipf_shim_writable=1
+        fi
+      else
+        # Absent, or a symlink: install will write a fresh file there.
+        _ipf_shim_writable=1
       fi
-      preflight_dir_writable "$(path_parent "$_ipf_shim")" "ENV shim"
+      if [ "$_ipf_shim_writable" -eq 1 ]; then
+        preflight_dir_writable "$(path_parent "$_ipf_shim")" "ENV shim"
+      fi
     fi
     _ipf_gui_mode=$(gui_env_mode "$1")
     case "$_ipf_gui_mode" in
@@ -1266,7 +1362,7 @@ EOF
   if [ -n "${HOME:-}" ] && _ip_shim=$(env_shim_path); then
     if [ -L "$_ip_shim" ]; then
       printf '  left alone (symlink): %s\n' "$_ip_shim"
-    elif [ -e "$_ip_shim" ] && ! integration_has_managed_block "$_ip_shim" 2>/dev/null; then
+    elif [ -e "$_ip_shim" ] && ! integration_has_posix_block "$_ip_shim" 2>/dev/null; then
       printf '  left alone (not the valise ENV shim): %s\n' "$_ip_shim"
     elif [ -e "$_ip_shim" ] && ! integration_markers_paired "$_ip_shim"; then
       printf '  would fail (unpaired markers): %s\n' "$_ip_shim"

@@ -481,16 +481,22 @@ env_export_capture() {
       # that starts a record; a byte on a continuation line has no reliable owner
       # in the dump, so the message says so instead of naming a neighbour.
       _eec_result=1
-      # A diagNOSTIC is claimed only once one is printed, here or by the naming
-      # pass below; setting the flag first would suppress the fallback message
-      # when tr or awk then failed, failing the capture with empty stderr.
-      _eec_diagnosed=1
+      # The diagnostic is claimed only once one has actually been written. The
+      # flag is NOT set before tr/awk run: an awk that cannot exec, cannot read
+      # the dump, or cannot open /dev/stderr would then leave the capture
+      # failing with EMPTY stderr - the exact silent failure this flag exists to
+      # prevent.
       if ! LC_ALL=C "$_eec_tr" '\000' '\012' <"$_eec_dump_file" >"$_eec_scratch/$_eec_dump.lf"; then
         printf 'valise: error: the env capture for shell %s could not translate its dump\n' "$_eec_shell" >&2
+        _eec_diagnosed=1
         break
       fi
+      # awk writes its message to STDOUT and the shell redirects it, so a
+      # missing or unwritable /dev/stderr is not itself a failure. The exit
+      # status now means "a message was printed" (0) rather than the inverse,
+      # so a broken awk cannot be mistaken for one that reported the defect.
       _eec_named=0
-      LC_ALL=C "$_eec_awk" '
+      if LC_ALL=C "$_eec_awk" '
         BEGIN { lastkey = ""; printed = 0 }
         {
           keyline = ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/)
@@ -508,15 +514,19 @@ env_export_capture() {
           if (printed || (keyline && !ctl)) next
           owner = (lastkey == "" ? "(unknown)" : lastkey)
           if (ctl)
-            printf "valise: error: the env plan sets %s to a value containing a control character; GUI env formats cannot represent it\n", owner > "/dev/stderr"
+            printf "valise: error: the env plan sets %s to a value containing a control character; GUI env formats cannot represent it\n", owner
           else
-            printf "valise: error: the env plan sets %s to a value containing a newline; GUI env formats cannot represent it\n", owner > "/dev/stderr"
+            printf "valise: error: the env plan sets %s to a value containing a newline; GUI env formats cannot represent it\n", owner
           printed = 1
         }
-        END { exit printed ? 1 : 0 }
-      ' "$_eec_scratch/$_eec_dump.lf" || _eec_named=1
+        END { exit printed ? 0 : 1 }
+      ' "$_eec_scratch/$_eec_dump.lf" >&2; then
+        _eec_named=1
+        _eec_diagnosed=1
+      fi
       if [ "$_eec_named" -eq 0 ]; then
         printf 'valise: error: the env plan produced a value containing a newline or control character; GUI env formats cannot represent it\n' >&2
+        _eec_diagnosed=1
       fi
       break
     done
@@ -570,8 +580,7 @@ env_export_capture() {
       elif [ "$_eec_nc_found" -eq 0 ]; then
         _eec_nc_key=$(LC_ALL=C "$_eec_grep" -F -e "$_eec_nc1" -e "$_eec_nc2" "$_eec_scratch/diff" 2>/dev/null |
           LC_ALL=C "$_eec_awk" -F= 'NR == 1 { print $1; exit }')
-        printf 'valise: error: %s is set to a value containing U+FFFE or U+FFFF, which XML 1.0 forbids; GUI env formats cannot represent it
-' \
+        printf 'valise: error: %s is set to a value containing U+FFFE or U+FFFF, which XML 1.0 forbids; GUI env formats cannot represent it\n' \
           "${_eec_nc_key:-an env variable}" >&2
         _eec_result=1
         _eec_diagnosed=1
@@ -765,7 +774,14 @@ env_export_emit() {
   esac
   _eee_status=$_eee_rc
   unset _eee_format _eee_capture _eee_awk _eee_rc
-  return "$_eee_status"
+  # Return a literal, not "$_eee_status": no private variable may outlive the
+  # call, and a value can only be returned from a variable that still exists.
+  if [ "$_eee_status" -eq 0 ]; then
+    unset _eee_status
+    return 0
+  fi
+  unset _eee_status
+  return 1
 }
 
 cmd_env() {

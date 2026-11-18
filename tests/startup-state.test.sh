@@ -28,10 +28,10 @@ _bash_bin=$(command -v bash 2>/dev/null || :)
 if [ -n "$_zsh_bin" ] && [ ! -x "$_zsh_bin" ]; then _zsh_bin=; fi
 if [ -n "$_bash_bin" ] && [ ! -x "$_bash_bin" ]; then _bash_bin=; fi
 if [ -z "$_zsh_bin" ]; then
-  skip "zsh scenarios 1-8: no zsh is installed"
+  skip "zsh scenarios (env-only, rc-chain login, path_helper repair, dangling login file, legacy doctor): no zsh is installed"
 fi
 if [ -z "$_bash_bin" ]; then
-  skip "bash scenarios 13-15: no bash is installed"
+  skip "bash scenarios (bash-only login file, dangling .bash_profile, bash stage 2): no bash is installed"
 fi
 
 _repo=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -481,18 +481,20 @@ if [ -n "$_bash_bin" ]; then
 # interactive `bash --login -i` no interactive setup at all (bash ignores ENV).
 _reset_home "$_home"
 printf '# user profile\n' >"$_home/.bash_profile"
-_install "$_tmp/release-a" "$_home" "$_zsh_bin"
+# This lane runs on a bash-only host too, where _zsh_bin is empty. install only
+# uses $SHELL to choose which shell gets an rc file; pass a real value.
+_install "$_tmp/release-a" "$_home" "${_zsh_bin:-$_bash_bin}"
 if grep -q 'case \$- in \*i\*)' "$_home/.bash_profile" 2>/dev/null; then
   pass "zsh-default home: a bash-only login file carries the interactive stage"
 else
   fail "zsh-default home: .bash_profile was left env-only, so an interactive login bash never reaches stage 2"
 fi
-_home_env "$_home" -- "$_bash_bin" --login -i -c ':' >"$_tmp/s16.out" 2>"$_tmp/s16.err" || :
+_home_env "$_home" -- "$_bash_bin" --login -i -c ':' >"$_tmp/s18.out" 2>"$_tmp/s18.err" || :
 if [ "$(_marker_count "$_home/intdep.log")" -eq 1 ]; then
   pass "zsh-default home: bash --login -i reaches the interactive stage through .bash_profile"
 else
   fail "zsh-default home: bash --login -i did not run the interactive module"
-  cat "$_tmp/s16.err" >&2
+  cat "$_tmp/s18.err" >&2
 fi
 
 # Scenario 17: a DANGLING .bash_profile symlink is ignored by bash (stat returns
@@ -511,7 +513,7 @@ fi
 fi
 
 if [ -n "$_zsh_bin" ]; then
-# Scenario 16: doctor. A fresh zsh install writes env-only blocks into .zprofile
+# Scenario 19: doctor. A fresh zsh install writes env-only blocks into .zprofile
 # and .zshenv; those are current, so doctor must not call them a legacy shape.
 # A genuine single-stage rc-file block (no interactivity gate) must still be
 # reported, and so must one in an ENV-stage file: a 0.2-era block in .zshenv
@@ -519,10 +521,10 @@ if [ -n "$_zsh_bin" ]; then
 # gate heuristic alone cannot tell it from a current env-only block.
 _reset_home "$_home"
 _install "$_tmp/release-a" "$_home" "$_zsh_bin"
-_home_env "$_home" SHELL="$_zsh_bin" -- "$_valise" doctor >"$_tmp/s16.out" 2>&1 || :
-if grep -q 'legacy single-stage' "$_tmp/s16.out"; then
+_home_env "$_home" SHELL="$_zsh_bin" -- "$_valise" doctor >"$_tmp/s19.out" 2>&1 || :
+if grep -q 'legacy single-stage' "$_tmp/s19.out"; then
   fail "doctor reports a fresh install's env-only block as legacy"
-  grep 'legacy' "$_tmp/s16.out" >&2
+  grep 'legacy' "$_tmp/s19.out" >&2
 else
   pass "doctor reports no legacy block after a fresh zsh install"
 fi

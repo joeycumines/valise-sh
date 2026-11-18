@@ -116,9 +116,9 @@ usage_doctor() {
     "" \
     "Report the environment, the active release, and the shell integration." \
     "" \
-    "Warnings name archetype pitfalls: a legacy single-stage managed block in the" \
-    "rc-stage files valise manages (~/.bashrc, ~/.zshrc, and the bash login file" \
-    "when bash has an rc chain), a sh/ksh login shell whose \$ENV is unset or does" \
+    "Warnings name archetype pitfalls: a legacy single-stage managed block in any" \
+    "startup file valise manages (recognised by the _valise_stage1_ok marker a" \
+    "current block carries), a sh/ksh login shell whose \$ENV is unset or does" \
     "not point at the valise shim, a missing ~/.zshenv block when zsh is installed," \
     "and a GUI-session bridge the active release asked for but that is missing on" \
     "the platform where that mode is written. A release with gui_env=off is not" \

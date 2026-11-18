@@ -406,7 +406,7 @@ EOF
   _wpi_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
   [ -d "$_wpi_shim_parent" ] || "$_wpi_mkdir" -p "$_wpi_shim_parent" || die "cannot create shim parent: $_wpi_shim_parent"
   if [ -e "$_wpi_shim" ] || [ -L "$_wpi_shim" ]; then
-    if [ -L "$_wpi_shim" ] || ! integration_has_managed_block "$_wpi_shim" 2>/dev/null; then
+    if [ -L "$_wpi_shim" ] || ! integration_has_posix_block "$_wpi_shim" 2>/dev/null; then
       info "warning: leaving $_wpi_shim: it is not the valise ENV shim"
       unset _wpi_home _wpi_snippet _wpi_targets _wpi_target _wpi_stage _wpi_shim _wpi_shim_parent _wpi_mkdir
       return 0
@@ -737,6 +737,17 @@ cmd_doctor() {
   # POSIX and not gated on any particular uname).
   _uname=$(uname -s 2>/dev/null || echo unknown)
   printf '  platform: %s\n' "$_uname"
+
+  # Every private this command may have set, including the ones assigned BEFORE
+  # the HOME guard: a doctor run with HOME unset returned earlier and left the
+  # active-release state behind for whatever ran next in the same process.
+  unset _doctor_active_id _doctor_active_manifest _doctor_active_ok _doctor_active_target
+  unset _doctor_bridge_mode _doctor_bridge_os _doctor_bash_rc _doctor_bash_login
+  unset _doctor_cand_file _doctor_candidates _doctor_check_integration _doctor_env
+  unset _doctor_env_norm _doctor_file _doctor_found _doctor_gui _doctor_home
+  unset _doctor_name _doctor_pre_install _doctor_rm _doctor_sha _doctor_shell
+  unset _doctor_shim _doctor_shim_probe _doctor_unmanaged _doctor_want_gate
+  unset _doctor_awk _target _verify_quiet _dir _cmd
 
   if [ "$_status" -eq 0 ]; then
     info "all checks passed"

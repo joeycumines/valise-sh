@@ -187,9 +187,11 @@ write the files once.
 the startup files the running shell actually reads for valise integration,
 including the `.bash_profile` or `.bash_login` that bash reads instead of
 `~/.profile`, and warns about archetype pitfalls: a legacy single-stage
-managed block in an rc-stage file valise manages (`.bashrc`, `.zshrc`, or the
-bash login file when bash has an rc chain) - no interactivity gate, upgrade
-recommended - a sh/ksh login shell whose `$ENV` is unset or does not
+managed block in any startup file valise manages - recognised by the
+`_valise_stage1_ok` marker a current block carries, so an older block in
+`.zshenv`, `.zprofile` or `.profile` is reported too, not only in the
+rc-stage files - no interactivity gate, upgrade recommended - a sh/ksh login
+shell whose `$ENV` is unset or does not
 point at the valise shim, a missing `~/.zshenv` block whenever zsh is
 installed, and a GUI-session bridge the ACTIVE RELEASE asked for but that is
 missing on the platform where that mode is written
@@ -442,5 +444,5 @@ gone by the time the bridge is read. It resolves the dump utility by absolute
 path before the plan runs, so a directory the plan prepends to `PATH` cannot
 substitute one. It refuses to write a value a bridge format cannot represent — a
 newline, or a control byte outside XML 1.0 — and names the variable instead of
-truncating or corrupting it. `PATH` and the XDG roots are listed on stderr as
-excluded rather than silently dropped.
+truncating or corrupting it. `PATH`, `TMPDIR` and the XDG roots are listed on
+stderr as excluded rather than silently dropped.

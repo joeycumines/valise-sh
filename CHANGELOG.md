@@ -162,9 +162,11 @@ for startup state, environment capture, and release transactions.
   coercing it to zero, pins `LC_ALL=C` on every awk step, replays a plan
   diagnostic whose final line has no newline, and no longer passes an unused
   `EEC_ROOT` to the probe.
-- `valise test`/`valise run` no longer leak `VALISE_MODULE_ROOT` and
-  `_valise_plan_carried` into the module body, so a test can catch a module
-  that reads them at runtime instead of load time.
+- `valise test`/`valise run` no longer leave `VALISE_MODULE_ROOT` or
+  `_valise_plan_carried` set once the module body has loaded: both are cleared
+  before the test callback and before a `run` script executes (and again after
+  `valise_test_reload`), so a test can catch a module that reads them at
+  runtime instead of at load time.
 - The managed block tolerates an unset `PATH` under `set -u`, leaves a
   dangling `$ENV` symlink alone (a symlink belongs to whoever created it, the
   same rule `valise install` follows for a symlinked shim), and clears the env
