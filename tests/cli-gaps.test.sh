@@ -206,6 +206,217 @@ if _env; then
   fi
 fi
 
+# --- doctor archetype diagnostics ---
+# (a) A legacy single-stage block (managed markers but no 'case $- in *i*)'
+# gate inside) is reported as upgradeable.
+# (b) An sh/ksh login shell whose ENV points elsewhere is warned about.
+# (c) zsh installed without a .zshenv block is warned about.
+# The running shell here is unknown (SHELL unset in the harness), which maps
+# to the sh/ksh diagnostics branch.
+
+if _env; then
+  # A legacy block is identified by the two-stage MARKER it never wrote, not by
+  # a missing gate: `.profile` is env-stage and legitimately has no gate unless
+  # bash has an rc chain, so stripping the gate on a non-bash host produced a
+  # byte-identical file and asserted nothing (that is how this scenario passed
+  # on macOS and failed on Linux). The block is built from `init posix` and the
+  # marker line is removed, which is the 0.2 shape on every platform.
+  if [ -f "$HOME/.profile" ]; then
+    "$_valise" init posix >"$_test_root/legacy-block.txt" 2>/dev/null || :
+    if grep -q '_valise_stage1_ok=' "$_test_root/legacy-block.txt" 2>/dev/null; then
+      grep -v '_valise_stage1_ok=' "$_test_root/legacy-block.txt" >"$_test_root/legacy-profile"
+      cp "$_test_root/legacy-profile" "$HOME/.profile"
+      "$_valise" doctor >"$_test_root/doctor-legacy.out" 2>&1 || :
+      if grep -F "$HOME/.profile has a legacy single-stage block" "$_test_root/doctor-legacy.out" >/dev/null 2>&1; then
+        pass "doctor flags a legacy single-stage block as upgradeable"
+      else
+        fail "doctor did not flag the legacy single-stage block"
+        cat "$_test_root/doctor-legacy.out" >&2
+      fi
+    else
+      fail "the generated block carries no _valise_stage1_ok marker, so the legacy case cannot be constructed"
+      cat "$_test_root/legacy-block.txt" >&2 2>/dev/null || :
+    fi
+    # Restore the good two-stage block for later scenarios.
+    "$_valise" install >/dev/null 2>&1 || :
+  else
+    skip "doctor flags a legacy single-stage block as upgradeable (no .profile)"
+  fi
+
+  # (b) ENV pointing at a user file for an sh-class shell: warn.
+  printf 'export USER_ENV=1\n' >"$_test_root/user-env.sh"
+  env SHELL=/bin/sh ENV="$_test_root/user-env.sh" "$_valise" doctor >"$_test_root/doctor-env.out" 2>&1 || :
+  if grep -F 'not the valise shim' "$_test_root/doctor-env.out" >/dev/null 2>&1; then
+    pass "doctor warns when \$ENV points away from the valise shim"
+  else
+    fail "doctor did not warn about a foreign \$ENV"
+    cat "$_test_root/doctor-env.out" >&2
+  fi
+
+  # (c) A legacy block sitting only in a file other than ~/.profile is still
+  # found: doctor inspects every startup file valise manages. This writes its
+  # own legacy block so it never depends on how the harness home was set up.
+  _legacy_zshrc_home="$_test_root/legacy-zshrc-home"
+  mkdir -p "$_legacy_zshrc_home"
+  "$_valise" init posix >"$_test_root/block.txt" 2>/dev/null || :
+  if [ -s "$_test_root/block.txt" ]; then
+    awk '
+      /^  case \$- in \*i\*\)$/ { skip = 1; next }
+      skip && /^  esac$/ { skip = 0; next }
+      skip { next }
+      { print }
+    ' "$_test_root/block.txt" >"$_legacy_zshrc_home/.zshrc"
+    env -i HOME="$_legacy_zshrc_home" PATH="${PATH:-/usr/bin:/bin}" \
+      XDG_DATA_HOME="$_legacy_zshrc_home/.local/share" XDG_CONFIG_HOME="$_legacy_zshrc_home/.config" \
+      XDG_STATE_HOME="$_legacy_zshrc_home/.local/state" SHELL=/bin/zsh TMPDIR="$_test_root" \
+      "$_valise" doctor >"$_test_root/doctor-legacy-zshrc.out" 2>&1 || :
+    if grep -F "$_legacy_zshrc_home/.zshrc has a legacy single-stage block" "$_test_root/doctor-legacy-zshrc.out" >/dev/null 2>&1; then
+      pass "doctor flags a legacy block in ~/.zshrc, not just ~/.profile"
+    else
+      fail "doctor missed a legacy block outside ~/.profile"
+      cat "$_test_root/doctor-legacy-zshrc.out" >&2
+    fi
+  else
+    fail "cannot generate a managed block for the legacy ~/.zshrc case"
+  fi
+
+  # (c2) A missing ~/.zshenv block is reported whenever zsh is installed, not
+  # only when $SHELL names zsh.
+  if command -v zsh >/dev/null 2>&1; then
+    _nozsh_home="$_test_root/no-zshenv-home"
+    mkdir -p "$_nozsh_home"
+    env -i HOME="$_nozsh_home" PATH="${PATH:-/usr/bin:/bin}" \
+      XDG_DATA_HOME="$_nozsh_home/.local/share" XDG_CONFIG_HOME="$_nozsh_home/.config" \
+      XDG_STATE_HOME="$_nozsh_home/.local/state" SHELL=/bin/bash TMPDIR="$_test_root" \
+      "$_valise" doctor >"$_test_root/doctor-zshenv.out" 2>&1 || :
+    if grep -F 'no valise managed block in ~/.zshenv' "$_test_root/doctor-zshenv.out" >/dev/null 2>&1; then
+      pass "doctor warns when zsh is installed but ~/.zshenv has no block"
+    else
+      fail "doctor did not warn about the missing ~/.zshenv block"
+      cat "$_test_root/doctor-zshenv.out" >&2
+    fi
+  else
+    skip "doctor warns when zsh is installed but ~/.zshenv has no block (no zsh)"
+  fi
+
+  # (d) The ENV warning covers the UNSET case too: an sh login shell with no
+  # ENV reads no interactive startup file at all.
+  if [ -f "$(env_shim_path 2>/dev/null || printf '%s' "$HOME/.config/valise/env.sh")" ]; then
+    env -u ENV SHELL=/bin/sh "$_valise" doctor >"$_test_root/doctor-env-unset.out" 2>&1 || :
+    if grep -F '$ENV is unset' "$_test_root/doctor-env-unset.out" >/dev/null 2>&1; then
+      pass "doctor warns when \$ENV is unset for an sh login shell"
+    else
+      fail "doctor did not warn about an unset \$ENV"
+      cat "$_test_root/doctor-env-unset.out" >&2
+    fi
+  else
+    skip "doctor warns when \$ENV is unset for an sh login shell (no shim)"
+  fi
+
+  # (d2) An ENV the user owns - one containing '$', which the shell expands, or
+  # starting with '~', which ksh expands - is left alone by the block and must
+  # not be reported as foreign. path_normalize does not expand '~', so only the
+  # ownership test can tell this case apart.
+  if [ -f "$(env_shim_path 2>/dev/null || printf '%s' "$HOME/.config/valise/env.sh")" ]; then
+    for _own_env in '~/my-env.sh' '$HOME/my-env.sh'; do
+      env SHELL=/bin/sh ENV="$_own_env" "$_valise" doctor >"$_test_root/doctor-env-own.out" 2>&1 || :
+      if grep -F '$ENV points at' "$_test_root/doctor-env-own.out" >/dev/null 2>&1; then
+        fail "doctor warns about a user-owned \$ENV ($_own_env)"
+        cat "$_test_root/doctor-env-own.out" >&2
+        break
+      else
+        pass "doctor leaves a user-owned \$ENV alone ($_own_env)"
+      fi
+    done
+  else
+    skip "doctor leaves a user-owned \$ENV alone (no shim)"
+  fi
+
+  # (e) gui_env=off is the deliberate default: doctor must not warn about a
+  # missing bridge for a release that declared it.
+  if [ "$(uname -s)" = Darwin ] && [ ! -f "$HOME/Library/LaunchAgents/sh.valise.env.plist" ]; then
+    env SHELL=/bin/sh "$_valise" doctor >"$_test_root/doctor-gui-off.out" 2>&1 || :
+    if grep -F 'gui_env=launchd' "$_test_root/doctor-gui-off.out" >/dev/null 2>&1; then
+      fail "doctor warns about a GUI bridge the release did not ask for"
+      cat "$_test_root/doctor-gui-off.out" >&2
+    else
+      pass "doctor does not warn about a GUI bridge when the release set gui_env=off"
+    fi
+  else
+    skip "doctor does not warn about a GUI bridge when the release set gui_env=off (not applicable)"
+  fi
+
+  # (f) A release that DECLARES a bridge but has none is warned about. Build a
+  # scratch project with gui_env set, install it, delete the bridge, and run
+  # doctor: the warning must name the mode the release asked for.
+  _gui_decl_home="$_test_root/gui-decl-home"
+  mkdir -p "$_gui_decl_home"
+  _gui_decl_proj="$_test_root/gui-decl-proj"
+  mkdir -p "$_gui_decl_proj/module.d" "$_gui_decl_proj/modules"
+  case "$(uname -s)" in
+  Darwin) _gui_decl_mode=launchd ;;
+  Linux) _gui_decl_mode=systemd ;;
+  *) _gui_decl_mode= ;;
+  esac
+  if [ -n "$_gui_decl_mode" ]; then
+    printf '%s\n' 'bundle=default' 'variant=default' "gui_env=$_gui_decl_mode" >"$_gui_decl_proj/valise.conf"
+    printf 'bundle\tshell\troots\ndefault\tsh\tmain\ndefault\tbash\tmain\n' >"$_gui_decl_proj/bundles.tsv"
+    printf '%s\n' 'name=main' 'side_effect=read-only' 'shells=posix' 'platforms=any' \
+      'exports=main_ready' 'load=modules/main.sh' >"$_gui_decl_proj/module.d/main.meta"
+    printf 'main_ready() { :; }\n' >"$_gui_decl_proj/modules/main.sh"
+    if env -i HOME="$_gui_decl_home" PATH="${PATH:-/usr/bin:/bin}" \
+      XDG_DATA_HOME="$_gui_decl_home/.local/share" XDG_CONFIG_HOME="$_gui_decl_home/.config" \
+      XDG_STATE_HOME="$_gui_decl_home/.local/state" SHELL=/bin/sh TMPDIR="$_test_root" \
+      "$_valise" -C "$_gui_decl_proj" apply >/dev/null 2>&1; then
+      # Remove the bridge the install wrote, leaving the declaration in place.
+      case "$_gui_decl_mode" in
+      launchd) rm -f "$_gui_decl_home/Library/LaunchAgents/sh.valise.env.plist" ;;
+      systemd) rm -f "$_gui_decl_home/.config/environment.d/10-valise.conf" ;;
+      esac
+      env -i HOME="$_gui_decl_home" PATH="${PATH:-/usr/bin:/bin}" \
+        XDG_DATA_HOME="$_gui_decl_home/.local/share" XDG_CONFIG_HOME="$_gui_decl_home/.config" \
+        XDG_STATE_HOME="$_gui_decl_home/.local/state" SHELL=/bin/sh "$_valise" doctor \
+        >"$_test_root/doctor-gui-decl.out" 2>&1 || :
+      if grep -F "gui_env=$_gui_decl_mode" "$_test_root/doctor-gui-decl.out" >/dev/null 2>&1; then
+        pass "doctor warns when a release declares a GUI bridge that is missing"
+      else
+        fail "doctor did not warn about the declared-but-missing bridge"
+        cat "$_test_root/doctor-gui-decl.out" >&2
+      fi
+    else
+      skip "doctor warns when a release declares a GUI bridge that is missing (apply failed)"
+    fi
+  else
+    skip "doctor warns when a release declares a GUI bridge that is missing (unsupported platform)"
+  fi
+fi
+
+# --- ownership is exact-line and trusted ---
+# A lying `grep` first on PATH must not make uninstall delete a foreign bridge:
+# ownership is decided by the trusted awk, not by a PATH lookup.
+if [ "$(uname -s)" = Darwin ]; then
+  _lie_home="$_test_root/lie-home"
+  mkdir -p "$_lie_home/Library/LaunchAgents"
+  printf 'foreign plist\n' >"$_lie_home/Library/LaunchAgents/sh.valise.env.plist"
+  _lie_dir="$_test_root/lie-bin"
+  mkdir -p "$_lie_dir"
+  printf '#!/bin/sh\nexit 0\n' >"$_lie_dir/grep"
+  chmod +x "$_lie_dir/grep"
+  env -i HOME="$_lie_home" PATH="$_lie_dir:/usr/bin:/bin" \
+    XDG_DATA_HOME="$_lie_home/.local/share" \
+    XDG_CONFIG_HOME="$_lie_home/.config" \
+    XDG_STATE_HOME="$_lie_home/.local/state" SHELL=/bin/sh \
+    "$_valise" uninstall >"$_test_root/lie-uninstall.out" 2>&1 || :
+  if [ -f "$_lie_home/Library/LaunchAgents/sh.valise.env.plist" ]; then
+    pass "a lying grep on PATH cannot make uninstall delete a foreign bridge"
+  else
+    fail "a lying grep on PATH made uninstall delete a foreign bridge"
+    cat "$_test_root/lie-uninstall.out" >&2
+  fi
+else
+  skip "a lying grep on PATH cannot make uninstall delete a foreign bridge (not applicable)"
+fi
+
 # --- doctor: a tampered release fails ---
 
 if _env; then

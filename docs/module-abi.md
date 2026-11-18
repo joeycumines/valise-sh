@@ -35,6 +35,7 @@ Optional fields:
 | `executables` | Space-separated module-relative paths of scripts published as commands. |
 | `tests` | Space-separated module-relative test scripts that `valise test` runs. |
 | `version` | Optional module version used to reject version skew across roots. |
+| `phase` | Load phase: `env` (default when absent) or `interactive`. See [Phases](#phases). |
 
 ## Meta modules
 
@@ -263,6 +264,16 @@ successfully loaded. An export must name a function, so shell reserved words
 (`case`, `do`, `done`, `elif`, `else`, `esac`, `fi`, `for`, `if`, `in`,
 `then`, `until`, `while`, and `time`) are rejected.
 
+The ledger of installed exports records the PROVIDER of each one, as
+`<module>:<export>`. A reload therefore clears only the exports the same
+module previously installed: a different module exporting the same name is
+reported as a conflict instead of silently replacing it, and a function the
+caller defined is left alone. The ledger is per shell process and never
+pruned, so renaming an export-providing module (`foo:fn` to `bar:fn`) leaves
+the old provider recorded in every shell that is already running. Shells
+started after the rename are unaffected; an already-running shell keeps its
+existing export until it is restarted.
+
 ### Published commands
 
 `commands` names exports that should also run as ordinary commands, from any
@@ -291,6 +302,67 @@ Two modules that publish the same command name, from either field, fail the
 build. `valise-release.conf` lists the published names in `commands=`.
 Installation puts a stub for each name on PATH; see
 [installation.md](installation.md#published-commands).
+
+## Phases
+
+The optional `phase` field names when a module's body may run:
+
+- `env` (the default when `phase` is omitted) — the module joins the env plan,
+  which is sourced at **every** startup entry point (`.profile`, `.zprofile`,
+  `.zshenv`, the `$ENV` shim, and the stage-1 of `.bashrc`/`.zshrc`), not only
+  in interactive shells. An env-phase body must therefore be silent, fast, and
+  idempotent: it is a convergent projection of the environment, re-evaluated in
+  every fresh shell so that an outer `path_helper` or `/etc/profile` cannot
+  leave stale PATH order behind.
+- `interactive` — the module joins the interactive plan, which is sourced only
+  when `$-` contains `i`. Use it for aliases, functions, prompt, history,
+  completions, and keybindings.
+
+One rule is enforced at parse time: `phase=interactive` combined with
+`side_effect=path-env` is rejected, because PATH mutation belongs to the env
+phase — an interactive-only PATH change would be missing exactly in the
+non-interactive contexts that need it.
+
+Raw PATH assignments (`PATH=...:$PATH`, `export PATH=...`) are rejected by
+`valise lint` in **every** phase, not only `env`: the env plan re-runs at every
+startup entry point and the interactive plan re-runs on a release switch (and
+on an explicit `source ~/.bashrc`), so a raw assignment duplicates entries in
+either one. PATH changes go through the `valise_path` module's helpers
+(declare `requires=valise_path`), which are idempotent under re-evaluation:
+sourcing the env plan twice, or in a nested shell, reaches the same fixed
+point instead of growing duplicate entries, and an entry that was reordered
+is moved back to the front. The core helpers are `valise_path_prepend` and
+`valise_path_append` — adding a directory to the front or back of PATH once —
+and that is all most use cases need. The module also exports
+`valise_path_contains` (test whether a directory is exactly one PATH entry),
+`valise_path_remove` (remove every occurrence of the named entries and drop
+empty components), and `valise_path_normalize` (drop empty components and
+duplicate entries in place) for inspection and cleanup. Both
+`valise_path_remove` and `valise_path_normalize` UNSET `PATH` when nothing is
+left, rather than leaving it set to an empty string: an empty `PATH` means
+"look only in the current directory" to the command search, and an unset one
+is what tests use to mean "no PATH". A caller that reads `$PATH` directly
+right after such a call therefore needs `${PATH-}` under `set -u`; the helper
+itself never aborts. `valise_path_prepend` and `valise_path_append` are the
+exception: when their rebuild produces nothing they leave `PATH` exactly as
+they found it, set-but-empty included, because a caller that passed no
+arguments asked for a cleanup, not for the variable to disappear. The engine's
+own
+`valise_path` module is the exempt implementer of those helpers.
+
+The lint scan is a line-based authoring aid, not a security boundary: releases
+are sealed by the manifest, and indirect writes (`PATH+=`, `eval`,
+`${PATH:=...}`) are not textually detectable. It skips comment lines and
+`*.fish` bodies. Because a raw PATH write is a lint **FAIL**, `valise lint`
+exits non-zero; the file is readable but the project does not pass.
+
+An interactive module may `require` an env module (the env plan loads first).
+The reverse is a compile error, because the env plan never contains an
+interactive dependency.
+
+`phase` partitions the compiled POSIX plans only — the Fish runtime loads a
+module's body in every Fish shell, so a Fish module should keep the same
+env/interactive discipline by convention.
 
 ## Side-effect phases
 
@@ -397,6 +469,9 @@ characters are invalid. Reading metadata must not source these paths.
 
 - `sp_metadata_read <metadata-file>` prints normalized fields for a valid record.
 - `sp_metadata_validate_identifier <identifier>` validates ABI identifiers.
+- `sp_metadata_validate_phase <phase>` validates `env`/`interactive`.
+- `sp_metadata_validate_phase_side_effect <phase> <side_effect>` rejects
+  `interactive` + `path-env`.
 - `sp_metadata_validate_source_side_effect <side_effect>` rejects phase-unsafe
   classes before ordinary startup can source a module body.
 

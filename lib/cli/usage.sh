@@ -21,7 +21,7 @@ usage() {
     "  lint [--require-parsers] [module...]  Check metadata, layers, bundles, and syntax" \
     "  test [--shell=<class>] [--require-shells] [module...]  Run module tests" \
     "  run [--shell=<class>] [--module=<m>]... -- <script>  Run a script with modules loaded" \
-    "  env                       Print the engine, project, and storage paths" \
+    "  env [export <format>]     Print storage paths, or render the GUI env bridge" \
     "" \
     "Release commands:" \
     "  install [--no-integration]  Install the release tree in the current directory" \
@@ -39,10 +39,17 @@ usage() {
     "  layer-lint <name>         Validate a contribution layer structure" \
     "  version                   Print version" \
     "" \
+    "Install writes a two-stage managed block to ~/.profile and the other startup" \
+    "files (~/.bashrc, ~/.zprofile, ~/.zshenv, ~/.zshrc as appropriate), plus the" \
+    "sh/ksh \$ENV shim, and compiles plans/<shell>.sh and plans/<shell>-interactive.sh." \
+    "A project that sets gui_env also gets an environment.d or LaunchAgent bridge;" \
+    "'valise env export <format>' renders the same file without installing." \
+    "" \
     "Environment:" \
     "  XDG_DATA_HOME    Release storage root (default: ~/.local/share)" \
-    "  XDG_CONFIG_HOME  Active pointer symlink (default: ~/.config)" \
+    "  XDG_CONFIG_HOME  Active pointer, shim, and bridge root (default: ~/.config)" \
     "  XDG_STATE_HOME   Lock and journal state (default: ~/.local/state)" \
+    "  VALISE_RELOAD    Set to 1 to force a plan reload in the current shell" \
     "" \
     "Run 'valise <command> --help' for command-specific usage."
 }
@@ -73,18 +80,34 @@ usage_install() {
     "Install the release tree in the current directory and make it active, then" \
     "write the shell integration." \
     "" \
-    "A managed block is written to ~/.profile; to the first of ~/.bash_profile and" \
-    "~/.bash_login that exists, because it shadows ~/.profile for bash; to ~/.bashrc" \
-    "and ~/.zshrc when that shell is \$SHELL or the file exists; and to ~/.zprofile" \
-    "when zsh is installed or the file exists. Symlinked files are left alone. A" \
-    "Fish conf.d hook is written when Fish is installed. Each install replaces the" \
-    "block in place. Each command the release publishes gets a stub in the command" \
-    "directory (see valise doctor)." \
+    "A two-stage managed block is written to ~/.profile; to the first of" \
+    "~/.bash_profile and ~/.bash_login that exists, because it shadows ~/.profile" \
+    "for bash; to ~/.bashrc and ~/.zshrc when that shell is \$SHELL or the file" \
+    "exists; to ~/.zprofile when zsh is installed or the file exists; and to" \
+    "~/.zshenv, because every zsh invocation reads it. Stage 1 (the env plan) goes" \
+    "into all of them; stage 2 (the interactive plan) goes into the shell's" \
+    "rc-stage file - ~/.bashrc, ~/.zshrc, or the \$ENV shim - and into the bash" \
+    "login file, placed last, so an interactive login reaches it. Stage 2 never" \
+    "goes into ~/.zshenv or ~/.zprofile, so interactive setup cannot run before" \
+    "your own rc file. Symlinked files are left alone. The \$ENV" \
+    "shim is written to \$XDG_CONFIG_HOME/valise/env.sh and points an sh/ksh" \
+    "subshell at itself. A Fish conf.d hook is written when Fish is installed." \
+    "Each install replaces the block in place, keeping every other byte. Each" \
+    "command the release publishes gets a stub in the command directory (see" \
+    "valise doctor)." \
     "" \
-    "Every startup file is checked before the active release changes. If a later" \
-    "step fails, the previous active release is restored." \
+    "When the release declares gui_env=systemd (Linux) or gui_env=launchd" \
+    "(macOS), the matching environment.d or LaunchAgent bridge is written from the" \
+    "release's env plan, mode 0600, and prepared before the active release" \
+    "changes; gui_env=off removes a bridge an earlier release wrote. PATH," \
+    "TMPDIR and the XDG root variables are deliberately not bridged (a GUI" \
+    "session sets its own) and are reported as excluded." \
     "" \
-    "  --no-integration  Write no startup file, Fish hook, or command stubs."
+    "Every startup file, the shim, and the bridge directory are checked before the" \
+    "active release changes. If a later step fails, the previous active release is" \
+    "restored." \
+    "" \
+    "  --no-integration  Write no startup file, shim, Fish hook, bridge, or command stubs."
 }
 
 usage_doctor() {
@@ -92,6 +115,14 @@ usage_doctor() {
     "usage: valise doctor [--pre-install] [--no-integration]" \
     "" \
     "Report the environment, the active release, and the shell integration." \
+    "" \
+    "Warnings name archetype pitfalls: a legacy single-stage managed block in any" \
+    "startup file valise manages (recognised by the _valise_stage1_ok marker a" \
+    "current block carries), a sh/ksh login shell whose \$ENV is unset or does" \
+    "not point at the valise shim, a missing ~/.zshenv block when zsh is installed," \
+    "and a GUI-session bridge the active release asked for but that is missing on" \
+    "the platform where that mode is written. A release with gui_env=off is not" \
+    "warned about: that is the deliberate default." \
     "" \
     "  --pre-install     Skip the active-release and integration checks, for use" \
     "                    before the first install." \
@@ -106,7 +137,9 @@ usage_lint() {
     "(contrib_ names, version=, dependencies inside the layer or the engine), the" \
     "lint_layer_forbid pattern from valise.conf, every bundle compiled for every" \
     "variant and shell, and the syntax of each body and test with the parser of" \
-    "every shell it declares. Listing modules limits the syntax checks to them." \
+    "every shell it declares. A body that assigns PATH directly is rejected in" \
+    "every phase - use valise_path_prepend/valise_path_append instead - because" \
+    "both plans can be re-sourced. Listing modules limits the syntax checks to them." \
     "" \
     "  --require-parsers  Fail instead of skipping when a shell's parser is missing."
 }
@@ -143,12 +176,28 @@ usage_run() {
 
 usage_env() {
   printf '%s\n' \
-    "usage: valise env" \
+    "usage: valise env [export <format>]" \
     "" \
-    "Print KEY=value lines, shell-quoted, for VALISE_VERSION, VALISE_ENGINE_ROOT," \
-    "VALISE_PROJECT_ROOT (empty outside a project), VALISE_DATA_DIR," \
+    "With no arguments, print KEY=value lines, shell-quoted, for VALISE_VERSION," \
+    "VALISE_ENGINE_ROOT, VALISE_PROJECT_ROOT (empty outside a project), VALISE_DATA_DIR," \
     "VALISE_CONFIG_DIR, VALISE_STATE_DIR, VALISE_RELEASES_DIR, VALISE_ACTIVE_LINK," \
-    "and VALISE_BIN_DIR."
+    "and VALISE_BIN_DIR." \
+    "" \
+    "'valise env export <format>' prints the environment the active release's env" \
+    "plan produces, in a GUI-session-bridging format (format: environment.d," \
+    "launchd, or wsl). The capture keeps your real HOME, XDG roots and TMPDIR," \
+    "isolates only the startup-file surface, evaluates the plan the way a login" \
+    "shell would (module side effects included), and diffs the exported scalar" \
+    "environment against a baseline. It fails naming the variable when a value" \
+    "cannot be represented (a newline, a control byte outside XML 1.0, U+FFFE or" \
+    "U+FFFF, invalid UTF-8, or an empty value for environment.d), and it names" \
+    "every excluded variable on stderr - PATH, TMPDIR and the XDG roots are not" \
+    "bridged, because a GUI session sets its own. The bridge file is written mode" \
+    "0600." \
+    "" \
+    "environment.d emits KEY=VALUE lines for ~/.config/environment.d/," \
+    "launchd emits a ~/Library/LaunchAgents plist running launchctl setenv per" \
+    "variable, and wsl emits WSLENV name/flag lines."
 }
 
 usage_uninstall() {
@@ -157,8 +206,10 @@ usage_uninstall() {
     "" \
     "Remove what valise install wrote: the managed block from each startup file" \
     "(every other line is kept, and a file install created is deleted when it is" \
-    "left empty), the Fish hook, the command stubs valise owns, the active link," \
-    "and the installed releases. Files valise does not own are left alone." \
+    "left empty), the block from the \$ENV shim (your own lines in it survive), the" \
+    "Fish hook, the GUI env bridge, the command stubs valise owns, the active link," \
+    "and the installed releases. Files valise does not own are left alone; a" \
+    "symlinked startup file or bridge is reported for you to edit." \
     "" \
     "  --keep-releases   Keep the installed releases." \
     "" \
@@ -222,11 +273,13 @@ usage_build() {
     "                    An explicit output must be empty or absent." \
     "" \
     "The tree holds plans/<shell>.sh for each POSIX shell the bundle names," \
-    "runtime/capabilities.sh, valise-release.conf, manifest.tsv, and the metadata" \
-    "and bodies of exactly the modules some plan loads. Engine modules are copied" \
-    "under valise/, layer modules under layers/<provider>/. A module that" \
-    "publishes commands adds plans/commands/<module>.sh and bin/<command>; Fish" \
-    "roots add runtime/fish/."
+    "plans/<shell>-interactive.sh for a shell whose closure has interactive-phase" \
+    "modules, runtime/capabilities.sh, valise-release.conf (including the bundle," \
+    "variant, and gui_env the build used), manifest.tsv, and the metadata and" \
+    "bodies of exactly the modules some plan loads. Engine modules are copied under" \
+    "valise/, layer modules under layers/<provider>/. A module that publishes" \
+    "commands adds plans/commands/<module>.sh and bin/<command>; Fish roots add" \
+    "runtime/fish/."
 }
 
 usage_apply() {
@@ -236,10 +289,14 @@ usage_apply() {
     "Build the project, install the result, write the shell integration, and verify" \
     "the active release. See 'valise install --help' for the files it writes." \
     "" \
-    "  --no-integration  Write no startup file, Fish hook, or command stubs." \
+    "  --no-integration  Write no startup file, shim, Fish hook, bridge, or" \
+    "                    command stubs." \
     "  --dry-run         Build, then print what install would change: the release," \
-    "                    each startup file, the Fish hook, and the command stubs." \
-    "                    Nothing outside build/ is written."
+    "                    each startup file, the shim, the Fish hook, the GUI env" \
+    "                    bridge, and the command stubs. Nothing outside build/ is" \
+    "                    written, and module bodies are NOT executed, so the" \
+    "                    bridge is reported as would-create/would-regenerate" \
+    "                    rather than rendered."
 }
 
 usage_status() {
@@ -256,7 +313,9 @@ usage_compile() {
     "usage: valise compile [--bundle=<name>] [--variant=<name>] <output-dir>" \
     "" \
     "Compile the project's modules into <output-dir>/<shell>.sh plans for the" \
-    "POSIX shells the bundle names. Use build for an installable release." \
+    "POSIX shells the bundle names, plus <output-dir>/<shell>-interactive.sh for a" \
+    "shell whose closure contains interactive-phase modules. Use build for an" \
+    "installable release." \
     "" \
     "  --bundle=<name>   Bundle whose roots seed each plan (default: valise.conf)." \
     "  --variant=<name>  Variant whose exclusion list applies (default: valise.conf)." \

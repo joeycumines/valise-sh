@@ -6,3 +6,4 @@ platforms=any
 side_effect=read-only
 exports=e2e_zsh_completions_loaded
 load=modules/e2e/completions_zsh.sh
+phase=interactive

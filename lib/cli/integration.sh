@@ -5,36 +5,215 @@
 
 # Emit the POSIX integration block for the active release.
 #
-# It works in every POSIX shell. A release carries plans/<shell>.sh for the
-# shell classes its bundle covers; a shell class with no plan loads nothing.
-# The guard makes several startup files safe: a login shell that reads more
-# than one of them loads the profile once. It is set only after a plan was sourced, so a shell started
-# before the first install, or while the release was missing, tries again from
-# the next startup file. A plan that failed is not re-run in the same shell;
-# VALISE_RELOAD=1 forces another attempt. The shell is named by the first of
+# It works in every POSIX shell. A release carries plans/<shell>.sh (the env
+# plan) and, when the bundle has interactive-phase modules,
+# plans/<shell>-interactive.sh; a shell class with no plan loads nothing.
+#
+# The block is two-stage, and the stage it carries depends on WHERE it is
+# written (print_posix_integration <all|env>):
+#   stage 1 (every file)  sources the env plan. The env plan is a convergent
+#     projection: re-running it in a fresh nested shell (a new tmux pane, a new
+#     login) is what repairs PATH reordering done by /etc/profile or macOS
+#     path_helper. The guard is keyed by RELEASE ID, not by session, so the same
+#     shell with the same release is a no-op, a switched release forces a
+#     reload, and a fresh nested shell always re-runs the env plan. It is set
+#     only after a plan was sourced successfully, so a shell started before the
+#     first install, while the release was missing, or after a plan failed tries
+#     again from the next startup file the shell reads.
+#   stage 2 (rc-stage files)  sources the interactive plan when the shell is
+#     interactive (`case $- in *i*`). It goes in the shell's rc-stage file
+#     (.bashrc, .zshrc, or the $ENV shim), and in the one file a login bash
+#     reads (.bash_profile, else .bash_login, else .profile), placed last, since
+#     a login bash never reads .bashrc. It is NEVER in .zshenv or .zprofile: an
+#     interactive zsh already has `i` in `$-` while it reads .zshenv, so a
+#     stage 2 there would run interactive setup BEFORE the user's .zshrc - and
+#     the release-id guard would then suppress the correct, later run. Checking
+#     `$-` proves the shell is interactive; it does not prove the right
+#     startup-file stage has been reached.
+#
+# Three private markers make re-evaluation safe and cheap:
+#   _valise_env_tried  the release this process has already sourced the env
+#     plan for. It is not exported, so a child process always attempts the plan
+#     for itself (functions are not inherited).
+#     Whenever the block is about to source a plan for a release this process
+#     has already sourced EITHER stage of, it sets VALISE_RELOAD=1 for that
+#     source (a plain assignment: the plan reads it as a shell variable, so it
+#     must NOT be exported into the caller's children) and restores the
+#     caller's exact state afterwards. The reload flag is
+#     per RELEASE, not per stage: a module that moves from env to interactive
+#     between two releases must still be reloaded, and it would be seen as a
+#     "declared export already exists" conflict otherwise.
+#   _valise_plan_owned  (written by the compiled plan) the export names valise
+#     itself installed in this process. The reload prelude unsets only those, so
+#     a caller's function that collided with a module export is reported again
+#     instead of being silently replaced on the automatic retry. An attempted
+#     load does not establish ownership.
+#   _valise_env_repair  a one-shot ticket, armed only by a login shell (case
+#     $- in *l*). macOS zsh runs /etc/zprofile's path_helper AFTER ~/.zshenv,
+#     so the entry .zshenv prepended ends up last; the ticket forces exactly
+#     one more stage-1 pass at the next startup file (~/.zprofile), which
+#     restores the compiled PATH, and is then spent.
+#
+# Stage 2 runs only when stage 1 succeeded for THIS release. The result of the
+# last env evaluation for a release is kept in the process (_valise_env_rel,
+# _valise_env_ok, _valise_env_carry), so a later startup file whose release
+# guard skips the env stage still hands stage 2 the real unavailable-module
+# list (`_valise_plan_carried`) and the real success state. A required
+# interactive module whose env dependency failed is therefore blocked exactly
+# as it would be in one combined plan, in every startup file. A failed env
+# evaluation also drops `_valise_profile_loaded`, so a later file re-runs the
+# env plan rather than trusting an earlier success. A PATH that differs from
+# the one the last successful env evaluation left (a user rc file that resets
+# PATH, or macOS path_helper) also re-runs it, so the compiled PATH is
+# re-asserted in the shell that actually runs; the module bodies re-run then.
+#
+# Both stages must stay silent, so ssh host-cmd sessions (which read .bashrc
+# non-interactively) are safe. The shell class is named by the first of
 # KSH_VERSION, ZSH_VERSION and BASH_VERSION that is set; any other shell uses
 # the generic sh plan.
 print_posix_integration() {
+  _pix_stage=${1:-all}
   _pix_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
+  # The $ENV stanza is emitted into every file and decided at RUNTIME from what
+  # the shell does, not from the class the plan was chosen by. bash ignores ENV
+  # when invoked as bash, and READS it when invoked as `sh` (its POSIX startup
+  # file); dash and ksh read it; zsh ignores it natively. So an unconditional
+  # stanza is inert in a native bash/zsh session and wires exactly the shells
+  # that need it, including a bash binary invoked through an `sh` symlink -
+  # which a plan-class test (BASH_VERSION is set) wrongly excluded.
+  _pix_shim_literal=
+  if _pix_shim=$(env_shim_path); then
+    _pix_shim_literal=$(shell_quote "$_pix_shim") || { unset _pix_active_literal _pix_shim; return 1; }
+  fi
+  unset _pix_shim
+  # _valise_seen means this process already installed exports of ours, so the
+  # source that follows must clear them first or the compiled plan reports its
+  # own earlier definitions as a foreign conflict. It is deliberately NOT "this
+  # release was attempted": on the FIRST load of a release nothing is owned yet,
+  # so a genuine foreign conflict is still reported, and a second read of the
+  # SAME release is skipped by the guard, not reloaded.
   printf '%s\n' \
     '# BEGIN valise managed block' \
     "_valise_active_link=$_pix_active_literal" \
-    'if [ -z "${_valise_profile_loaded:-}" ] || [ "${VALISE_RELOAD:-}" = 1 ]; then' \
-    '  if [ -n "${KSH_VERSION-}" ]; then _valise_plan=ksh; elif [ -n "${ZSH_VERSION-}" ]; then _valise_plan=zsh; elif [ -n "${BASH_VERSION-}" ]; then _valise_plan=bash; else _valise_plan=sh; fi' \
-    '  _valise_active=$(cd "$_valise_active_link" 2>/dev/null && pwd -P)' \
-    '  if [ -n "$_valise_active" ]; then' \
+    'if [ -n "${KSH_VERSION-}" ]; then _valise_plan=ksh; elif [ -n "${ZSH_VERSION-}" ]; then _valise_plan=zsh; elif [ -n "${BASH_VERSION-}" ]; then _valise_plan=bash; else _valise_plan=sh; fi' \
+    '_valise_active=$(cd "$_valise_active_link" 2>/dev/null && pwd -P)' \
+    '_valise_stage1_ok=1' \
+    'if [ -n "$_valise_active" ]; then' \
+    '  _valise_release_id=${_valise_active##*/}' \
+    '  _valise_seen=0' \
+    '  _valise_plan_carried=' \
+    '  if [ -n "${_valise_plan_owned:-}" ] || [ "${VALISE_RELOAD:-}" = 1 ]; then' \
+    '    _valise_seen=1' \
+    '  fi' \
+    '  _valise_want=0' \
+    '  if [ "${_valise_profile_loaded:-}" != "$_valise_release_id" ] ||' \
+    '    [ "${VALISE_RELOAD:-}" = 1 ]; then' \
+    '    _valise_want=1' \
+    '  elif [ "${_valise_env_repair:-}" = armed ] || [ "${_valise_env_tried:-}" != "$_valise_release_id" ]; then' \
+    '    _valise_want=1' \
+    '  elif [ "${_valise_env_path-}" != "${PATH-}" ]; then' \
+    '    _valise_want=1' \
+    '  fi' \
+    '  if [ "${_valise_env_repair:-}" = armed ]; then _valise_env_repair=done; fi' \
+    '  if [ "$_valise_want" -eq 1 ]; then' \
     '    if [ -f "$_valise_active/plans/$_valise_plan.sh" ]; then' \
-    '      _valise_profile_loaded=1' \
+    '      _valise_had=${VALISE_RELOAD+x}' \
+    '      _valise_old=${VALISE_RELOAD-}' \
+    '      if [ "$_valise_seen" -eq 1 ]; then' \
+    '        VALISE_RELOAD=1' \
+    '      fi' \
     '      VALISE_MODULE_ROOT="$_valise_active"' \
     '      . "$_valise_active/plans/$_valise_plan.sh"' \
+    '      _valise_rc=$?' \
     '      unset VALISE_MODULE_ROOT' \
+    '      if [ -n "$_valise_had" ]; then VALISE_RELOAD=$_valise_old; else unset VALISE_RELOAD; fi' \
+    '      _valise_env_tried=$_valise_release_id' \
+    '      _valise_env_rel=$_valise_release_id' \
+    '      _valise_env_carry=${_valise_plan_carried:-}' \
+    '      if [ "$_valise_rc" -eq 0 ]; then' \
+    '        _valise_env_ok=1' \
+    '        _valise_env_path=${PATH-}' \
+    '        _valise_profile_loaded=$_valise_release_id' \
+    '        case $- in' \
+    '        *l*) [ -n "${_valise_env_repair:-}" ] || _valise_env_repair=armed ;;' \
+    '        esac' \
+    '      else' \
+    '        _valise_env_ok=0' \
+    '        _valise_stage1_ok=0' \
+    '        unset _valise_profile_loaded' \
+    '      fi' \
+    '    else' \
+    '      _valise_stage1_ok=0' \
+    '      _valise_env_ok=0' \
+    '      unset _valise_profile_loaded' \
     '    fi' \
-    '  fi' \
-    '  unset _valise_active _valise_plan' \
+    '  else' \
+    '    _valise_plan_carried=${_valise_env_carry:-}' \
+    '    if [ "${_valise_env_rel:-}" != "$_valise_release_id" ] || [ "${_valise_env_ok:-0}" != 1 ]; then' \
+    '      _valise_stage1_ok=0' \
+    '    fi' \
+    '  fi'
+  if [ "$_pix_stage" = all ]; then
+    printf '%s\n' \
+      '  if [ "$_valise_stage1_ok" -eq 1 ]; then' \
+      '  case $- in *i*)' \
+      '    if [ "${_valise_interactive_loaded:-}" != "$_valise_release_id" ] ||' \
+      '      [ "${VALISE_RELOAD:-}" = 1 ]; then' \
+      '      if [ -f "$_valise_active/plans/$_valise_plan-interactive.sh" ]; then' \
+      '        _valise_had=${VALISE_RELOAD+x}' \
+      '        _valise_old=${VALISE_RELOAD-}' \
+      '        if [ "$_valise_seen" -eq 1 ]; then' \
+      '          VALISE_RELOAD=1' \
+      '        fi' \
+      '        VALISE_MODULE_ROOT="$_valise_active"' \
+      '        . "$_valise_active/plans/$_valise_plan-interactive.sh"' \
+      '        _valise_rc=$?' \
+      '        unset VALISE_MODULE_ROOT' \
+      '        if [ -n "$_valise_had" ]; then VALISE_RELOAD=$_valise_old; else unset VALISE_RELOAD; fi' \
+      '        if [ "$_valise_rc" -eq 0 ]; then' \
+      '          _valise_interactive_loaded=$_valise_release_id' \
+      '          _valise_env_path=${PATH-}' \
+      '        fi' \
+      '      else' \
+      '        _valise_interactive_loaded=$_valise_release_id' \
+      '      fi' \
+      '    fi' \
+      '    ;;' \
+      '  esac' \
+      '  fi'
+  fi
+  printf '%s\n' \
+    '  unset _valise_release_id _valise_want _valise_had _valise_old _valise_rc _valise_seen _valise_stage1_ok' \
     'fi' \
+    'unset _valise_plan_carried'
+  if [ -n "$_pix_shim_literal" ]; then
+    # A `$`-containing ENV is the shell's own indirection (and ksh tilde-expands
+    # a leading `~`), so either spelling is user-owned and never repointed.
+    printf '%s\n' \
+      'if [ -f '"$_pix_shim_literal"' ]; then' \
+      '  case "${ENV:-}" in' \
+      "  '') ENV=$_pix_shim_literal; export ENV ;;" \
+      '  *"\$"* | "~"*) : ;;' \
+      "  *) [ -e \"\$ENV\" ] || [ -L \"\$ENV\" ] || { ENV=$_pix_shim_literal; export ENV; } ;;" \
+      '  esac' \
+      'fi'
+  fi
+  printf '%s\n' \
+    'unset _valise_active _valise_plan' \
     'unset _valise_active_link' \
     '# END valise managed block'
-  unset _pix_active_literal
+  unset _pix_active_literal _pix_shim_literal _pix_stage
+}
+
+# env_shim_path: the $ENV shim install writes for sh/ksh subshells. It is
+# derived from VALISE_XDG_CONFIG, the normalized configuration root, so a
+# relative XDG_CONFIG_HOME or a trailing slash cannot place the shim relative
+# to whatever directory the caller happened to be in (the release tree, during
+# an install). Without HOME there is no user configuration root, so there is
+# no shim either.
+env_shim_path() {
+  [ -n "${HOME:-}${XDG_CONFIG_HOME:-}" ] || return 1
+  printf '%s\n' "$VALISE_XDG_CONFIG/env.sh"
 }
 
 # integration_markers_paired <file>
@@ -78,11 +257,15 @@ cmd_init() {
 
 # Report whether a startup file carries valise integration: the POSIX managed
 # block, or the header of the Fish hook, which valise owns as a whole file.
+# The markers are matched as WHOLE LINES: a file that merely mentions the
+# marker text in prose, or a foreign file that happens to carry the string, is
+# not valise-owned, and must never be rewritten or deleted because of a
+# substring match.
 integration_has_managed_block() {
   _ihb_awk=$(trusted_utility_path awk) || return 1
   "$_ihb_awk" '
-    index($0, "# BEGIN valise managed block") { found = 1; exit }
-    index($0, "# valise Fish integration") { found = 1; exit }
+    $0 == "# BEGIN valise managed block" { found = 1; exit }
+    $0 == "# valise Fish integration. Do not edit." { found = 1; exit }
     END { exit !found }
   ' "$1" 2>/dev/null
 }
@@ -105,7 +288,7 @@ integration_shell_files() {
     printf '%s\n' "$2/.bashrc"
     ;;
   zsh)
-    printf '%s\n' "$2/.zprofile" "$2/.zshrc"
+    printf '%s\n' "$2/.zshenv" "$2/.zprofile" "$2/.zshrc"
     ;;
   fish)
     printf '%s\n' "${XDG_CONFIG_HOME:-$2/.config}/fish/conf.d/valise.fish"
@@ -121,26 +304,74 @@ integration_shell_files() {
 # for the user's own shell, except ~/.zprofile, because zsh reads nothing else at
 # login. Existing files are always kept current.
 #
+# Each line is "<stage>\t<path>", where <stage> selects the block variant:
+#   env  stage 1 only. Every file the shell reads before its rc stage gets this,
+#        so the env plan applies everywhere and interactive setup cannot run
+#        before the rc file it belongs to.
+#   all  both stages. The shell's rc-stage file gets this: ~/.bashrc,
+#        ~/.zshrc, or the $ENV shim (which sh/ksh interactive subshells read),
+#        and the file a login bash reads (see print_posix_integration), so an
+#        interactive bash login reaches the interactive stage.
+#
 # posix_startup_targets <home>
-# prints one path per line.
+# prints one "<stage>\t<path>" record per line.
 posix_startup_targets() {
-  printf '%s\n' "$1/.profile"
-  if [ -e "$1/.bash_profile" ] || [ -L "$1/.bash_profile" ]; then
-    printf '%s\n' "$1/.bash_profile"
-  elif [ -e "$1/.bash_login" ] || [ -L "$1/.bash_login" ]; then
-    printf '%s\n' "$1/.bash_login"
-  fi
+  # A login bash reads the FIRST of .bash_profile, .bash_login and .profile that
+  # exists, and never .bashrc. Those two bash-only files therefore ALWAYS carry
+  # the interactive stage, placed at its END: only bash reads them, so stage 2
+  # there is inert for every other shell, and leaving them env-only left a
+  # `bash --login -i` in a zsh-default home (no .bashrc) with no interactive
+  # setup at all, because bash ignores ENV. A `. ~/.bashrc` the user wrote above
+  # the block has already run by then, and the release-keyed guard keeps the
+  # interactive plan from loading twice.
+  #
+  # Precedence follows what bash ACTUALLY reads. A dangling .bash_profile or
+  # .bash_login symlink is ignored by bash (stat returns ENOENT) and it falls
+  # back to .profile, so only an existing target shadows .profile; the write
+  # path still skips a symlink it is asked to write.
+  _pst_bash_rc=0
   case "${SHELL:-}" in
-  */bash | bash) printf '%s\n' "$1/.bashrc" ;;
-  *) if [ -e "$1/.bashrc" ] || [ -L "$1/.bashrc" ]; then printf '%s\n' "$1/.bashrc"; fi ;;
+  */bash | bash) _pst_bash_rc=1 ;;
+  esac
+  if [ -e "$1/.bashrc" ] || [ -L "$1/.bashrc" ]; then _pst_bash_rc=1; fi
+  _pst_bash_stage=env
+  [ "$_pst_bash_rc" -eq 0 ] || _pst_bash_stage=all
+  _pst_bash_login=$1/.profile
+  _pst_login_stage=$_pst_bash_stage
+  if [ -e "$1/.bash_profile" ]; then
+    _pst_bash_login=$1/.bash_profile
+    _pst_login_stage=all
+  elif [ -e "$1/.bash_login" ]; then
+    _pst_bash_login=$1/.bash_login
+    _pst_login_stage=all
+  fi
+  # .profile is always written: sh, ksh and dash read it at login. It is the
+  # bash login file only when no .bash_profile or .bash_login exists.
+  if [ "$_pst_bash_login" != "$1/.profile" ]; then
+    printf 'env\t%s\n' "$1/.profile"
+  fi
+  printf '%s\t%s\n' "$_pst_login_stage" "$_pst_bash_login"
+  unset _pst_bash_rc _pst_bash_stage _pst_bash_login _pst_login_stage
+  case "${SHELL:-}" in
+  */bash | bash) printf 'all\t%s\n' "$1/.bashrc" ;;
+  *) if [ -e "$1/.bashrc" ] || [ -L "$1/.bashrc" ]; then printf 'all\t%s\n' "$1/.bashrc"; fi ;;
   esac
   if [ -e "$1/.zprofile" ] || [ -L "$1/.zprofile" ] || command -v zsh >/dev/null 2>&1; then
-    printf '%s\n' "$1/.zprofile"
+    printf 'env\t%s\n' "$1/.zprofile"
   fi
   case "${SHELL:-}" in
-  */zsh | zsh) printf '%s\n' "$1/.zshrc" ;;
-  *) if [ -e "$1/.zshrc" ] || [ -L "$1/.zshrc" ]; then printf '%s\n' "$1/.zshrc"; fi ;;
+  */zsh | zsh) printf 'all\t%s\n' "$1/.zshrc" ;;
+  *) if [ -e "$1/.zshrc" ] || [ -L "$1/.zshrc" ]; then printf 'all\t%s\n' "$1/.zshrc"; fi ;;
   esac
+  # zsh reads ~/.zshenv for EVERY invocation (login or not, interactive or
+  # not), before /etc/zprofile runs path_helper on macOS, so the managed
+  # block there covers 'zsh -c' env and the .zprofile block repairs PATH
+  # after path_helper; double evaluation is harmless (release-id guard +
+  # convergent env plan). It is an ENV-stage file: an interactive zsh already
+  # has 'i' in $- here, and interactive setup belongs in ~/.zshrc.
+  if [ -e "$1/.zshenv" ] || [ -L "$1/.zshenv" ] || command -v zsh >/dev/null 2>&1; then
+    printf 'env\t%s\n' "$1/.zshenv"
+  fi
 }
 
 # Write the managed block to every startup file install manages.
@@ -150,15 +381,41 @@ write_posix_integration() {
     return 0
   fi
   _wpi_home=$(path_normalize "$HOME") || die "cannot resolve HOME"
-  _wpi_snippet=$(print_posix_integration) || die "cannot generate integration block"
   _wpi_targets=$(posix_startup_targets "$_wpi_home")
-  while IFS= read -r _wpi_target; do
+  while IFS="$(printf '\t')" read -r _wpi_stage _wpi_target; do
     [ -n "$_wpi_target" ] || continue
+    # A file can appear once per stage, but never twice: the two variants differ,
+    # so the later one would simply replace the earlier one's block.
+    _wpi_snippet=$(print_posix_integration "$_wpi_stage") || die "cannot generate integration block"
     project_write_integration "$_wpi_target" "$_wpi_snippet"
   done <<EOF
 $_wpi_targets
 EOF
-  unset _wpi_home _wpi_snippet _wpi_targets _wpi_target
+  # The $ENV shim for sh/ksh subshells. Its content IS the managed block for
+  # the RC STAGE: re-asserting the same ENV from inside the shim is a no-op, so
+  # no second-generation variant is needed, and an interactive subshell reading
+  # it gets the interactive plan at the stage an rc file would have provided
+  # it. It is written and removed as a managed startup file, so every other byte
+  # in the file survives and a file install created is deleted only when the
+  # created-ledger says so.
+  _wpi_shim=$(env_shim_path) || {
+    unset _wpi_home _wpi_snippet _wpi_targets _wpi_target _wpi_stage
+    return 0
+  }
+  _wpi_shim_parent=$(path_parent "$_wpi_shim")
+  _wpi_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  [ -d "$_wpi_shim_parent" ] || "$_wpi_mkdir" -p "$_wpi_shim_parent" || die "cannot create shim parent: $_wpi_shim_parent"
+  if [ -e "$_wpi_shim" ] || [ -L "$_wpi_shim" ]; then
+    if [ -L "$_wpi_shim" ] || ! integration_has_posix_block "$_wpi_shim" 2>/dev/null; then
+      info "warning: leaving $_wpi_shim: it is not the valise ENV shim"
+      unset _wpi_home _wpi_snippet _wpi_targets _wpi_target _wpi_stage _wpi_shim _wpi_shim_parent _wpi_mkdir
+      return 0
+    fi
+  fi
+  _wpi_snippet=$(print_posix_integration all) || die "cannot generate integration block"
+  project_write_integration "$_wpi_shim" "$_wpi_snippet"
+  info "ENV shim deployed: $_wpi_shim"
+  unset _wpi_home _wpi_snippet _wpi_targets _wpi_target _wpi_stage _wpi_shim _wpi_shim_parent _wpi_mkdir
 }
 
 cmd_doctor() {
@@ -209,6 +466,7 @@ cmd_doctor() {
 
   # Check active symlink
   _doctor_active_ok=0
+  _doctor_active_target=
   if [ -L "$VALISE_ACTIVE_LINK" ]; then
     _target=$(active_release_dir 2>/dev/null || :)
     if [ -n "$_target" ]; then
@@ -265,9 +523,11 @@ cmd_doctor() {
   fi
 
   if [ -n "${HOME:-}" ]; then
-    # Check the startup files the running shell actually reads. The shell is
-    # taken from $SHELL, which is the same signal install uses to pick its
-    # per-shell startup file.
+    # Check the startup files the running shell actually reads, using the SAME
+    # normalized home the write path uses (HOME=/ must not become //.zshenv).
+    _doctor_home=$(path_normalize "$HOME") || die "cannot resolve HOME"
+    # The shell is taken from $SHELL, which is the same signal install uses to
+    # pick its per-shell startup file.
     if [ "$_doctor_check_integration" -eq 1 ]; then
       _doctor_shell=""
       case "${SHELL:-}" in
@@ -288,7 +548,7 @@ cmd_doctor() {
       # through a staging file instead.
       _doctor_cand_file=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-doctor-candidates.XXXXXX") ||
         die "cannot create doctor candidate staging file"
-      integration_shell_files "$_doctor_shell" "$HOME" >"$_doctor_cand_file"
+      integration_shell_files "$_doctor_shell" "$_doctor_home" >"$_doctor_cand_file"
       while IFS= read -r _doctor_candidate; do
         [ -n "$_doctor_candidate" ] || continue
         _doctor_candidates="$_doctor_candidates $_doctor_candidate"
@@ -319,6 +579,155 @@ cmd_doctor() {
           "${_doctor_shell:-the current shell}" "$_doctor_candidates"
         _status=1
       fi
+      # Archetype diagnostics: a legacy single-stage block is upgradeable; an
+      # sh/ksh login shell whose ENV does not point at the valise shim misses
+      # interactive subshells; zsh without a .zshenv block misses non-login
+      # 'zsh -c' env.
+      _doctor_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+      # A block is CURRENT when it can reach the interactive stage where one is
+      # expected, and env-only files are current by carrying the two-stage
+      # shape. The shape is decided by a marker the current block always emits:
+      # `_valise_stage1_ok`, which a 0.2-era single-stage block never wrote.
+      # Without that marker an env-stage block is indistinguishable from a
+      # legacy combined block, so .zshenv and .profile (the exact bug 0.3 fixed
+      # for `zsh -c`) would be accepted forever.
+      _doctor_bash_rc=0
+      case "${SHELL:-}" in
+      */bash | bash) _doctor_bash_rc=1 ;;
+      esac
+      if [ -e "$_doctor_home/.bashrc" ] || [ -L "$_doctor_home/.bashrc" ]; then _doctor_bash_rc=1; fi
+      _doctor_bash_login=.profile
+      if [ -e "$_doctor_home/.bash_profile" ]; then
+        _doctor_bash_login=.bash_profile
+      elif [ -e "$_doctor_home/.bash_login" ]; then
+        _doctor_bash_login=.bash_login
+      fi
+      # .bash_profile and .bash_login are read only by bash, so they always
+      # carry stage 2 (posix_startup_targets writes them as `all`); .bashrc and
+      # .zshrc are rc-stage files; every other managed file must be env-stage.
+      for _doctor_name in $VALISE_STARTUP_NAMES; do
+        _doctor_file="$_doctor_home/$_doctor_name"
+        [ -f "$_doctor_file" ] && [ ! -L "$_doctor_file" ] || continue
+        integration_has_posix_block "$_doctor_file" || continue
+        _doctor_want_gate=0
+        case "$_doctor_name" in
+        .bashrc | .zshrc) _doctor_want_gate=1 ;;
+        .bash_profile | .bash_login) _doctor_want_gate=1 ;;
+        "$_doctor_bash_login")
+          # The bash login file carries stage 2 whenever bash has an rc chain.
+          # It is .profile when neither bash-only file exists.
+          [ "$_doctor_bash_rc" -eq 1 ] && _doctor_want_gate=1
+          ;;
+        esac
+        if ! "$_doctor_awk" -v want_gate="$_doctor_want_gate" '
+          /^# BEGIN valise managed block$/ { inblock = 1; gate = 0; marker = 0; next }
+          inblock && /case \$- in \*i\*\)/ { gate = 1 }
+          inblock && index($0, "_valise_stage1_ok=") == 1 { marker = 1 }
+          /^# END valise managed block$/ {
+            inblock = 0
+            # A file that should reach stage 2 needs the gate; a block with no
+            # two-stage marker anywhere is the legacy single-stage shape.
+            if (want_gate && !gate) bad = 1
+            if (!marker) bad = 1
+          }
+          END { exit bad ? 1 : 0 }
+        ' "$_doctor_file"; then
+          printf '  warn: %s has a legacy single-stage block; run valise install again to upgrade to the two-stage block\n' "$_doctor_file"
+        fi
+      done
+      # The $ENV shim is an rc-stage managed file too.
+      if _doctor_shim_probe=$(env_shim_path); then
+        if [ -f "$_doctor_shim_probe" ] && [ ! -L "$_doctor_shim_probe" ] &&
+          integration_has_posix_block "$_doctor_shim_probe"; then
+          if ! "$_doctor_awk" '
+            /^# BEGIN valise managed block$/ { inblock = 1; gate = 0; marker = 0; next }
+            inblock && /case \$- in \*i\*\)/ { gate = 1 }
+            inblock && index($0, "_valise_stage1_ok=") == 1 { marker = 1 }
+            /^# END valise managed block$/ { inblock = 0; if (!gate || !marker) bad = 1 }
+            END { exit bad ? 1 : 0 }
+          ' "$_doctor_shim_probe"; then
+            printf '  warn: %s has a legacy single-stage block; run valise install again to upgrade to the two-stage block\n' "$_doctor_shim_probe"
+          fi
+        fi
+      fi
+      # $ENV wiring for sh/ksh: unset is as broken as foreign, because an
+      # interactive sh/ksh subshell then reads nothing at all.
+      #
+      # An ENV containing `$` or starting with `~` is USER-OWNED: the block
+      # deliberately leaves it alone (the shell expands `$`, and ksh
+      # tilde-expands a leading `~` - both verified), so warning about it here
+      # would report a file the user chose. Comparisons otherwise use the
+      # normalized path so an equivalent spelling does not false-warn;
+      # path_normalize does NOT expand `~`, which is exactly why that case is
+      # handled by the ownership test rather than by normalization.
+      case "${_doctor_shell:-}" in
+        ksh|sh|"")
+          if _doctor_shim=$(env_shim_path); then
+            _doctor_env=${ENV:-}
+            if [ -z "$_doctor_env" ]; then
+              if [ -f "$_doctor_shim" ]; then
+                printf '  warn: $ENV is unset; interactive sh/ksh subshells will not load valise (the shim is at %s)\n' "$_doctor_shim"
+              fi
+            else
+              case "$_doctor_env" in
+              *'$'* | '~'*) : ;;
+              *)
+                if _doctor_env_norm=$(path_normalize "$_doctor_env" 2>/dev/null); then
+                  if [ "$_doctor_env_norm" != "$_doctor_shim" ]; then
+                    printf '  warn: $ENV points at %s, not the valise shim %s; interactive sh/ksh subshells will not load valise\n' "$_doctor_env" "$_doctor_shim"
+                  fi
+                fi
+                ;;
+              esac
+            fi
+          fi
+          ;;
+      esac
+      # zsh reads ~/.zshenv for every invocation, so its absence is a defect
+      # whenever zsh is INSTALLED - install writes the block on zsh presence,
+      # not on $SHELL.
+      if command -v zsh >/dev/null 2>&1; then
+        if [ ! -f "$_doctor_home/.zshenv" ] || ! integration_has_managed_block "$_doctor_home/.zshenv" 2>/dev/null; then
+          printf '  warn: no valise managed block in ~/.zshenv; non-login zsh (zsh -c) will not load the env plan\n'
+        fi
+      fi
+      # GUI-session bridge diagnostics: on platforms where GUI apps never read
+      # a startup file, only the environment.d (systemd) or LaunchAgent
+      # (launchd) bridge can carry the env plan into the session. This is only
+      # worth reporting when the ACTIVE RELEASE asked for a bridge: gui_env=off
+      # is the deliberate default and must not warn on every such machine. The
+      # mode is also platform-gated, exactly like the write path
+      # (gui_env_bridge_stage) and the preview: systemd is only written on
+      # Linux and launchd only on macOS, so warning about a bridge the platform
+      # can never write would send the user to an install that skips it.
+      if [ "$_doctor_active_ok" -eq 1 ]; then
+        if _doctor_bridge_mode=$(gui_env_mode "$_doctor_active_target" 2>/dev/null); then
+          _doctor_bridge_os=
+          case "$_doctor_bridge_mode" in
+          systemd) _doctor_bridge_os=linux ;;
+          launchd) _doctor_bridge_os=darwin ;;
+          esac
+          if [ -n "$_doctor_bridge_os" ] && [ "$(cli_os_name)" = "$_doctor_bridge_os" ]; then
+            case "$_doctor_bridge_mode" in
+            systemd)
+              _doctor_gui=$(gui_env_file systemd 2>/dev/null) || _doctor_gui=
+              if [ -n "$_doctor_gui" ] && [ ! -f "$_doctor_gui" ]; then
+                printf '  warn: the active release sets gui_env=systemd but there is no environment.d/10-valise.conf; run valise install again\n'
+              fi
+              ;;
+            launchd)
+              _doctor_gui=$(gui_env_file launchd 2>/dev/null) || _doctor_gui=
+              if [ -n "$_doctor_gui" ] && [ ! -f "$_doctor_gui" ]; then
+                printf '  warn: the active release sets gui_env=launchd but there is no ~/Library/LaunchAgents/sh.valise.env.plist; run valise install again\n'
+              fi
+              ;;
+            esac
+          fi
+        fi
+      fi
+      unset _doctor_awk _doctor_name _doctor_file _doctor_shim _doctor_env _doctor_env_norm _doctor_bridge_mode
+      unset _doctor_bridge_os _doctor_bash_rc _doctor_bash_login _doctor_home _doctor_gui _doctor_shim_probe
+      unset _doctor_want_gate
     else
       printf '  info: skipping the shell integration check\n'
     fi
@@ -328,6 +737,17 @@ cmd_doctor() {
   # POSIX and not gated on any particular uname).
   _uname=$(uname -s 2>/dev/null || echo unknown)
   printf '  platform: %s\n' "$_uname"
+
+  # Every private this command may have set, including the ones assigned BEFORE
+  # the HOME guard: a doctor run with HOME unset returned earlier and left the
+  # active-release state behind for whatever ran next in the same process.
+  unset _doctor_active_id _doctor_active_manifest _doctor_active_ok _doctor_active_target
+  unset _doctor_bridge_mode _doctor_bridge_os _doctor_bash_rc _doctor_bash_login
+  unset _doctor_cand_file _doctor_candidates _doctor_check_integration _doctor_env
+  unset _doctor_env_norm _doctor_file _doctor_found _doctor_gui _doctor_home
+  unset _doctor_name _doctor_pre_install _doctor_rm _doctor_sha _doctor_shell
+  unset _doctor_shim _doctor_shim_probe _doctor_unmanaged _doctor_want_gate
+  unset _doctor_awk _target _verify_quiet _dir _cmd
 
   if [ "$_status" -eq 0 ]; then
     info "all checks passed"

@@ -1,6 +1,6 @@
 {
   "name": "valise-sh",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Pure POSIX shell profile engine and CLI",
   "bin": {
     "valise": "./bin/valise"
@@ -27,6 +27,7 @@
     "examples/e2e/module.d/e2e_ksh_features.meta",
     "examples/e2e/module.d/e2e_layer_probe.meta",
     "examples/e2e/module.d/e2e_optional_network.meta",
+    "examples/e2e/module.d/e2e_path_env.meta",
     "examples/e2e/module.d/e2e_platform_tools.meta",
     "examples/e2e/module.d/e2e_platform_tools_bsd.meta",
     "examples/e2e/module.d/e2e_platform_tools_darwin.meta",
@@ -40,6 +41,7 @@
     "examples/e2e/modules/e2e/ksh_features.sh",
     "examples/e2e/modules/e2e/layer_probe.sh",
     "examples/e2e/modules/e2e/optional_network.sh",
+    "examples/e2e/modules/e2e/path_env.sh",
     "examples/e2e/modules/e2e/platform_tools_bsd.sh",
     "examples/e2e/modules/e2e/platform_tools_darwin.sh",
     "examples/e2e/modules/e2e/platform_tools_linux.sh",

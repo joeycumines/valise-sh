@@ -138,6 +138,8 @@ fi
 
 for _fn in \
   sp_cap_os \
+  sp_cap_is_interactive \
+  sp_cap_is_tty \
   sp_cap_command_exists \
   sp_cap_command_path \
   sp_cap_cpu_count \
@@ -187,6 +189,33 @@ _out=$(SP_CAP_STUB_UNAME=DragonFlyBSD PATH="$_stub_dir:$PATH" sp_cap_os 2>&1)
 assert_eq 'sp_cap_os generic BSD output' 'bsd' "$_out"
 _out=$(SP_CAP_STUB_UNAME=Plan9 PATH="$_stub_dir:$PATH" sp_cap_os 2>&1)
 assert_eq 'sp_cap_os unknown output' 'unknown' "$_out"
+
+printf '\n=== Interactivity and TTY capability probes ===\n'
+# sp_cap_is_interactive / sp_cap_is_tty must behave per shell flag: every
+# lane present on the host is probed both non-interactively (-c) and
+# interactively (-i), and the TTY probe is checked with stdin as a pipe and
+# as /dev/null.
+for _sh in sh bash zsh ksh dash; do
+  _sh_path=$(command -v "$_sh" 2>/dev/null || :)
+  [ -n "$_sh_path" ] || continue
+  _out=$("$_sh_path" -c '. "$1"; sp_cap_is_interactive && printf i=yes || printf i=no; sp_cap_is_tty </dev/null && printf " tty=yes" || printf " tty=no"' sh "$CAPABILITIES_SH" 2>/dev/null)
+  assert_eq "$_sh -c: not interactive, stdin /dev/null not a tty" 'i=no tty=no' "$_out"
+  _out=$("$_sh_path" -i -c '. "$1"; sp_cap_is_interactive && printf i=yes || printf i=no' sh "$CAPABILITIES_SH" </dev/null 2>/dev/null)
+  assert_eq "$_sh -i: interactive flag detected" 'i=yes' "$_out"
+  _out=$("$_sh_path" -c '. "$1"; printf x | sp_cap_is_tty && printf "tty=yes" || printf "tty=no"' sh "$CAPABILITIES_SH" 2>/dev/null)
+  assert_eq "$_sh: piped stdin is not a tty" 'tty=no' "$_out"
+  # Argument-count guard: both helpers reject arguments.
+  _out=$("$_sh_path" -c '. "$1"; sp_cap_is_interactive extra 2>/dev/null && printf arg=accepted || printf arg=rejected; sp_cap_is_tty extra 2>/dev/null && printf " targ=accepted" || printf " targ=rejected"' sh "$CAPABILITIES_SH" 2>/dev/null)
+  assert_eq "$_sh: helpers reject arguments" 'arg=rejected targ=rejected' "$_out"
+done
+unset _sh _sh_path _out
+# Host interactive probe: this test file runs non-interactively, so
+# sp_cap_is_interactive must fail here.
+if sp_cap_is_interactive; then
+  fail 'sp_cap_is_interactive fails in the non-interactive test harness'
+else
+  _total=$((_total + 1)); pass 'sp_cap_is_interactive fails in the non-interactive test harness'
+fi
 
 write_executable "$_stub_dir/tool-probe" <<'STUB'
 #!/bin/sh

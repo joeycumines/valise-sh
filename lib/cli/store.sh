@@ -167,7 +167,8 @@ release_lock() {
     if [ -e "$_hook_tmp" ] || [ -L "$_hook_tmp" ]; then _cleanup_failed=1; fi
     _hook_tmp=""
   fi
-  for _release_tmp in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}" "${_prev_tmp:-}" "${_dry_tmp:-}" "${_un_tmp:-}"; do
+  for _release_tmp in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}" "${_prev_tmp:-}" "${_dry_tmp:-}" \
+    "${_un_tmp:-}" "${_gui_stage:-}" "${_rii_tmp:-}"; do
     [ -n "$_release_tmp" ] || continue
     [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_release_tmp" 2>/dev/null || :
     if [ -e "$_release_tmp" ] || [ -L "$_release_tmp" ]; then _cleanup_failed=1; fi
@@ -178,6 +179,8 @@ release_lock() {
   _prev_tmp=""
   _dry_tmp=""
   _un_tmp=""
+  _gui_stage=""
+  _rii_tmp=""
   if [ -n "$_mm_tmp" ]; then
     [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_mm_tmp" 2>/dev/null || :
     if [ -e "$_mm_tmp" ] || [ -L "$_mm_tmp" ]; then _cleanup_failed=1; fi
@@ -835,6 +838,20 @@ cmd_install() {
     info "release $_release_id installed"
   fi
 
+  # Prepare the GUI env bridge BEFORE the active link moves, so a capture or
+  # render failure aborts with the previous release still active and its own
+  # bridge intact, instead of switching to a release whose env the GUI session
+  # will never see.
+  _install_bridge=0
+  if [ "$_install_integration" -eq 1 ] && [ -n "${HOME:-}" ] && [ "$(cli_os_name)" != unknown ]; then
+    case "$(gui_env_mode "$_target_dir")" in
+    off | systemd | launchd) _install_bridge=1 ;;
+    esac
+    if [ "$_install_bridge" -eq 1 ]; then
+      gui_env_bridge_stage "$_target_dir" || die "cannot prepare the GUI environment bridge"
+    fi
+  fi
+
   # Update active symlink atomically without clobbering a non-symlink path.
   if [ ! -L "$VALISE_ACTIVE_LINK" ] || [ "$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null)" != "$_target_dir" ]; then
     if [ -e "$VALISE_ACTIVE_LINK" ] && [ ! -L "$VALISE_ACTIVE_LINK" ]; then
@@ -898,6 +915,15 @@ cmd_install() {
   if [ "$_install_integration" -eq 1 ]; then
     write_posix_integration
     reconcile_commands "$_target_dir"
+    # The integration record is written BEFORE the bridge, so the bridge publish
+    # is the LAST fallible step: a failure in it rolls the active link back and
+    # then nothing further can leave the link and the bridge describing
+    # different releases. The record only means "an integration exists", which
+    # is true even if the bridge itself could not be published.
+    record_integration_installed
+    if [ "$_install_bridge" -eq 1 ]; then
+      gui_env_bridge_publish || die "cannot publish the GUI environment bridge"
+    fi
   fi
 
   _install_txn=0

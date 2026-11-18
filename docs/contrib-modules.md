@@ -53,6 +53,22 @@ Choose `shells` by what the body needs:
 - `fish` for a native Fish body (`.fish`). A Fish module never runs a POSIX
   body, so a feature that needs both shells is two modules.
 
+Choose `phase` by when the body may run (see
+[module-abi.md](module-abi.md#phases)):
+
+- omit it (or write `phase=env`) for environment content: exported scalars,
+  PATH entries (always through `valise_path_prepend`/`valise_path_append`),
+  `umask`, and XDG defaults. The env plan is sourced at every startup entry
+  point and must stay silent and idempotent, so `valise lint` rejects raw
+  `PATH=` assignments in every phase (the interactive plan is re-sourced too).
+- `phase=interactive` for aliases, functions, prompt, history, shell options,
+  completions, and keybindings — anything that only makes sense when `$-`
+  contains `i`. The block's interactive stage is itself gated on `$-`, and
+  `sp_cap_is_interactive` re-checks it inside a body. Gate TTY-only work
+  (for example `stty`, `GPG_TTY`) behind `sp_cap_is_tty` inside the
+  interactive body, so `ssh host cmd` (interactive flag absent, stdin a
+  pipe) never touches the terminal.
+
 Zsh runs module functions with the user's options. A body that relies on
 word splitting of unquoted expansions behaves differently in zsh, where it
 is off by default; quote expansions, split explicitly, or leave zsh out of
@@ -80,6 +96,7 @@ your functions can call them later:
 - `sp_cap_file_mtime <path>`
 - `sp_cap_secure_local_bin_check <home> [reject|allow-owned-symlinks]`
 - `sp_cap_mktemp_dir [prefix] [parent]`, `sp_cap_mktemp_file <parent> <prefix>`
+- `sp_cap_is_interactive`, `sp_cap_is_tty`
 
 `sp_cap_secure_local_bin_check` defaults to `reject`, which refuses every
 symlink in `~/.local/bin`. `allow-owned-symlinks` accepts a symlink whose
@@ -87,7 +104,9 @@ link entry is owned by the current user (the pipx and uv shape) while still
 rejecting unowned entries and group- or other-writable regular files.
 
 The engine also ships modules a project can require: `valise_path`
-(`valise_path_prepend` and `valise_path_append`), `valise_editor`,
+(`valise_path_prepend` and `valise_path_append`, the core PATH helpers all
+most use cases need, plus `valise_path_contains`, `valise_path_remove`, and
+`valise_path_normalize` for inspection and cleanup), `valise_editor`,
 `valise_history`, `valise_pager`, `valise_xdg`, and the `valise_platform_*`
 modules. [shared-modules.md](shared-modules.md) lists them.
 

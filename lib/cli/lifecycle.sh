@@ -15,16 +15,479 @@ _txn_old_previous=""
 _txn_changed=""
 
 # The startup files valise may write a managed block into.
-VALISE_STARTUP_NAMES='.profile .bash_profile .bash_login .bashrc .zprofile .zshrc'
+VALISE_STARTUP_NAMES='.profile .bash_profile .bash_login .bashrc .zprofile .zshrc .zshenv'
 
 previous_record_path() {
   printf '%s\n' "$VALISE_XDG_STATE/previous"
 }
 
+# gui_env_file <mode> [home]: the GUI-session bridge file for a mode.
+#   systemd -> $XDG_CONFIG_HOME/environment.d/10-valise.conf
+#   launchd -> <home>/Library/LaunchAgents/sh.valise.env.plist
+# Both are derived from normalized roots (VALISE_XDG_CONFIG and the caller's
+# resolved home), so a relative or trailing-slash XDG_CONFIG_HOME cannot place
+# the file somewhere the next run will not look. Passing <home> explicitly lets
+# doctor and uninstall report the file for an inspected home rather than the
+# caller's.
+gui_env_file() {
+  _gef_home=${2:-${HOME:-}}
+  case "${1:-}" in
+  # xdg_child keeps a "/" root from producing "//environment.d/...", which POSIX
+  # leaves implementation-defined.
+  systemd) xdg_child "$VALISE_XDG_CONFIG_ROOT" environment.d/10-valise.conf ;;
+  launchd)
+    # Keep a "/" root usable: a trailing slash is only stripped when it does
+    # not turn the root into the empty string, and a bare "/" joins with
+    # exactly one separator (a leading "//" is implementation-defined).
+    while [ "${#_gef_home}" -gt 1 ] && [ "${_gef_home%/}" != "$_gef_home" ]; do
+      _gef_home=${_gef_home%/}
+    done
+    [ -n "$_gef_home" ] || { unset _gef_home; return 1; }
+    printf '%s\n' "${_gef_home%/}/Library/LaunchAgents/sh.valise.env.plist"
+    ;;
+  *) unset _gef_home; return 1 ;;
+  esac
+  unset _gef_home
+}
+
+# bridge_is_valise_owned <mode> <file>: true when the bridge file carries the
+# valise ownership marker. Both the write path (before replacing) and the
+# uninstall path (before removing) use it, so a user-owned file at the bridge
+# path is never overwritten or deleted. The comparison is an exact LINE match
+# through the trusted awk: piping head/sed into grep would resolve those from
+# the caller's PATH, and a forged one could make uninstall delete a foreign
+# file.
+bridge_is_valise_owned() {
+  _bivo_awk=$(trusted_utility_path awk) || return 1
+  _bivo_marker=
+  case "${1:-}" in
+  systemd) _bivo_marker='# written by valise (gui_env=systemd); do not edit' ;;
+  launchd) _bivo_marker='<!-- written by valise (gui_env=launchd); do not edit -->' ;;
+  *) unset _bivo_awk _bivo_marker; return 1 ;;
+  esac
+  # The marker is line 1 (environment.d) or line 2 (below the XML declaration).
+  # Reading the whole file and comparing exact lines keeps this independent of
+  # head/sed, and the early exit keeps it cheap.
+  _bivo_marker=$_bivo_marker "$_bivo_awk" '
+    NR > 2 { exit }
+    $0 == ENVIRON["_bivo_marker"] { found = 1; exit }
+    END { exit found ? 0 : 1 }
+  ' "${2:-}" 2>/dev/null
+  _bivo_rc=$?
+  unset _bivo_awk _bivo_marker
+  return "$_bivo_rc"
+}
+
+# gui_env_mode <release-dir>: print the gui_env a release was built with.
+# The mode is recorded in valise-release.conf at build time, so a release built
+# in one place and installed from another still carries it. A release built
+# before the key existed reads as off.
+gui_env_mode() {
+  _gem_mode=$(release_conf_value "${1:-}" gui_env 2>/dev/null) || _gem_mode=off
+  [ -n "$_gem_mode" ] || _gem_mode=off
+  printf '%s\n' "$_gem_mode"
+  unset _gem_mode
+}
+
+# gui_env_bridge_format <mode>
+# The env_export_emit format for a configured mode. The configuration calls the
+# systemd bridge "systemd"; the renderer's vocabulary is "environment.d".
+# Passing the configured value straight to the renderer made EVERY automatic
+# systemd bridge fail to render, so install reported a bridge it never wrote.
+gui_env_bridge_format() {
+  case "${1:-}" in
+  systemd) printf '%s\n' environment.d ;;
+  launchd) printf '%s\n' launchd ;;
+  *) return 1 ;;
+  esac
+}
+
+# gui_env_bridge_shell: the shell class whose env plan the bridge is built from.
+# Every caller must use this one mapping: `valise env export` and the automatic
+# bridge used different shells, so a dry run could promise bytes install would
+# never write.
+gui_env_bridge_shell() {
+  case "${SHELL:-}" in
+  */zsh | zsh) printf '%s\n' zsh ;;
+  */ksh | ksh) printf '%s\n' ksh ;;
+  */bash | bash) printf '%s\n' bash ;;
+  *) printf '%s\n' sh ;;
+  esac
+}
+
+# gui_env_bridge_stage <release-dir>
+# Prepare the GUI-session bridge the release declares, WITHOUT changing anything
+# a user can observe. Sets:
+#   _gui_action  publish | remove | none
+#   _gui_mode    the configured mode, for the ownership marker
+#   _gui_target  the bridge path
+#   _gui_stage   the rendered file to publish (publish only)
+#
+# Returns nonzero when the bridge could not be prepared. The caller runs this
+# BEFORE the active link changes, so a capture or render failure leaves the
+# outgoing release AND its bridge in place and consistent instead of switching
+# the release and silently keeping the old bridge.
+gui_env_bridge_stage() {
+  _gbs_release=${1:-}
+  _gui_action=none
+  _gui_mode=
+  _gui_target=
+  _gui_stage=
+  _gbs_mode=off
+  if [ -n "$_gbs_release" ] && [ -d "$_gbs_release" ]; then
+    _gbs_mode=$(gui_env_mode "$_gbs_release")
+  fi
+  case "$_gbs_mode" in
+  off)
+    # A previous release may have written a bridge; the incoming release wants
+    # none, so a valise-owned file must not outlive the switch.
+    _gui_action=remove
+    unset _gbs_release _gbs_mode
+    return 0
+    ;;
+  systemd)
+    if [ "$(cli_os_name)" != linux ]; then
+      # A bridge an earlier release wrote must not survive the switch: this
+      # platform can never replace it, so the owned file would keep describing
+      # the previous release wherever it IS read.
+      info "gui_env=systemd but the platform is not Linux; a valise-owned environment.d bridge is removed instead"
+      _gui_action=remove
+      unset _gbs_release _gbs_mode
+      return 0
+    fi
+    ;;
+  launchd)
+    if [ "$(cli_os_name)" != darwin ]; then
+      info "gui_env=launchd but the platform is not macOS; a valise-owned LaunchAgent bridge is removed instead"
+      _gui_action=remove
+      unset _gbs_release _gbs_mode
+      return 0
+    fi
+    if [ -z "${HOME:-}" ]; then
+      info "gui_env=launchd but HOME is unset; skipping the LaunchAgent bridge"
+      unset _gbs_release _gbs_mode
+      return 0
+    fi
+    ;;
+  *)
+    # An unknown value must never abort an install after the active link has
+    # already switched. Report it and change nothing.
+    info "warning: gui_env=$_gbs_mode is not off, systemd, or launchd; skipping the GUI env bridge"
+    unset _gbs_release _gbs_mode
+    return 0
+    ;;
+  esac
+  _gui_mode=$_gbs_mode
+  if ! _gui_target=$(gui_env_file "$_gui_mode"); then
+    _gui_mode= _gui_target=
+    unset _gbs_release _gbs_mode
+    return 1
+  fi
+  # Never clobber a user-owned file at the bridge path. A symlink is reported
+  # and left alone, like every other managed path.
+  if [ -L "$_gui_target" ]; then
+    info "warning: leaving $_gui_target: it is a symlink"
+    _gui_mode= _gui_target=
+    unset _gbs_release _gbs_mode
+    return 0
+  fi
+  if [ -e "$_gui_target" ] && ! bridge_is_valise_owned "$_gui_mode" "$_gui_target"; then
+    info "warning: leaving $_gui_target: it is not the valise GUI env bridge"
+    _gui_mode= _gui_target=
+    unset _gbs_release _gbs_mode
+    return 0
+  fi
+  _gbs_shell=$(gui_env_bridge_shell)
+  if ! _gbs_capture=$(env_export_capture "$_gbs_shell" "$_gbs_release"); then
+    printf 'valise: error: cannot capture the env plan for shell %s; the GUI env bridge was not written\n' \
+      "$_gbs_shell" >&2
+    _gui_mode= _gui_target=
+    unset _gbs_release _gbs_mode _gbs_shell
+    return 1
+  fi
+  if ! _gbs_format=$(gui_env_bridge_format "$_gui_mode"); then
+    printf 'valise: error: no renderer for gui_env=%s\n' "$_gui_mode" >&2
+    _gui_mode= _gui_target=
+    unset _gbs_release _gbs_mode _gbs_shell _gbs_capture
+    return 1
+  fi
+  _gbs_parent=$(path_parent "$_gui_target")
+  if ! _gbs_mkdir=$(trusted_utility_path mkdir); then
+    _gui_mode= _gui_target=
+    unset _gbs_release _gbs_mode _gbs_shell _gbs_capture _gbs_format _gbs_parent
+    return 1
+  fi
+  if [ ! -d "$_gbs_parent" ]; then
+    # mkdir -p fails when the path exists as a regular file; report it as
+    # valise's own diagnostic rather than passing through the tool's message.
+    if ! "$_gbs_mkdir" -p "$_gbs_parent" 2>/dev/null; then
+      printf 'valise: error: cannot create the GUI env bridge directory: %s\n' "$_gbs_parent" >&2
+      _gui_mode= _gui_target=
+      unset _gbs_release _gbs_mode _gbs_shell _gbs_capture _gbs_format _gbs_parent _gbs_mkdir
+      return 1
+    fi
+  fi
+  # Publish into the canonical parent path so a symlinked parent directory
+  # cannot strand the staging file, and the mv renames within one filesystem.
+  _gbs_parent=$(cd "$_gbs_parent" 2>/dev/null && pwd -P) || {
+    _gui_mode= _gui_target=
+    unset _gbs_release _gbs_mode _gbs_shell _gbs_capture _gbs_format _gbs_parent _gbs_mkdir
+    return 1
+  }
+  _gui_target="$_gbs_parent/${_gui_target##*/}"
+  _gui_stage=$(trusted_mktemp_at "$_gbs_parent" file "$_gbs_parent/.valise-gui.XXXXXX") || {
+    _gui_mode= _gui_target=
+    unset _gbs_release _gbs_mode _gbs_shell _gbs_capture _gbs_format _gbs_parent _gbs_mkdir
+    return 1
+  }
+  if ! env_export_emit "$_gbs_format" "$_gbs_capture" >"$_gui_stage"; then
+    _gbs_rm=$(trusted_utility_path rm 2>/dev/null || :)
+    [ -z "$_gbs_rm" ] || "$_gbs_rm" -f "$_gui_stage" 2>/dev/null || :
+    _gui_stage=
+    _gui_mode= _gui_target=
+    printf 'valise: error: cannot render the %s GUI env bridge\n' "$_gbs_mode" >&2
+    unset _gbs_release _gbs_mode _gbs_shell _gbs_capture _gbs_format _gbs_parent _gbs_mkdir _gbs_rm
+    return 1
+  fi
+  _gbs_chmod=$(trusted_utility_path chmod) || {
+    _gbs_rm=$(trusted_utility_path rm 2>/dev/null || :)
+    [ -z "$_gbs_rm" ] || "$_gbs_rm" -f "$_gui_stage" 2>/dev/null || :
+    _gui_stage=
+    _gui_mode= _gui_target=
+    unset _gbs_release _gbs_mode _gbs_shell _gbs_capture _gbs_format _gbs_parent _gbs_mkdir
+    return 1
+  }
+  # The bridge holds values the env plan exports, and the module ABI allows a
+  # local-secret module to export a secret read from a protected file. An
+  # explicit 0644 would publish that value world-readable over a restrictive
+  # umask, so the bridge is owner-only.
+  if ! "$_gbs_chmod" 0600 "$_gui_stage"; then
+    _gbs_rm=$(trusted_utility_path rm 2>/dev/null || :)
+    [ -z "$_gbs_rm" ] || "$_gbs_rm" -f "$_gui_stage" 2>/dev/null || :
+    _gui_stage=
+    _gui_mode= _gui_target=
+    unset _gbs_release _gbs_mode _gbs_shell _gbs_capture _gbs_format _gbs_parent _gbs_mkdir _gbs_chmod _gbs_rm
+    return 1
+  fi
+  _gui_action=publish
+  unset _gbs_release _gbs_mode _gbs_shell _gbs_capture _gbs_format _gbs_parent _gbs_mkdir _gbs_chmod _gbs_rm
+}
+
+# gui_env_bridge_publish: apply what gui_env_bridge_stage prepared. Runs AFTER
+# the active link names the incoming release. Returns nonzero when the bridge
+# could not be published, so the caller can roll the activation back instead of
+# leaving the active release and the bridge describing different releases.
+gui_env_bridge_publish() {
+  case "${_gui_action:-none}" in
+  none)
+    return 0
+    ;;
+  remove)
+    remove_gui_env_bridge
+    _gbp_rc=$?
+    _gui_action=none
+    _gui_mode= _gui_target=
+    unset _gbp_mv _gbp_rm _gbp_mode _gbp_target
+    return "$_gbp_rc"
+    ;;
+  publish)
+    _gbp_mv=$(trusted_utility_path mv) || return 1
+    _gbp_rc=0
+    "$_gbp_mv" -f "$_gui_stage" "$_gui_target" || _gbp_rc=1
+    if [ "$_gbp_rc" -eq 0 ]; then
+      _gui_stage=
+      info "GUI env bridge written ($_gui_mode): $_gui_target"
+    else
+      # A failed publish must not leave the 0600 staging file (it can hold
+      # values read from protected files) in the bridge directory.
+      _gbp_rm=$(trusted_utility_path rm 2>/dev/null || :)
+      [ -z "$_gbp_rm" ] || "$_gbp_rm" -f "$_gui_stage" 2>/dev/null || :
+      _gui_stage=
+    fi
+    _gui_action=none
+    _gui_mode= _gui_target=
+    unset _gbp_mv _gbp_rm _gbp_mode _gbp_target
+    return "$_gbp_rc"
+    ;;
+  esac
+  _gui_action=none
+  return 1
+}
+
+# write_gui_env_bridge <release-dir>: stage and publish in one step, for a
+# caller that has already established the release should be the active one.
+write_gui_env_bridge() {
+  gui_env_bridge_stage "${1:-}" || return 1
+  gui_env_bridge_publish
+}
+
+
+# _rgb_candidate <mode> <file>: 0 when <file> is a regular, valise-owned bridge
+# that may be removed. A symlink or a user-owned file is reported and left alone.
+_rgb_candidate() {
+  if [ -L "$2" ]; then
+    info "warning: leaving $2: it is a symlink"
+    return 1
+  fi
+  [ -f "$2" ] || return 1
+  if bridge_is_valise_owned "$1" "$2"; then
+    return 0
+  fi
+  info "warning: leaving $2: it is not the valise GUI env bridge"
+  return 1
+}
+
+# remove_gui_env_bridge: remove every valise-owned bridge file, as one set. The
+# two files can coexist (a migrated or shared home), so a removal that fails on
+# the second file must not have already deleted the first. Phase 1 renames each
+# owned file aside, and a failed rename puts the renamed files back; phase 2
+# deletes the set-aside files, and reports any delete that fails with its path.
+remove_gui_env_bridge() {
+  if ! _rgb_rm=$(trusted_utility_path rm); then
+    printf 'valise: error: no trusted rm utility is available to remove the GUI env bridge\n' >&2
+    return 1
+  fi
+  if ! _rgb_mv=$(trusted_utility_path mv); then
+    printf 'valise: error: no trusted mv utility is available to remove the GUI env bridge\n' >&2
+    unset _rgb_rm
+    return 1
+  fi
+  _rgb_sys=$(gui_env_file systemd 2>/dev/null) || _rgb_sys=
+  _rgb_lad=$(gui_env_file launchd 2>/dev/null) || _rgb_lad=
+  _rgb_sys_aside=
+  _rgb_lad_aside=
+  _rgb_rc=0
+  # The aside name comes from mktemp in the SAME parent directory, so it is
+  # unpredictable and exclusive: a pre-existing file at that name can never be
+  # clobbered by the rename, and the name is freed when the removal fails.
+  if [ -n "$_rgb_sys" ] && _rgb_candidate systemd "$_rgb_sys"; then
+    _rgb_sys_parent=$(path_parent "$_rgb_sys")
+    if _rgb_sys_aside=$(trusted_mktemp_at "$_rgb_sys_parent" file "$_rgb_sys_parent/.valise-remove.XXXXXX"); then
+      "$_rgb_mv" -f "$_rgb_sys" "$_rgb_sys_aside" 2>/dev/null || {
+        printf 'valise: error: cannot remove the systemd GUI env bridge: %s\n' "$_rgb_sys" >&2
+        "$_rgb_rm" -f "$_rgb_sys_aside" 2>/dev/null || :
+        _rgb_sys_aside=
+        _rgb_rc=1
+      }
+    else
+      printf 'valise: error: cannot create a staging name for the systemd GUI env bridge: %s\n' "$_rgb_sys" >&2
+      _rgb_rc=1
+    fi
+  fi
+  if [ "$_rgb_rc" -eq 0 ] && [ -n "$_rgb_lad" ] && _rgb_candidate launchd "$_rgb_lad"; then
+    _rgb_lad_parent=$(path_parent "$_rgb_lad")
+    if _rgb_lad_aside=$(trusted_mktemp_at "$_rgb_lad_parent" file "$_rgb_lad_parent/.valise-remove.XXXXXX"); then
+      "$_rgb_mv" -f "$_rgb_lad" "$_rgb_lad_aside" 2>/dev/null || {
+        printf 'valise: error: cannot remove the launchd GUI env bridge: %s\n' "$_rgb_lad" >&2
+        "$_rgb_rm" -f "$_rgb_lad_aside" 2>/dev/null || :
+        _rgb_lad_aside=
+        _rgb_rc=1
+      }
+    else
+      printf 'valise: error: cannot create a staging name for the launchd GUI env bridge: %s\n' "$_rgb_lad" >&2
+      _rgb_rc=1
+    fi
+  fi
+  if [ "$_rgb_rc" -ne 0 ]; then
+    # Phase 1 failed: put back every file already set aside, so no bridge is
+    # removed while the other one remains.
+    if [ -n "$_rgb_sys_aside" ] && ! "$_rgb_mv" -f "$_rgb_sys_aside" "$_rgb_sys" 2>/dev/null; then
+      printf 'valise: error: the systemd GUI env bridge was moved aside and could not be put back: %s\n' "$_rgb_sys_aside" >&2
+    fi
+    if [ -n "$_rgb_lad_aside" ] && ! "$_rgb_mv" -f "$_rgb_lad_aside" "$_rgb_lad" 2>/dev/null; then
+      printf 'valise: error: the launchd GUI env bridge was moved aside and could not be put back: %s\n' "$_rgb_lad_aside" >&2
+    fi
+    unset _rgb_rm _rgb_mv _rgb_sys _rgb_lad _rgb_sys_aside _rgb_lad_aside _rgb_sys_parent _rgb_lad_parent _rgb_rc
+    return 1
+  fi
+  # Phase 2: the set is committed. A delete that fails leaves its moved file
+  # behind, and that path is named.
+  if [ -n "$_rgb_sys_aside" ]; then
+    if "$_rgb_rm" -f "$_rgb_sys_aside"; then
+      info "removed the systemd bridge: $_rgb_sys"
+    else
+      printf 'valise: error: cannot remove the systemd GUI env bridge: %s\n' "$_rgb_sys_aside" >&2
+      _rgb_rc=1
+    fi
+  fi
+  if [ -n "$_rgb_lad_aside" ]; then
+    if "$_rgb_rm" -f "$_rgb_lad_aside"; then
+      info "removed the launchd bridge: $_rgb_lad"
+    else
+      printf 'valise: error: cannot remove the launchd GUI env bridge: %s\n' "$_rgb_lad_aside" >&2
+      _rgb_rc=1
+    fi
+  fi
+  unset _rgb_rm _rgb_mv _rgb_sys _rgb_lad _rgb_sys_aside _rgb_lad_aside _rgb_sys_parent _rgb_lad_parent
+  return "$_rgb_rc"
+}
+
+
 # Startup files install created from nothing, one path per line. Uninstall
 # deletes such a file when removing the block leaves it empty.
 startup_created_path() {
   printf '%s\n' "$VALISE_XDG_STATE/startup-created"
+}
+
+# integration_record_path: written by an install that wrote the shell
+# integration. It is the signal `release use`/`rollback` consult before
+# refreshing the GUI env bridge: an install with --no-integration promises to
+# write no startup file, shim, Fish hook, bridge, or command stubs, and a later
+# release switch must not quietly break that promise.
+integration_record_path() {
+  printf '%s\n' "$VALISE_XDG_STATE/integration"
+}
+
+integration_installed() {
+  [ -f "$(integration_record_path)" ] && [ ! -L "$(integration_record_path)" ] && return 0
+  # An install made before the record existed still wrote the integration, so a
+  # managed block in a startup file (or a created-file ledger) is equally valid
+  # evidence. Without this an upgrade would silently stop refreshing the bridge.
+  _ii_home=
+  [ -z "${HOME:-}" ] || _ii_home=$(path_normalize "$HOME" 2>/dev/null || :)
+  if [ -n "$_ii_home" ]; then
+    for _ii_name in $VALISE_STARTUP_NAMES; do
+      if [ -f "$_ii_home/$_ii_name" ] && [ ! -L "$_ii_home/$_ii_name" ] &&
+        integration_has_managed_block "$_ii_home/$_ii_name" 2>/dev/null; then
+        unset _ii_home _ii_name
+        return 0
+      fi
+    done
+    if _ii_shim=$(env_shim_path) && [ -f "$_ii_shim" ] &&
+      integration_has_managed_block "$_ii_shim" 2>/dev/null; then
+      unset _ii_home _ii_name _ii_shim
+      return 0
+    fi
+  fi
+  if [ -f "$(commands_ledger_path)" ]; then
+    unset _ii_home _ii_name _ii_shim
+    return 0
+  fi
+  unset _ii_home _ii_name _ii_shim
+  return 1
+}
+
+# record_integration_installed: mark that an install wrote the shell
+# integration, so a later `release use` may refresh the GUI env bridge. Written
+# atomically and registered with release_lock.
+record_integration_installed() {
+  _rii_record=$(integration_record_path)
+  [ ! -L "$_rii_record" ] || die "integration record must not be a symlink: $_rii_record"
+  _rii_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  "$_rii_mkdir" -p "$VALISE_XDG_STATE" || die "cannot create state directory: $VALISE_XDG_STATE"
+  _rii_tmp=$(trusted_mktemp_at "$VALISE_XDG_STATE" file "$VALISE_XDG_STATE/.integration.XXXXXX") ||
+    die "cannot create integration record staging file"
+  _rii_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+  printf '%s\n' 'valise integration installed' >"$_rii_tmp" &&
+    "$_rii_chmod" 0644 "$_rii_tmp" || {
+    _rii_rm=$(trusted_utility_path rm 2>/dev/null || :)
+    [ -z "$_rii_rm" ] || "$_rii_rm" -f "$_rii_tmp" 2>/dev/null || :
+    die "cannot write the integration record"
+  }
+  _rii_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
+  "$_rii_mv" -f "$_rii_tmp" "$_rii_record" || die "cannot publish the integration record"
+  _rii_tmp=
+  unset _rii_record _rii_mkdir _rii_chmod _rii_mv _rii_rm
 }
 
 fish_hook_path() {
@@ -109,14 +572,257 @@ release_activate() {
     "$_ra_mkdir" -p "$_ra_config_parent" || die "cannot create $_ra_config_parent"
   fi
   acquire_lock
-  switch_active_link "$_ra_dir"
-  # Commands follow the active release only where install published them: a
-  # ledger exists once an install ran with integration.
-  if [ -f "$(commands_ledger_path)" ]; then
-    reconcile_commands "$_ra_dir"
+  # Prepare the GUI env bridge BEFORE the active link moves. A capture or render
+  # failure then leaves the outgoing release active with its own bridge, instead
+  # of switching to a release whose env the GUI session will never see.
+  _ra_bridge=0
+  if integration_installed; then
+    case "$(gui_env_mode "$_ra_dir")" in
+    off | systemd | launchd) _ra_bridge=1 ;;
+    *)
+      # An unknown value is reported, as the write path reports it, rather than
+      # leaving the outgoing release's bridge in place without a word.
+      info "warning: gui_env=$(gui_env_mode "$_ra_dir") is not off, systemd, or launchd; skipping the GUI env bridge"
+      ;;
+    esac
   fi
+  if [ "$_ra_bridge" -eq 1 ] && [ -n "${HOME:-}" ] && [ "$(cli_os_name)" != unknown ]; then
+    gui_env_bridge_stage "$_ra_dir" ||
+      die "cannot prepare the GUI env bridge for $_ra_id; the active release was not changed"
+  else
+    _gui_action=none
+  fi
+  # Remember the outgoing target so a publish failure can undo the switch: with
+  # `release use` there is no install transaction to do it.
+  _ra_old_target=
+  _ra_had_link=0
+  if [ -L "$VALISE_ACTIVE_LINK" ]; then
+    _ra_old_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
+    [ -n "$_ra_old_target" ] && _ra_had_link=1
+  fi
+  # The switch rewrites the previous-release record to the outgoing release. If
+  # the bridge publish then fails, that record is put back as well as the link.
+  _ra_had_previous=0
+  _ra_old_previous=
+  if _ra_old_previous=$(read_previous_record); then
+    _ra_had_previous=1
+  fi
+  # The OUTGOING release's bridge is moved aside before anything changes, so a
+  # rollback can put back the exact bytes that described the outgoing release.
+  # Without this, a publish that succeeded followed by a failed reconcile left
+  # the link on the old release and the bridge on the new one.
+  # At most two owned bridges exist for one home (systemd and launchd), so each
+  # aside is tracked with the path it came from in parallel variables. The
+  # asides live in the SAME directory as their bridge, so mv is a rename and
+  # cannot fail across filesystems.
+  _ra_aside=
+  _ra_aside_tgt=
+  _ra_aside2=
+  _ra_aside2_tgt=
+  _ra_rm=$(trusted_utility_path rm 2>/dev/null || :)
+  _ra_ln=$(trusted_utility_path ln 2>/dev/null || :)
+  _ra_mv=$(trusted_utility_path mv 2>/dev/null || :)
+  _ra_published=0
+  if [ "${_gui_action:-none}" = remove ]; then
+    # The INCOMING release wants no bridge (gui_env=off, or a mode this platform
+    # cannot write, which stages as `remove`). gui_env_bridge_stage leaves
+    # _gui_target EMPTY for that action, so a guard keyed on _gui_target cannot
+    # see the OUTGOING bridge - and remove_gui_env_bridge would then delete it
+    # for good. A failing reconcile afterwards would roll the link back to a
+    # release whose bridge is already gone: the exact inconsistency this
+    # transaction exists to prevent, in the other direction. Both owned
+    # candidates are therefore set aside first.
+    for _ra_cand_mode in systemd launchd; do
+      _ra_cand=$(gui_env_file "$_ra_cand_mode" 2>/dev/null) || _ra_cand=
+      [ -n "$_ra_cand" ] || continue
+      [ -f "$_ra_cand" ] && [ ! -L "$_ra_cand" ] || continue
+      bridge_is_valise_owned "$_ra_cand_mode" "$_ra_cand" || continue
+      [ -n "$_ra_mv" ] || continue
+      _ra_cand_parent=$(path_parent "$_ra_cand")
+      _ra_new_aside=$(trusted_mktemp_at "$_ra_cand_parent" file "$_ra_cand_parent/.valise-outgoing.XXXXXX") || _ra_new_aside=
+      [ -n "$_ra_new_aside" ] || continue
+      if ! "$_ra_mv" -f "$_ra_cand" "$_ra_new_aside" 2>/dev/null; then
+        # mktemp created the file; never strand it.
+        [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_new_aside" 2>/dev/null || :
+        continue
+      fi
+      if [ -z "$_ra_aside" ]; then
+        _ra_aside=$_ra_new_aside
+        _ra_aside_tgt=$_ra_cand
+      else
+        _ra_aside2=$_ra_new_aside
+        _ra_aside2_tgt=$_ra_cand
+      fi
+    done
+    unset _ra_cand_mode _ra_cand _ra_cand_parent _ra_new_aside
+  elif [ "${_gui_action:-none}" != none ] && [ -n "${_gui_target:-}" ] && [ -n "$_ra_mv" ] &&
+    [ -f "$_gui_target" ] && bridge_is_valise_owned "$_gui_mode" "$_gui_target"; then
+    _ra_aside_parent=$(path_parent "$_gui_target")
+    _ra_aside=$(trusted_mktemp_at "$_ra_aside_parent" file "$_ra_aside_parent/.valise-outgoing.XXXXXX") || _ra_aside=
+    if [ -n "$_ra_aside" ]; then
+      # trusted_mktemp_at already CREATED the file. If the move then fails (an
+      # immutable bridge is the deterministic case: BSD refuses to rename it),
+      # clearing the variable would strand that empty file in the bridge
+      # directory forever, so it is removed here first.
+      if "$_ra_mv" -f "$_gui_target" "$_ra_aside" 2>/dev/null; then
+        _ra_aside_tgt=$_gui_target
+      else
+        [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_aside" 2>/dev/null || :
+        _ra_aside=
+      fi
+    fi
+  fi
+  # A rollback below must leave the link, the previous-release record, the
+  # bridge and the stubs describing ONE release. That is why the outgoing
+  # bridge is moved aside first, and why a staged 0600 file (which can hold a
+  # value read from a protected file) is always removed.
+  # The bridge path and mode are saved here because gui_env_bridge_publish
+  # CLEARS _gui_target/_gui_mode on every path; a rollback after a successful
+  # publish needs them to put the outgoing bytes back.
+  _ra_gui_target=${_gui_target:-}
+  # gui_env_bridge_publish sets _gui_action=none on every path, so the action
+  # that was performed is captured here for the rollback to reason about.
+  _ra_action=${_gui_action:-none}
+  _ra_reconcile_err=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-reconcile.XXXXXX") || _ra_reconcile_err=
+  switch_active_link "$_ra_dir"
+  _ra_publish_failed=0
+  if [ "${_gui_action:-none}" != none ]; then
+    if gui_env_bridge_publish; then
+      _ra_published=1
+    else
+      _ra_publish_failed=1
+    fi
+  fi
+  _ra_reconcile_failed=0
+  if [ "$_ra_publish_failed" -eq 0 ] && [ -f "$(commands_ledger_path)" ]; then
+    # reconcile_commands reports failures with `die`, which EXITS the process;
+    # running it in a subshell is what lets this activation roll back instead of
+    # leaving the link and the bridge on different releases. Its staging files
+    # are removed by the subshell's own EXIT trap.
+    # A failed mktemp must not turn the redirection itself into an error, so the
+    # diagnostic goes to /dev/null in that case; the rollback still happens.
+    if [ -n "$_ra_reconcile_err" ]; then
+      _ra_rc_err_target=$_ra_reconcile_err
+    else
+      _ra_rc_err_target=/dev/null
+    fi
+    if ! (
+      trap 'for _ra_t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do
+        [ -z "$_ra_t" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_ra_t" 2>/dev/null
+      done' EXIT
+      reconcile_commands "$_ra_dir"
+    ) >/dev/null 2>"$_ra_rc_err_target"; then
+      _ra_reconcile_failed=1
+      cat "$_ra_rc_err_target" >&2 2>/dev/null || :
+    fi
+  fi
+  # The captured diagnostic has been reported (or was never produced); the file
+  # must not outlive this function on either the rollback or the commit path.
+  [ -z "$_ra_reconcile_err" ] || [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_reconcile_err" 2>/dev/null || :
+  _ra_reconcile_err=
+  if [ "$_ra_publish_failed" -eq 1 ] || [ "$_ra_reconcile_failed" -eq 1 ]; then
+    [ -z "${_gui_stage:-}" ] || [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_gui_stage" 2>/dev/null || :
+    _gui_stage= _gui_action=none _gui_mode= _gui_target=
+    _ra_rolled=0
+    if [ "$_ra_had_link" -eq 1 ] && [ -n "$_ra_old_target" ] && [ -n "$_ra_ln" ] &&
+      "$_ra_ln" -sfn "$_ra_old_target" "$VALISE_ACTIVE_LINK" 2>/dev/null; then
+      _ra_rolled=1
+      _ra_restored="${_ra_old_target##*/}"
+    elif [ "$_ra_had_link" -eq 0 ] && [ -n "$_ra_rm" ] &&
+      "$_ra_rm" -f "$VALISE_ACTIVE_LINK" 2>/dev/null; then
+      _ra_rolled=1
+      _ra_restored="no release"
+    fi
+    if [ "$_ra_rolled" -eq 1 ]; then
+      ( restore_previous_record "$_ra_had_previous" "$_ra_old_previous" ) >/dev/null 2>&1 ||
+        printf 'valise: cannot restore the previous-release record\n' >&2
+      # Reconcile also removes stubs, so a run that failed part way may already
+      # have dropped some. Bringing the stubs back to the release that is active
+      # again is what makes the restored store describe ONE release; a failure
+      # here is reported but does not replace the primary diagnostic.
+      if [ "$_ra_had_link" -eq 1 ] && [ -n "$_ra_old_target" ] && [ -f "$(commands_ledger_path)" ]; then
+        if ! (
+          trap 'for _ra_t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do
+            [ -z "$_ra_t" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_ra_t" 2>/dev/null
+          done' EXIT
+          reconcile_commands "$_ra_old_target"
+        ) >/dev/null 2>&1; then
+          printf 'valise: error: the command stubs could not be brought back to the restored release\n' >&2
+        fi
+      fi
+      # The bridge follows the release that is active again. Each aside goes
+      # back to the exact path it was taken from, which is the only correct
+      # destination for a remove-direction backup (there _gui_target is empty).
+      if [ -n "$_ra_aside" ] && [ -n "$_ra_aside_tgt" ] && [ -n "$_ra_mv" ] &&
+        "$_ra_mv" -f "$_ra_aside" "$_ra_aside_tgt" 2>/dev/null; then
+        _ra_aside= _ra_aside_tgt=
+      elif [ -n "$_ra_aside" ]; then
+        printf 'valise: error: the outgoing GUI env bridge could not be put back: %s\n' "$_ra_aside" >&2
+      elif [ "$_ra_published" -eq 1 ] && [ -n "$_ra_rm" ] && [ -n "$_ra_gui_target" ] &&
+        [ "$_ra_action" != remove ]; then
+        # No predecessor existed, so the bridge this activation wrote must go.
+        "$_ra_rm" -f "$_ra_gui_target" 2>/dev/null || :
+      fi
+      if [ -n "$_ra_aside2" ] && [ -n "$_ra_aside2_tgt" ] && [ -n "$_ra_mv" ] &&
+        "$_ra_mv" -f "$_ra_aside2" "$_ra_aside2_tgt" 2>/dev/null; then
+        _ra_aside2= _ra_aside2_tgt=
+      elif [ -n "$_ra_aside2" ]; then
+        printf 'valise: error: the outgoing GUI env bridge could not be put back: %s\n' "$_ra_aside2" >&2
+      fi
+    fi
+    # Whatever happened above, an aside must not outlive this function
+    # silently. This also covers _ra_rolled=0, where the link rollback itself
+    # failed and the bridge bytes are the only record of the outgoing release
+    # left: moving them back is attempted, and if that is impossible the path is
+    # named rather than stranded (deleting it would destroy the only surviving
+    # copy of the outgoing release's bridge).
+    for _ra_pair in 1 2; do
+      if [ "$_ra_pair" -eq 1 ]; then
+        _ra_a=$_ra_aside _ra_t=$_ra_aside_tgt
+      else
+        _ra_a=$_ra_aside2 _ra_t=$_ra_aside2_tgt
+      fi
+      [ -n "$_ra_a" ] || continue
+      if [ -n "$_ra_mv" ] && [ -n "$_ra_t" ] &&
+        "$_ra_mv" -f "$_ra_a" "$_ra_t" 2>/dev/null; then
+        continue
+      fi
+      printf 'valise: error: the outgoing GUI env bridge is preserved at %s\n' "$_ra_a" >&2
+    done
+    unset _ra_pair _ra_a _ra_t
+    if [ "$_ra_publish_failed" -eq 1 ]; then
+      _ra_fail_msg="cannot publish the GUI env bridge for $_ra_id"
+    else
+      _ra_fail_msg="cannot reconcile the command stubs for $_ra_id"
+    fi
+    if [ "$_ra_rolled" -eq 1 ]; then
+      die "$_ra_fail_msg; the active release was left as $_ra_restored"
+    fi
+    die "$_ra_fail_msg; the active release was changed"
+  fi
+  # Committed: both aside copies are no longer needed.
+  for _ra_pair in "$_ra_aside" "$_ra_aside2"; do
+    [ -z "$_ra_pair" ] || [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_pair" 2>/dev/null || :
+  done
+  unset _ra_pair
+  _ra_aside= _ra_aside_tgt= _ra_aside2= _ra_aside2_tgt=
   release_lock
-  unset _ra_id _ra_dir _ra_root _ra_parent _ra_manifest _ra_config_parent _ra_mkdir
+  unset _ra_id _ra_dir _ra_root _ra_parent _ra_manifest _ra_config_parent _ra_mkdir _ra_bridge _ra_old_target _ra_ln _ra_rm _ra_mv _ra_had_link
+  unset _ra_had_previous _ra_old_previous _ra_aside _ra_aside_parent _ra_published
+  unset _ra_publish_failed _ra_reconcile_failed _ra_rolled _ra_restored _ra_fail_msg _ra_gui_target _ra_reconcile_err _ra_rc_err_target _ra_t
+  unset _ra_aside_tgt _ra_aside2 _ra_aside2_tgt _ra_action
+}
+
+# restore_previous_record <had 0|1> <release-id>: put the previous-release record
+# back to what it was before a switch; remove it when none existed.
+restore_previous_record() {
+  if [ "$1" -eq 1 ]; then
+    write_previous_record "$2"
+  else
+    _rpr_rm=$(trusted_utility_path rm 2>/dev/null || :)
+    [ -z "$_rpr_rm" ] || "$_rpr_rm" -f "$(previous_record_path)" 2>/dev/null || :
+    unset _rpr_rm
+  fi
 }
 
 cmd_release_rollback() {
@@ -195,6 +901,13 @@ install_txn_abort() {
   if [ -n "$_txn_changed" ]; then
     printf 'valise: already updated (they load whichever release is active):%s\n' "$_txn_changed" >&2
   fi
+  # A staged but unpublished bridge (gui_env_bridge_stage wrote it) must not
+  # survive an aborted install: the staging file is mode 0600 and can hold
+  # values read from protected files.
+  if [ -n "${_gui_stage:-}" ] && [ -f "$_gui_stage" ]; then
+    [ -z "$_ita_rm" ] || "$_ita_rm" -f "$_gui_stage" 2>/dev/null || :
+  fi
+  _gui_stage= _gui_action=none _gui_mode= _gui_target=
   unset _ita_ln _ita_rm
 }
 
@@ -224,7 +937,7 @@ integration_preflight() {
   if [ -n "${HOME:-}" ]; then
     _ipf_home=$(path_normalize "$HOME") || die "cannot resolve HOME"
     _ipf_targets=$(posix_startup_targets "$_ipf_home")
-    while IFS= read -r _ipf_target; do
+    while IFS="$(printf '\t')" read -r _ipf_stage _ipf_target; do
       [ -n "$_ipf_target" ] || continue
       # A symlinked startup file is left for the user; install only warns.
       [ ! -L "$_ipf_target" ] || continue
@@ -256,7 +969,60 @@ EOF
     _ipf_bin=$(commands_bin_dir) || die "cannot resolve the command directory: set HOME or VALISE_BIN_DIR"
     preflight_dir_writable "$_ipf_bin" "command stubs"
   fi
-  unset _ipf_home _ipf_targets _ipf_target _ipf_parent _ipf_hook _ipf_bin
+  # The $ENV shim and the GUI env bridge are written into the user's HOME too;
+  # a failure there would abort the install after the active link switched, so
+  # check them up front with everything else.
+  if [ -n "${HOME:-}" ]; then
+    if _ipf_shim=$(env_shim_path); then
+      # The shim is a managed startup file: install leaves a symlink or a file
+      # carrying someone else's content alone and rewrites anything else. So a
+      # symlink or a foreign shim can never abort the install, but a regular
+      # valise shim must be readable, marker-paired and writable - otherwise
+      # the install would abort AFTER the active link moved.
+      #
+      # The TYPE and READABILITY tests decide FIRST. Testing the block marker
+      # first would run awk on the shim and short-circuit on an unreadable file
+      # or a directory, making these two checks dead code and letting an
+      # unreadable valise shim through to be misreported later as foreign.
+      _ipf_shim_writable=0
+      if [ -e "$_ipf_shim" ] && [ ! -L "$_ipf_shim" ]; then
+        [ -f "$_ipf_shim" ] || die "ENV shim is not a regular file: $_ipf_shim"
+        [ -r "$_ipf_shim" ] || die "cannot read the ENV shim: $_ipf_shim"
+        # A shim that is not valise's is left alone, so writing it is not
+        # attempted and its parent directory need not be writable.
+        if integration_has_posix_block "$_ipf_shim" 2>/dev/null; then
+          integration_markers_paired "$_ipf_shim" ||
+            die "unpaired valise managed block markers in $_ipf_shim (restore or remove the BEGIN and END lines, then retry)"
+          _ipf_shim_writable=1
+        fi
+      else
+        # Absent, or a symlink: install will write a fresh file there.
+        _ipf_shim_writable=1
+      fi
+      if [ "$_ipf_shim_writable" -eq 1 ]; then
+        preflight_dir_writable "$(path_parent "$_ipf_shim")" "ENV shim"
+      fi
+    fi
+    _ipf_gui_mode=$(gui_env_mode "$1")
+    case "$_ipf_gui_mode" in
+    systemd | launchd)
+      _ipf_gui=$(gui_env_file "$_ipf_gui_mode" 2>/dev/null) || _ipf_gui=
+      # The write path (gui_env_bridge_stage) writes systemd only on Linux
+      # and launchd only on macOS, so preflight checks the bridge directory
+      # only on the platform that will actually write it.
+      _ipf_gui_os=
+      case "$_ipf_gui_mode" in
+      systemd) _ipf_gui_os=linux ;;
+      launchd) _ipf_gui_os=darwin ;;
+      esac
+      if [ -n "$_ipf_gui" ] && [ "$(cli_os_name)" = "$_ipf_gui_os" ]; then
+        [ ! -L "$_ipf_gui" ] || :
+        preflight_dir_writable "$(path_parent "$_ipf_gui")" "GUI env bridge"
+      fi
+      ;;
+    esac
+  fi
+  unset _ipf_home _ipf_targets _ipf_target _ipf_stage _ipf_parent _ipf_hook _ipf_bin _ipf_shim _ipf_gui_mode _ipf_gui _ipf_gui_os
 }
 
 # integration_unmanaged_lines <file>
@@ -272,7 +1038,7 @@ integration_unmanaged_lines() {
     inside { next }
     /^[[:space:]]*#/ { next }
     index($0, "valise/active") || index($0, "installed-modules.") ||
-      ($0 ~ /(^|[;&|[:space:]])(\.|source)[[:space:]]/ && $0 ~ /plans\/(sh|bash|zsh|ksh)\.sh/) {
+      ($0 ~ /(^|[;&|[:space:]])(\.|source)[[:space:]]/ && $0 ~ /plans\/(sh|bash|zsh|ksh)(-interactive)?\.sh/) {
       printf "%s:%d: %s\n", FILENAME, NR, $0
     }
   ' "$1"
@@ -332,8 +1098,17 @@ integration_has_posix_block() {
 # uninstall_strip_block <file>: remove the managed block from one startup file,
 # keeping every other byte and the file mode. A file install created that is
 # left empty is deleted.
+#
+# The file must carry PAIRED markers. The awk below drops everything between a
+# BEGIN and the next END, so an unpaired BEGIN would delete every following
+# line - a hand-edited or truncated file would lose user content and, because
+# the emptied file is often one install created, be removed entirely. cmd_uninstall
+# pre-checks the startup files, but the check belongs here too: this function is
+# reachable for the ENV shim, and a future caller must not have to know.
 uninstall_strip_block() {
   _usb_target=$1
+  integration_markers_paired "$_usb_target" ||
+    die "unpaired valise managed block markers in $_usb_target (restore or remove the BEGIN and END lines, then retry)"
   _usb_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   _usb_parent=$(path_parent "$_usb_target")
   _un_tmp=$(trusted_mktemp_at "$_usb_parent" file "$_usb_parent/.valise-uninstall.XXXXXX") ||
@@ -378,6 +1153,7 @@ uninstall_strip_block() {
 
 cmd_uninstall() {
   _un_keep=0
+  _un_status=0
   for _un_arg do
     case "$_un_arg" in
     --keep-releases) _un_keep=1 ;;
@@ -395,13 +1171,25 @@ cmd_uninstall() {
   if [ -n "${HOME:-}" ]; then
     _un_home=$(path_normalize "$HOME") || die "cannot resolve HOME"
     # Check every file before changing any, so a damaged block stops the
-    # uninstall with nothing removed.
+    # uninstall with nothing removed. The $ENV shim is a managed startup file
+    # too, so it belongs in this pre-check: validating it only at strip time
+    # would let earlier startup files be rewritten before the damaged shim was
+    # discovered, which is exactly the all-or-nothing promise this loop makes.
     for _un_name in $VALISE_STARTUP_NAMES; do
       _un_file="$_un_home/$_un_name"
       [ -f "$_un_file" ] && [ ! -L "$_un_file" ] || continue
       integration_markers_paired "$_un_file" ||
         die "unpaired valise managed block markers in $_un_file (restore or remove the BEGIN and END lines, then retry)"
     done
+    if _un_shim_check=$(env_shim_path) &&
+      [ -f "$_un_shim_check" ] && [ ! -L "$_un_shim_check" ] &&
+      integration_has_posix_block "$_un_shim_check"; then
+      # Only a file that carries a BEGIN marker is one uninstall will strip; a
+      # foreign shim is reported and left alone below, so it must not be able to
+      # abort the uninstall over marker text valise does not own.
+      integration_markers_paired "$_un_shim_check" ||
+        die "unpaired valise managed block markers in $_un_shim_check (restore or remove the BEGIN and END lines, then retry)"
+    fi
     for _un_name in $VALISE_STARTUP_NAMES; do
       _un_file="$_un_home/$_un_name"
       if [ -L "$_un_file" ]; then
@@ -426,6 +1214,28 @@ cmd_uninstall() {
     elif [ -e "$_un_hook" ] || [ -L "$_un_hook" ]; then
       info "warning: leaving $_un_hook: it is not a regular file"
     fi
+    # Remove the $ENV shim only when valise owns it. The shim is a managed
+    # startup file, so uninstall strips the block and keeps any other bytes the
+    # user put there; a shim install created from nothing is deleted when the
+    # created-ledger records it.
+    if _un_shim=$(env_shim_path); then
+      if [ -f "$_un_shim" ] && [ ! -L "$_un_shim" ] &&
+        integration_has_posix_block "$_un_shim"; then
+        uninstall_strip_block "$_un_shim"
+      elif [ -e "$_un_shim" ] || [ -L "$_un_shim" ]; then
+        info "warning: leaving $_un_shim: it is not the valise ENV shim"
+      fi
+    fi
+    # Remove the GUI env bridge (environment.d / LaunchAgent) valise wrote.
+    # Ownership is the same exact-line marker the write path checks, so a
+    # user-owned file at the bridge path is never deleted. A removal failure
+    # is reported and does not abort the rest of the uninstall: the startup
+    # files are already stripped, and the remaining steps (commands, active
+    # link, records, releases) must still run.
+    if ! remove_gui_env_bridge; then
+      info "warning: the GUI env bridge could not be removed completely; see the errors above"
+      _un_status=1
+    fi
     _un_lines=$(integration_unmanaged_report) || {
       info "warning: these lines load valise outside a managed block; remove them yourself:"
       printf '%s\n' "$_un_lines"
@@ -442,7 +1252,7 @@ cmd_uninstall() {
   elif [ -e "$VALISE_ACTIVE_LINK" ]; then
     info "warning: leaving $VALISE_ACTIVE_LINK: it is not a symlink"
   fi
-  for _un_record in "$(previous_record_path)" "$(startup_created_path)"; do
+  for _un_record in "$(previous_record_path)" "$(startup_created_path)" "$(integration_record_path)"; do
     if [ -f "$_un_record" ] || [ -L "$_un_record" ]; then
       "$_un_rm" -f "$_un_record" || die "cannot remove $_un_record"
     fi
@@ -459,9 +1269,15 @@ cmd_uninstall() {
   "$_un_rmdir" "$VALISE_XDG_CONFIG" 2>/dev/null || :
   release_lock
   "$_un_rmdir" "$VALISE_XDG_STATE" 2>/dev/null || :
+  if [ "$_un_status" -ne 0 ]; then
+    info "valise integration removed, but not completely; see the warnings above"
+    unset _un_keep _un_arg _un_rm _un_rmdir _un_mkdir _un_home _un_name _un_file _un_hook _un_first \
+      _un_lines _un_record _un_shim _un_shim_check _un_status
+    return 1
+  fi
   info "valise integration removed; the valise CLI itself is still installed"
   unset _un_keep _un_arg _un_rm _un_rmdir _un_mkdir _un_home _un_name _un_file _un_hook _un_first \
-    _un_lines _un_record
+    _un_lines _un_record _un_shim _un_shim_check _un_status
 }
 
 # --- Install preview ---
@@ -517,16 +1333,17 @@ install_preview() {
   printf 'startup files\n'
   if [ -n "${HOME:-}" ]; then
     _ip_home=$(path_normalize "$HOME") || die "cannot resolve HOME"
-    _ip_snippet=$(print_posix_integration) || die "cannot generate integration block"
     _ip_targets=$(posix_startup_targets "$_ip_home")
-    while IFS= read -r _ip_target; do
+    while IFS="$(printf '\t')" read -r _ip_stage _ip_target; do
       [ -n "$_ip_target" ] || continue
       if [ -L "$_ip_target" ]; then
         printf '  left alone (symlink): %s\n' "$_ip_target"
       elif [ -e "$_ip_target" ] && ! integration_markers_paired "$_ip_target"; then
         printf '  would fail (unpaired markers): %s\n' "$_ip_target"
-      else
+      elif _ip_snippet=$(print_posix_integration "$_ip_stage"); then
         _dry_render_compare "$_ip_target" integration_render "$_ip_target" "$_ip_snippet"
+      else
+        printf '  would fail (cannot generate the block): %s\n' "$_ip_target"
       fi
     done <<EOF
 $_ip_targets
@@ -539,6 +1356,114 @@ EOF
   if [ -n "$(trusted_utility_path fish 2>/dev/null || :)" ]; then
     _dry_render_compare "$(fish_hook_path)" print_fish_integration
   fi
+  # The $ENV shim is a managed startup file, so a dry run must report it too,
+  # applying the same rules the write path does: a symlink is left alone, a
+  # file without a valise block is left alone, and an unpaired block fails.
+  if [ -n "${HOME:-}" ] && _ip_shim=$(env_shim_path); then
+    if [ -L "$_ip_shim" ]; then
+      printf '  left alone (symlink): %s\n' "$_ip_shim"
+    elif [ -e "$_ip_shim" ] && ! integration_has_posix_block "$_ip_shim" 2>/dev/null; then
+      printf '  left alone (not the valise ENV shim): %s\n' "$_ip_shim"
+    elif [ -e "$_ip_shim" ] && ! integration_markers_paired "$_ip_shim"; then
+      printf '  would fail (unpaired markers): %s\n' "$_ip_shim"
+    elif _ip_snippet=$(print_posix_integration all); then
+      _dry_render_compare "$_ip_shim" integration_render "$_ip_shim" "$_ip_snippet"
+    else
+      printf '  would fail (cannot generate the block): %s\n' "$_ip_shim"
+    fi
+  fi
+  # The GUI env bridge is derived from the release's gui_env, so a dry run must
+  # report whether it would be created, updated, or left alone.
+  printf 'gui env bridge\n'
+  _ip_gui_mode=$(gui_env_mode "$_ip_root")
+  case "$_ip_gui_mode" in
+  off)
+    # gui_env=off still removes a valise-owned bridge an earlier release wrote,
+    # so the preview reports each candidate the removal would delete, and
+    # reports a symlink or foreign file at the bridge path as left alone.
+    _ip_removed=0
+    _ip_sys=$(gui_env_file systemd 2>/dev/null) || _ip_sys=
+    _ip_lad=$(gui_env_file launchd 2>/dev/null) || _ip_lad=
+    if [ -n "$_ip_sys" ]; then
+      if [ -L "$_ip_sys" ]; then
+        printf '  left alone (symlink): %s\n' "$_ip_sys"
+        _ip_removed=1
+      elif [ -f "$_ip_sys" ] && bridge_is_valise_owned systemd "$_ip_sys"; then
+        printf '  would remove: %s\n' "$_ip_sys"
+        _ip_removed=1
+      elif [ -e "$_ip_sys" ]; then
+        printf '  left alone (not the valise bridge): %s\n' "$_ip_sys"
+        _ip_removed=1
+      fi
+    fi
+    if [ -n "$_ip_lad" ]; then
+      if [ -L "$_ip_lad" ]; then
+        printf '  left alone (symlink): %s\n' "$_ip_lad"
+        _ip_removed=1
+      elif [ -f "$_ip_lad" ] && bridge_is_valise_owned launchd "$_ip_lad"; then
+        printf '  would remove: %s\n' "$_ip_lad"
+        _ip_removed=1
+      elif [ -e "$_ip_lad" ]; then
+        printf '  left alone (not the valise bridge): %s\n' "$_ip_lad"
+        _ip_removed=1
+      fi
+    fi
+    [ "$_ip_removed" -eq 1 ] || printf '  none (gui_env=off)\n'
+    ;;
+  systemd | launchd)
+    # The write path (gui_env_bridge_stage) writes systemd only on Linux and
+    # launchd only on macOS; the preview must promise exactly that.
+    _ip_need=
+    case "$_ip_gui_mode" in
+    systemd) _ip_need=linux ;;
+    launchd) _ip_need=darwin ;;
+    esac
+    _ip_gui=
+    if [ "$(cli_os_name)" != "$_ip_need" ]; then
+      # The write path removes owned bridges when the platform cannot replace
+      # the incoming mode, so the preview reports the same removal instead of
+      # promising a skip that would strand the previous release's bridge.
+      _ip_removed=0
+      for _ip_other in systemd launchd; do
+        _ip_other_path=$(gui_env_file "$_ip_other" 2>/dev/null) || continue
+        [ -n "$_ip_other_path" ] || continue
+        if [ -L "$_ip_other_path" ]; then
+          printf '  left alone (symlink): %s\n' "$_ip_other_path"
+          _ip_removed=1
+        elif [ -f "$_ip_other_path" ] && bridge_is_valise_owned "$_ip_other" "$_ip_other_path"; then
+          printf '  would remove: %s\n' "$_ip_other_path"
+          _ip_removed=1
+        elif [ -e "$_ip_other_path" ]; then
+          printf '  left alone (not the valise bridge): %s\n' "$_ip_other_path"
+          _ip_removed=1
+        fi
+      done
+      if [ "$_ip_removed" -eq 0 ]; then
+        printf '  skipped (gui_env=%s is not supported on %s)\n' "$_ip_gui_mode" "$(cli_os_name)"
+      fi
+    elif ! _ip_gui=$(gui_env_file "$_ip_gui_mode" 2>/dev/null) || [ -z "$_ip_gui" ]; then
+      printf '  skipped (no bridge path for gui_env=%s)\n' "$_ip_gui_mode"
+    elif [ -L "$_ip_gui" ]; then
+      printf '  left alone (symlink): %s\n' "$_ip_gui"
+    elif [ -e "$_ip_gui" ] && ! bridge_is_valise_owned "$_ip_gui_mode" "$_ip_gui"; then
+      printf '  left alone (not the valise bridge): %s\n' "$_ip_gui"
+    else
+      # A dry run must not execute module bodies: a side_effect=local-state
+      # module (permitted by the ABI) creates directories under $XDG_STATE_HOME,
+      # so calling env_export_capture here would write into the real home while
+      # promising "nothing outside build/ is written". Report the action
+      # without computing the bytes.
+      if [ -f "$_ip_gui" ]; then
+        printf '  would regenerate: %s\n' "$_ip_gui"
+      else
+        printf '  would create: %s\n' "$_ip_gui"
+      fi
+    fi
+    ;;
+  *)
+    printf '  skipped (unknown gui_env: %s)\n' "$_ip_gui_mode"
+    ;;
+  esac
   printf 'commands\n'
   _ip_any=0
   _ip_want=$(release_commands "$_ip_root") || die "the release lists an invalid command name"
@@ -574,5 +1499,6 @@ EOF
   fi
   [ "$_ip_any" -eq 1 ] || printf '  none\n'
   unset _ip_integration _ip_source _ip_root _ip_id _ip_active _ip_home _ip_snippet _ip_targets _ip_target \
-    _ip_lines _ip_want _ip_bin _ip_ledger _ip_awk _ip_name _ip_path _ip_sha _ip_any
+    _ip_lines _ip_want _ip_bin _ip_ledger _ip_awk _ip_name _ip_path _ip_sha _ip_any _ip_shim _ip_gui_mode \
+    _ip_gui _ip_gui_capture _ip_stage _ip_removed _ip_sys _ip_lad _ip_need _ip_other _ip_other_path
 }

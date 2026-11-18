@@ -1,0 +1,9 @@
+name=e2e_path_env
+requires=valise_path
+optional=
+shells=posix bash zsh ksh
+platforms=any
+side_effect=path-env
+exports=e2e_bin_dir
+version=1.0.0
+load=modules/e2e/path_env.sh

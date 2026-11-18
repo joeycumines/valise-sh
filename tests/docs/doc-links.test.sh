@@ -156,6 +156,90 @@ else
   fail "markdown links exist to verify" "no relative .md/.tsv links found; the guard is exercising nothing"
 fi
 
+# Claim guard: the documentation must not promise behaviour the implementation
+# does not deliver. Each entry below names a claim that was WRONG in a previous
+# revision and is now either implemented or honestly scoped; a regression that
+# reintroduces the old wording fails here.
+printf '\n=== documentation claim guard ===\n'
+_claim_absent() {
+  _ca_label=$1
+  _ca_pattern=$2
+  _ca_found=
+  for _ca_file in "$TREE_ROOT"/docs/*.md "$TREE_ROOT"/README.md "$TREE_ROOT"/CHANGELOG.md \
+    "$TREE_ROOT"/lib/cli/usage.sh; do
+    [ -f "$_ca_file" ] || continue
+    if grep -Fq -- "$_ca_pattern" "$_ca_file" 2>/dev/null; then
+      _ca_found="$_ca_found ${_ca_file#"$TREE_ROOT"/}"
+    fi
+  done
+  _total=$((_total + 1))
+  if [ -z "$_ca_found" ]; then
+    pass "$_ca_label"
+  else
+    fail "$_ca_label" "claim reappeared in:$_ca_found"
+  fi
+}
+_claim_present() {
+  _cp_label=$1
+  _cp_pattern=$2
+  _cp_file=$3
+  _total=$((_total + 1))
+  if grep -Fq -- "$_cp_pattern" "$TREE_ROOT/$_cp_file" 2>/dev/null; then
+    pass "$_cp_label"
+  else
+    fail "$_cp_label" "expected in $_cp_file: $_cp_pattern"
+  fi
+}
+# GUI parity: the bridge does not carry PATH or the XDG roots.
+_claim_absent "no doc claims a GUI session gets the whole login environment" \
+  "same environment as a login shell"
+_claim_present "projects.md states PATH is not bridged" \
+  "not carried" "docs/projects.md"
+_claim_present "architecture.md states PATH is not bridged" \
+  "not** bridged" "docs/architecture.md"
+# environment.d activation: the unverified daemon-reexec recipe is gone.
+_claim_absent "no doc recommends the unverified systemctl daemon-reexec recipe" \
+  "daemon-reexec"
+_claim_present "installation.md says the systemd bridge applies at user-manager start" \
+  "at user-manager start" "docs/installation.md"
+# Lint: every phase, and a FAIL exits non-zero.
+_claim_absent "no doc scopes the PATH lint to the env phase alone" \
+  "in an env-phase body"
+_claim_present "module-abi.md says the PATH lint applies in every phase" \
+  "in **every** phase" "docs/module-abi.md"
+# Stage placement.
+_claim_present "architecture.md says stage 2 lives only in the rc-stage file" \
+  "rc-stage file" "docs/architecture.md"
+_claim_present "installation.md says stage 2 lives only in the rc-stage file" \
+  "rc-stage file" "docs/installation.md"
+# Capture fidelity and permissions.
+_claim_present "projects.md warns the dry run does not execute module bodies" \
+  "refuses to run module bodies" "docs/projects.md"
+_claim_present "installation.md states the bridge mode" \
+  "0600" "docs/installation.md"
+
+# Round-two corrections: each claim below was reproduced or refuted with a probe.
+_claim_absent "no doc says the ENV stanza acts only when ENV is empty (the $ and ~ cases are left unchanged)" \
+  "The stanza acts only when"
+_claim_absent "no doc says the systemd generator runs once" \
+  "the environment generator runs once"
+_claim_absent "no doc says a non-interactive bash reads neither .bashrc nor .profile over ssh" \
+  "reads neither \`~/.bashrc\` nor \`~/.profile\`"
+_claim_absent "no doc says stage 2 is never in ~/.profile (a login bash reads it)" \
+  "never into \`~/.zshenv\` or \`~/.profile\`"
+_claim_present "installation.md says a login bash reads the interactive stage from its login file" \
+  "a login bash never reads \`~/.bashrc\`" "docs/installation.md"
+_claim_present "installation.md states the ENV stanza leaves a \$ or ~ value unchanged" \
+  "the stanza leaves \`ENV\`" "docs/installation.md"
+_claim_present "installation.md documents the refusal of unrepresentable bridge values" \
+  "refuses them by name" "docs/installation.md"
+_claim_present "installation.md documents the PATH re-evaluation in a later startup file" \
+  "changed \`PATH\`" "docs/installation.md"
+_claim_present "architecture.md names the bash remote-shell build dependence" \
+  "depends" "docs/architecture.md"
+_claim_present "installation.md keeps the unverified systemd reload behaviour flagged as unexercised" \
+  "was not" "docs/installation.md"
+
 printf '\n=== doc-link case-sensitivity summary (%s) ===\n' "$TREE_ROOT"
 printf 'Total: %d  Pass: %d  Fail: %d\n' "$_total" "$_pass" "$_fail"
 

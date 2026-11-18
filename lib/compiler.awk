@@ -4,12 +4,19 @@
 # valise compile: pure POSIX awk static plan compiler.
 # Input: single preprocessed stream from sh wrapper.
 #   Lines starting with SEED: space-separated seed module names
-#   Lines starting with MOD: identity<TAB>requires<TAB>load_path<TAB>platforms<TAB>side_effect<TAB>exports<TAB>optional
+#   Lines starting with MOD: identity<TAB>requires<TAB>load_path<TAB>platforms<TAB>side_effect<TAB>exports<TAB>optional<TAB>phase
 #   identity is module@meta_source when registry sources are qualified.
 #   Lines starting with PRELUDE: sp_cap function names (space-separated)
 # Output: complete installed plan on stdout. With -v mode=closure the
 # compiler validates and orders the closure, then prints one module identity
 # per line in load order instead of rendering a plan.
+# With -v phase=interactive the rendered plan contains only the interactive
+# modules of the same closure; the default phase=env renders the env plan
+# (plans/<shell>.sh). With -v phase=all the filter is disabled and the whole
+# closure renders - that is what a command plan needs, since a module's own
+# body has to be present for its published command to run whatever phase it
+# declares. The closure is computed once from the full module set, so every
+# plan shares dependency order and validation.
 
 BEGIN {
     prefix = "_valise_plan_"
@@ -18,6 +25,7 @@ BEGIN {
     mod_count = 0
     prelude_fn_count = 0
     if (plan_name == "") plan_name = target_shell
+    if (phase == "") phase = "env"
 }
 
 /^SEED:/ {
@@ -43,6 +51,7 @@ BEGIN {
         mod_side_effect[name] = fields[5]
         mod_exports[name] = fields[6]
         mod_opt[name] = fields[7]
+        mod_phase[name] = (n >= 8 && fields[8] != "") ? fields[8] : "env"
         display_name = name
         at = index(name, "@")
         if (at > 0) display_name = substr(name, 1, at - 1)
@@ -291,12 +300,67 @@ END {
             print "ERROR: meta module " mod_display[name] " declares exports without a body" > "/dev/stderr"
             exit 1
         }
+        # Defence in depth: metadata validation rejects an unknown phase before
+        # a registry exists, so this only fires for a stream that bypassed it.
+        # Without it a bogus phase would silently drop the module from every
+        # plan.
+        if (mod_phase[name] != "env" && mod_phase[name] != "interactive") {
+            print "ERROR: module " mod_display[name] " has invalid phase: " mod_phase[name] > "/dev/stderr"
+            exit 1
+        }
+    }
+
+    # A required dependency in the other phase is only broken in ONE direction.
+    # An interactive module may require an env module: the env plan loads first
+    # at every entry point, so the dependency is always present. The reverse is
+    # a contradiction - the env plan never contains an interactive dependency,
+    # so the env module would load with it permanently absent (before it in an
+    # interactive shell, never in a non-interactive one). An OPTIONAL
+    # cross-phase edge is fine in either direction: the dependency simply
+    # belongs to the other plan.
+    for (oi = 1; oi <= ordered_count; oi++) {
+        name = ordered[oi]
+        if (mod_phase[name] != "env") continue
+        n_req = split(mod_req[name], reqs, " ")
+        for (rqi = 1; rqi <= n_req; rqi++) {
+            dep = reqs[rqi]
+            if (dep == "") continue
+            if (mod_phase[dep] != "env") {
+                print "ERROR: env module " mod_display[name] " requires " mod_phase[dep] " module " mod_display[dep] > "/dev/stderr"
+                exit 1
+            }
+        }
+    }
+
+    # The export-ownership ledger names a provider by its display name, so two
+    # different modules that share one display name cannot share a closure: the
+    # ledger could not tell them apart on reload.
+    for (oi = 1; oi <= ordered_count; oi++) {
+        closure_display = mod_display[ordered[oi]]
+        if (closure_display in closure_display_seen) {
+            print "ERROR: two modules are named " closure_display " in one closure; qualified providers must not share a display name" > "/dev/stderr"
+            exit 1
+        }
+        closure_display_seen[closure_display] = 1
+    }
+
+    # Partition the closure by phase. Every plan shares this dependency order;
+    # a module renders only into the plan of its own phase (phase=all disables
+    # the filter). The interactive plan stays empty when no module opts in, and
+    # the caller skips writing it.
+    plan_count = 0
+    for (oi = 1; oi <= ordered_count; oi++) {
+        name = ordered[oi]
+        if (phase == "all" || mod_phase[name] == phase) {
+            plan_count++
+            plan_ordered[plan_count] = name
+        }
     }
 
     # Collect the plan's declared exports once for VALISE_RELOAD support.
     reload_export_count = 0
-    for (oi = 1; oi <= ordered_count; oi++) {
-        name = ordered[oi]
+    for (oi = 1; oi <= plan_count; oi++) {
+        name = plan_ordered[oi]
         n_exports = split(mod_exports[name], export_values, " ")
         for (ei = 1; ei <= n_exports; ei++) {
             export_name = export_values[ei]
@@ -316,7 +380,7 @@ END {
     # --- Render plan ---
     printf "# valise-plan-v2\n"
     printf "# Generated by valise compile; DO NOT EDIT.\n"
-    printf "# plan=%s\n", plan_name
+    printf "# plan=%s phase=%s\n", plan_name, phase
     printf "# roots="
     for (i = 1; i <= seed_count; i++) {
         if (i > 1) printf " "
@@ -324,16 +388,20 @@ END {
     }
     printf "\n"
     printf "# order="
-    for (i = 1; i <= ordered_count; i++) {
+    for (i = 1; i <= plan_count; i++) {
         if (i > 1) printf " "
-        printf "%s", mod_display[ordered[i]]
+        printf "%s", mod_display[plan_ordered[i]]
     }
     printf "\n\n"
 
     printf "%sstatus=0\n", prefix
     printf "%sfailed=0\n", prefix
     printf "%sfirst_status=0\n", prefix
-    printf "%sunavailable=\n", prefix
+    # A module this process already found unavailable in the OTHER phase is
+    # carried in here, so a required cross-phase dependency stays enforceable
+    # after the closure was partitioned into two plans. The managed block seeds
+    # this empty at each evaluation; the plan writes its own result back.
+    printf "%sunavailable=\"${%scarried:-}\"\n", prefix, prefix
     printf "%smode=${VALISE_MODE:-strict}\n", prefix
     printf "case \"$%smode\" in\n", prefix
     printf "strict | permissive) ;;\n"
@@ -355,16 +423,57 @@ END {
     printf "*) %splatform=unknown ;;\n", prefix
     printf "esac\n"
 
+    # The reload prelude clears ONLY exports valise itself installed in this
+    # process. _valise_plan_owned is written below as each module loads, so an
+    # automatic retry over our own previous definitions is quiet, while a
+    # CALLER function that collided with a module export is reported again on
+    # every pass instead of being silently replaced. An ATTEMPTED load does not
+    # establish ownership, which is what an unconditional unset assumed.
     if (reload_export_count > 0) {
         printf "if [ \"${VALISE_RELOAD:-}\" = 1 ]; then\n"
-        printf "  for %sexport in", prefix
-        for (i = 1; i <= reload_export_count; i++) {
-            printf " %s", reload_exports[i]
+        for (oi = 1; oi <= plan_count; oi++) {
+            name = plan_ordered[oi]
+            n_pe = split(mod_exports[name], pe_values, " ")
+            for (pei = 1; pei <= n_pe; pei++) {
+                if (pe_values[pei] == "") continue
+                # The token leaves the ledger with the function. Ownership is
+                # re-established below only when the module loads successfully,
+                # so a module that FAILS on this reload cannot leave a token
+                # claiming a function valise no longer provides - which would
+                # make the next reload silently unset a caller's replacement
+                # instead of reporting the collision.
+                #
+                # The removal uses case PREFIX/SUFFIX matches over a space-padded
+                # copy, NOT `for tok in $ledger`: zsh does not word-split an
+                # unquoted expansion by default, so a for loop silently kept
+                # every token there. The pattern is held in a VARIABLE and
+                # quoted at the use site, because a quoted pattern written
+                # inline in ${var#...} does not match at all.
+                printf "  case \" ${_valise_plan_owned:-} \" in\n"
+                printf "  *\" %s:%s \"*)\n", mod_display[name], pe_values[pei]
+                printf "    unset -f %s 2>/dev/null || :\n", pe_values[pei]
+                printf "    _valise_owned_pat=' %s:%s '\n", mod_display[name], pe_values[pei]
+                printf "    _valise_owned_pad=\" ${_valise_plan_owned:-} \"\n"
+                printf "    case $_valise_owned_pad in\n"
+                printf "    \"$_valise_owned_pat\"*)\n"
+                printf "      _valise_plan_owned=${_valise_owned_pad#\"$_valise_owned_pat\"}\n"
+                printf "      ;;\n"
+                printf "    *\"$_valise_owned_pat\")\n"
+                printf "      _valise_plan_owned=${_valise_owned_pad%%\"$_valise_owned_pat\"}\n"
+                printf "      ;;\n"
+                printf "    *\"$_valise_owned_pat\"*)\n"
+                printf "      _valise_owned_left=${_valise_owned_pad%%%%\"$_valise_owned_pat\"*}\n"
+                printf "      _valise_owned_right=${_valise_owned_pad#*\"$_valise_owned_pat\"}\n"
+                printf "      _valise_plan_owned=\"$_valise_owned_left $_valise_owned_right\"\n"
+                printf "      ;;\n"
+                printf "    esac\n"
+                printf "    _valise_plan_owned=${_valise_plan_owned# }\n"
+                printf "    _valise_plan_owned=${_valise_plan_owned%% }\n"
+                printf "    unset _valise_owned_pat _valise_owned_pad _valise_owned_left _valise_owned_right\n"
+                printf "    ;;\n"
+                printf "  esac\n"
+            }
         }
-        printf "; do\n"
-        printf "    unset -f \"$%sexport\" 2>/dev/null || :\n", prefix
-        printf "  done\n"
-        printf "  unset %sexport\n", prefix
         printf "fi\n"
     }
 
@@ -379,15 +488,15 @@ END {
 
     printf "if [ \"$%sstatus\" -eq 0 ]; then\n", prefix
     printf "  for %smodule in", prefix
-    for (i = 1; i <= ordered_count; i++) {
-        printf " %s", ordered[i]
+    for (i = 1; i <= plan_count; i++) {
+        printf " %s", plan_ordered[i]
     }
     printf "; do\n"
     printf "    %srequired=1\n", prefix
     printf "    case \"$%smodule\" in\n", prefix
 
-    for (oi = 1; oi <= ordered_count; oi++) {
-        name = ordered[oi]
+    for (oi = 1; oi <= plan_count; oi++) {
+        name = plan_ordered[oi]
         display = mod_display[name]
         printf "    %s)\n", name
         platform_any = 0
@@ -507,6 +616,24 @@ END {
                 printf "%s    unset -f \"$%sexport\" 2>/dev/null || :\n", body_indent, prefix
                 printf "%s  done\n", body_indent
                 printf "%sfi\n", body_indent
+                # A module that succeeded owns its exports for the lifetime of
+                # the process. Each token is <module>:<export>, so the VALISE_RELOAD
+                # prelude clears an export only for the SAME provider that
+                # installed it: another module's export, and a caller's colliding
+                # function, are reported on load instead of being replaced.
+                printf "%sif [ \"$%sstatus\" -eq 0 ]; then\n", body_indent, prefix
+                printf "%s  for %sexport in", body_indent, prefix
+                for (ei = 1; ei <= export_count; ei++) {
+                    printf " %s", module_exports[ei]
+                }
+                printf "; do\n"
+                printf "%s    case \" ${_valise_plan_owned:-} \" in\n", body_indent
+                printf "%s    *\" %s:$%sexport \"*) ;;\n", body_indent, mod_display[name], prefix
+                printf "%s    *) _valise_plan_owned=\"${_valise_plan_owned:+$_valise_plan_owned }%s:$%sexport\" ;;\n", body_indent, mod_display[name], prefix
+                printf "%s    esac\n", body_indent
+                printf "%s  done\n", body_indent
+                printf "%s  unset %sexport\n", body_indent, prefix
+                printf "%sfi\n", body_indent
             }
         }
         if (platform_any == 0) {
@@ -533,6 +660,10 @@ END {
     printf "  done\n"
     printf "fi\n"
 
+    # Hand this phase's availability on to the NEXT plan sourced in the same
+    # evaluation (env -> interactive). The managed block clears the carrier at
+    # the start of each evaluation, so it never leaks across a release switch.
+    printf "%scarried=${%sunavailable# }\n", prefix, prefix
     printf "if [ \"$%sfailed\" -ne 0 ]; then\n", prefix
     printf "  %sreturn=$%sfirst_status\n", prefix, prefix
     printf "else\n"
@@ -540,5 +671,8 @@ END {
     printf "fi\n"
     printf "unset %sstatus %sfailed %sfirst_status %sunavailable %smode %splatform\n", prefix, prefix, prefix, prefix, prefix, prefix
     printf "unset %smodule %srequired %sblocked_by %splatform_match %sexport %slookup %sconflict %swrapper_exports %scleanup_exports\n", prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix
+    # _valise_plan_carried deliberately survives this plan: the interactive
+    # plan sourced next in the same evaluation reads it. The managed block
+    # resets it at the start of each evaluation.
     printf "eval \"unset %sreturn; return $%sreturn\"\n", prefix, prefix
 }
