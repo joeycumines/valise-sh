@@ -78,8 +78,21 @@ startup_file_for() {
 #   ksh93 a bare newline (verified: emitted for any -i with non-tty stdin)
 # Anything else passes through and fails the silence assertion it belongs to.
 _e2e_filter_shell_noise() {
+  # Diagnostic lines a HOST emits when an interactive shell is started with no
+  # terminal. None of them is valise output:
+  #   - job control notices come from the shell's own tty setup;
+  #   - "not interactive and can't open terminal" is a zsh string (present in
+  #     the binary as a literal) emitted when zle cannot attach;
+  #   - the compinit pair comes from Debian/Ubuntu's /etc/zsh/zshrc, which runs
+  #     compinit unless the user sets skip_global_compinit, and compinit aborts
+  #     when it cannot probe the terminal.
+  # Filtering them keeps each assertion about valise's own silence instead of
+  # about the distro's interactive defaults. The tests still fail on any line
+  # valise itself writes.
   sed -e '/no job control in this shell$/d' \
     -e '/cannot set terminal process group/d' \
+    -e "/^not interactive and can't open terminal$/d" \
+    -e '/^compinit: initialization aborted$/d' \
     -e '/^$/d'
 }
 
