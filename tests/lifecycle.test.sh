@@ -18,6 +18,24 @@ pass() { _total=$((_total + 1)); _pass=$((_pass + 1)); printf '  PASS: %s\n' "$1
 fail() { _total=$((_total + 1)); _fail=$((_fail + 1)); printf '  FAIL: %s\n' "$1" >&2; }
 skip() { _total=$((_total + 1)); _skip=$((_skip + 1)); printf '  SKIP: %s\n' "$1"; }
 
+# _find_count <dir> <name-pattern>: print how many paths match. A bare
+# `! find ... -print -quit | grep -q .` is vacuously TRUE when find itself
+# fails (a bad directory, a missing utility), which turns a broken check into
+# a pass. This counts the matches and prints ERROR when find fails, so the
+# caller's numeric comparison can never succeed by accident.
+_find_count() {
+  _fc_dir=$1
+  _fc_name=$2
+  _fc_out=$(find "$_fc_dir" -name "$_fc_name" -print 2>&1)
+  _fc_rc=$?
+  if [ "$_fc_rc" -ne 0 ]; then
+    printf 'find failed (%s): %s\n' "$_fc_rc" "$_fc_out" >&2
+    printf 'ERROR\n'
+    return 0
+  fi
+  printf '%s\n' "$_fc_out" | grep -c . || :
+}
+
 _repo=$(cd "$(dirname "$0")/.." && pwd -P)
 _valise="$_repo/bin/valise"
 _tmp=$(mktemp -d "${TMPDIR:-/tmp}/valise-lifecycle.XXXXXX")
@@ -671,7 +689,8 @@ if [ "$rm_apply_status" -ne 0 ] &&
   [ -f "$_home/.config/environment.d/10-valise.conf" ] &&
   [ "$(cksum <"$_home/.config/environment.d/10-valise.conf")" = "$_rm_sys_before" ] &&
   [ "$(cksum <"$_home/Library/LaunchAgents/sh.valise.env.plist")" = "$_rm_lad_before" ] &&
-  ! find "$_home/.config/environment.d" "$_home/Library/LaunchAgents" -name '.valise-remove.*' -print -quit | grep -q .; then
+  [ "$(_find_count "$_home/.config/environment.d" '.valise-remove.*')" = 0 ] &&
+  [ "$(_find_count "$_home/Library/LaunchAgents" '.valise-remove.*')" = 0 ]; then
   pass "a failed bridge removal leaves every owned bridge file byte-identical and no aside file"
 else
   fail "a failed bridge removal changed an owned bridge file or left an aside file"
@@ -715,6 +734,85 @@ else
   else
     fail "could not set up two installed releases for the release-use publish failure"
     cat "$_tmp/pf-a.out" "$_tmp/pf-b.out" >&2
+  fi
+
+  # Release use where the bridge publish SUCCEEDS but command reconciliation
+  # then fails. The link, the previous-release record AND the bridge must all be
+  # back on the outgoing release: leaving the new release's bridge published
+  # while the old release is active is the exact inconsistency the transaction
+  # exists to prevent.
+  #
+  # Two releases whose published command DIFFERS, so reconcile has real work:
+  # release r2 adds a second command. The stub directory is then made immutable
+  # (chflags uchg), which blocks the new stub's creation after the bridge has
+  # already been published.
+  if [ "$(uname -s)" != Darwin ]; then
+    skip "a reconcile failure on release use restores the bridge (needs chflags uchg)"
+  else
+  _use_home reconcile-fail
+  _bridge_proj "$_tmp/bp-r1" launchd r1
+  # A module that EXPORTS a value the bridge carries, so the two releases render
+  # different plists. Without it both bridges are byte-identical and the
+  # "restored the outgoing bridge" assertion below could never fail.
+  printf 'export E2E_RECONCILE=r1\n' >>"$_tmp/bp-r1/modules/hello.sh"
+  _v "$_tmp/bp-r1" apply >"$_tmp/rf-1.out" 2>&1 || :
+  _id_r1=$(_active_id)
+  _lad="$_home/Library/LaunchAgents/sh.valise.env.plist"
+  _lad_r1=$(cksum <"$_lad" 2>/dev/null || :)
+  _bridge_proj "$_tmp/bp-r2" launchd r2
+  printf 'export E2E_RECONCILE=r2\n' >>"$_tmp/bp-r2/modules/hello.sh"
+  printf '%s\n' 'name=tool_extra' 'side_effect=read-only' 'shells=posix' 'platforms=any' \
+    'exports=extra' 'commands=extra' 'load=modules/extra.sh' >"$_tmp/bp-r2/module.d/tool_extra.meta"
+  printf 'extra() { echo extra; }\n' >"$_tmp/bp-r2/modules/extra.sh"
+  # Append the new root to every data row of bundles.tsv (tab separated).
+  awk -F '	' -v OFS='	' 'NF == 3 && $1 == "default" { $3 = $3 " tool_extra" } { print }' \
+    "$_tmp/bp-r2/bundles.tsv" >"$_tmp/bp-r2/bundles.new"
+  mv "$_tmp/bp-r2/bundles.new" "$_tmp/bp-r2/bundles.tsv"
+  _v "$_tmp/bp-r2" apply >"$_tmp/rf-2.out" 2>&1 || :
+  _id_r2=$(_active_id)
+  _stub="$_home/.local/bin"
+  if [ -n "$_id_r1" ] && [ -n "$_id_r2" ] && [ "$_id_r1" != "$_id_r2" ] &&
+    [ -f "$_lad" ] && [ -f "$_stub/extra" ]; then
+    _lad_r2=$(cksum <"$_lad")
+    if [ "$_lad_r1" = "$_lad_r2" ]; then
+      # The setup is the thing that is wrong, not the code under test: report it
+      # as a failure rather than asserting "the bridge was restored" against two
+      # byte-identical bridges, which would pass no matter what the rollback did.
+      fail "the reconcile-failure setup rendered two identical GUI env bridges, so the restore cannot be observed"
+    elif
+      _prev_before=$(cat "$(_state_previous)")
+      chflags uchg "$_stub"
+      if _v "$_tmp/bp-r1" release use "$_id_r1" >"$_tmp/rf-use.out" 2>&1; then
+        rf_use=0
+      else
+        rf_use=1
+      fi
+      chflags nouchg "$_stub" 2>/dev/null || :
+      [ "$rf_use" -ne 0 ]
+    then
+      if [ "$(_active_id)" = "$_id_r2" ] &&
+        [ "$(cat "$(_state_previous)")" = "$_prev_before" ] &&
+        [ "$(cksum <"$_lad")" = "$_lad_r2" ] &&
+        [ "$(_find_count "$_home/.local/share/valise" '.commands.*')" = 0 ] &&
+        [ "$(_find_count "$_home/Library/LaunchAgents" '.valise-outgoing.*')" = 0 ]; then
+        pass "a reconcile failure on release use restores the link, the previous record, and the outgoing bridge"
+      else
+        fail "a reconcile failure on release use left the bridge describing a release that is not active"
+        cat "$_tmp/rf-use.out" >&2
+        printf 'active=%s previous=%s\n' "$(_active_id)" "$(cat "$(_state_previous)" 2>/dev/null)" >&2
+        cksum <"$_lad" >&2 2>/dev/null || :
+        printf 'was: %s\n' "$_lad_r2" >&2
+        find "$_home/.local/share/valise" "$_home/Library/LaunchAgents" \
+          -name '.commands.*' -o -name '.valise-outgoing.*' >&2 2>/dev/null || :
+      fi
+    else
+      fail "a reconcile failure on release use did not fail the activation, so the rollback was never exercised"
+      cat "$_tmp/rf-use.out" >&2
+    fi
+  else
+    fail "could not set up two installed releases for the reconcile-failure case"
+    cat "$_tmp/rf-1.out" "$_tmp/rf-2.out" >&2
+  fi
   fi
 
   # Install after a switch: the same immutable bridge makes the publish fail after
@@ -804,7 +902,7 @@ if [ "$(uname -s)" = Darwin ]; then
     fi
     chflags nouchg "$_leak_lad" 2>/dev/null || :
     if [ "$leak_apply" -ne 0 ] &&
-      ! find "$_home/Library/LaunchAgents" -name '.valise-gui.*' -print -quit | grep -q .; then
+      [ "$(_find_count "$_home/Library/LaunchAgents" '.valise-gui.*')" = 0 ]; then
       pass "a failed bridge publish leaves no .valise-gui staging file behind"
     else
       fail "a failed bridge publish left a .valise-gui staging file behind"
@@ -827,7 +925,7 @@ elif [ "$(id -u)" -ne 0 ]; then
   fi
   chmod 755 "$_home/.config/environment.d" 2>/dev/null || :
   if [ "$leak_apply" -ne 0 ] &&
-    ! find "$_home/.config/environment.d" -name '.valise-gui.*' -print -quit | grep -q .; then
+    [ "$(_find_count "$_home/.config/environment.d" '.valise-gui.*')" = 0 ]; then
     pass "a failed bridge publish leaves no .valise-gui staging file behind"
   else
     fail "a failed bridge publish left a .valise-gui staging file behind"

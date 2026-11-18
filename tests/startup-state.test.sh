@@ -19,16 +19,19 @@ pass() { _total=$((_total + 1)); _pass=$((_pass + 1)); printf '  PASS: %s\n' "$1
 fail() { _total=$((_total + 1)); _fail=$((_fail + 1)); printf '  FAIL: %s\n' "$1" >&2; }
 skip() { _total=$((_total + 1)); _skip=$((_skip + 1)); printf '  SKIP: %s\n' "$1"; }
 
-# Every scenario below drives a real interpreter. Without the shell installed,
-# an absence assertion passes vacuously and a presence assertion fails, so the
-# whole zsh/bash part of the lane is skipped with a named reason instead.
-if [ ! -x /bin/zsh ]; then
-  skip "zsh scenarios: /bin/zsh is not installed"
-  printf '\n%s: %d total, %d pass, %d fail, %d skip\n' "startup-state" "$_total" "$_pass" "$_fail" "$_skip"
-  exit 0
+# Every scenario below drives a real interpreter. Absence skips only the lanes
+# that need that shell: a bash-only host still runs the bash and doctor
+# scenarios, and each interpreter is resolved from PATH rather than guessed at
+# /bin, because a Homebrew or /usr/local zsh is a perfectly normal install.
+_zsh_bin=$(command -v zsh 2>/dev/null || :)
+_bash_bin=$(command -v bash 2>/dev/null || :)
+if [ -n "$_zsh_bin" ] && [ ! -x "$_zsh_bin" ]; then _zsh_bin=; fi
+if [ -n "$_bash_bin" ] && [ ! -x "$_bash_bin" ]; then _bash_bin=; fi
+if [ -z "$_zsh_bin" ]; then
+  skip "zsh scenarios 1-8: no zsh is installed"
 fi
-if [ ! -x /bin/bash ]; then
-  skip "bash scenarios need /bin/bash in addition to /bin/zsh"
+if [ -z "$_bash_bin" ]; then
+  skip "bash scenarios 13-15: no bash is installed"
 fi
 
 _repo=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -202,13 +205,14 @@ unset _syntax_shell
 
 _home="$_tmp/home"
 
+if [ -n "$_zsh_bin" ]; then
 # Scenario 1: a required env module fails in .zshenv, and the dependent
 # interactive module must not run in .zshrc. Strict is a control: the old code
 # also blocked this case, so it must stay blocked.
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/zsh
+_install "$_tmp/release-a" "$_home" "$_zsh_bin"
 : >"$_home/envdep-fails"
-_home_env "$_home" VALISE_MODE=strict -- /bin/zsh -i -c ':' >"$_tmp/s1.out" 2>"$_tmp/s1.err" || :
+_home_env "$_home" VALISE_MODE=strict -- "$_zsh_bin" -i -c ':' >"$_tmp/s1.out" 2>"$_tmp/s1.err" || :
 if [ "$(_marker_count "$_home/intdep.log")" -eq 0 ]; then
   pass "zsh strict: a failed required env module blocks its interactive dependent in .zshrc"
 else
@@ -220,9 +224,9 @@ fi
 # so the managed block must carry the unavailable list into .zshrc. Before the
 # fix the release guard skipped the env stage there and cleared the list.
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/zsh
+_install "$_tmp/release-a" "$_home" "$_zsh_bin"
 : >"$_home/envdep-fails"
-_home_env "$_home" VALISE_MODE=permissive -- /bin/zsh -i -c ':' >"$_tmp/s2.out" 2>"$_tmp/s2.err" || :
+_home_env "$_home" VALISE_MODE=permissive -- "$_zsh_bin" -i -c ':' >"$_tmp/s2.out" 2>"$_tmp/s2.err" || :
 if [ "$(_marker_count "$_home/intdep.log")" -eq 0 ]; then
   pass "zsh permissive: a failed required env module blocks its interactive dependent across .zshenv and .zshrc"
 else
@@ -238,9 +242,9 @@ fi
 # Scenario 3: an OPTIONAL env dependency fails in strict mode. Its interactive
 # dependent (reached through an optional edge) must stay blocked across files.
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/zsh
+_install "$_tmp/release-a" "$_home" "$_zsh_bin"
 : >"$_home/envopt-fails"
-_home_env "$_home" VALISE_MODE=strict -- /bin/zsh -i -c ':' >"$_tmp/s3.out" 2>"$_tmp/s3.err" || :
+_home_env "$_home" VALISE_MODE=strict -- "$_zsh_bin" -i -c ':' >"$_tmp/s3.out" 2>"$_tmp/s3.err" || :
 if [ "$(_marker_count "$_home/intopt.log")" -eq 0 ]; then
   pass "zsh strict: an optional env failure blocks its interactive dependent across files"
 else
@@ -251,9 +255,9 @@ fi
 # then makes envdep fail; the .zprofile repair pass re-runs the env plan and
 # must record the failure, so .zshrc never runs the dependent.
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/zsh
+_install "$_tmp/release-a" "$_home" "$_zsh_bin"
 printf '\n: >"$HOME/envdep-fails"\n' >>"$_home/.zshenv"
-_home_env "$_home" VALISE_MODE=strict -- /bin/zsh -l -i -c ':' >"$_tmp/s4.out" 2>"$_tmp/s4.err" || :
+_home_env "$_home" VALISE_MODE=strict -- "$_zsh_bin" -l -i -c ':' >"$_tmp/s4.out" 2>"$_tmp/s4.err" || :
 if [ "$(_marker_count "$_home/intdep.log")" -eq 0 ]; then
   pass "zsh login repair: a failed repair pass never lets the dependent run in .zshrc"
 else
@@ -263,8 +267,8 @@ fi
 # Scenario 5: control. With nothing failing, the interactive dependent runs
 # exactly once in .zshrc, and a second read of the same release is a no-op.
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/zsh
-_home_env "$_home" -- /bin/zsh -i -c ':' >"$_tmp/s5.out" 2>"$_tmp/s5.err" || :
+_install "$_tmp/release-a" "$_home" "$_zsh_bin"
+_home_env "$_home" -- "$_zsh_bin" -i -c ':' >"$_tmp/s5.out" 2>"$_tmp/s5.err" || :
 if [ "$(_marker_count "$_home/intdep.log")" -eq 1 ]; then
   pass "zsh healthy: the interactive dependent runs once in .zshrc"
 else
@@ -272,8 +276,8 @@ else
   cat "$_tmp/s5.err" >&2
 fi
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/zsh
-_home_env "$_home" -- /bin/zsh -i -c '. "$HOME/.zshenv"; . "$HOME/.zshenv"' >/dev/null 2>&1 || :
+_install "$_tmp/release-a" "$_home" "$_zsh_bin"
+_home_env "$_home" -- "$_zsh_bin" -i -c '. "$HOME/.zshenv"; . "$HOME/.zshenv"' >/dev/null 2>&1 || :
 if [ "$(_marker_count "$_home/envdep.count")" -eq 1 ]; then
   pass "a second read of the same release in one shell does not reload the env plan"
 else
@@ -289,12 +293,12 @@ rm -f "$_project/modules/envdep.sh.salt6"
 printf '%s\n' '# salt 6' >>"$_project/modules/envdep.sh"
 _build startup "$_tmp/release-missing" || { fail "build the missing-plan fixture bundle"; exit 1; }
 _reset_home "$_home"
-_install "$_tmp/release-missing" "$_home" /bin/zsh
+_install "$_tmp/release-missing" "$_home" "$_zsh_bin"
 _active=$(eval "$(grep '^_valise_active_link=' "$_home/.zshenv")"; printf '%s' "$_valise_active_link")
 _rel_real=$(cd "$_active" && pwd -P)
 chmod -R u+w "$_rel_real" 2>/dev/null || :
 rm -f "$_rel_real/plans/zsh.sh"
-_home_env "$_home" -- /bin/zsh -i -c ':' >"$_tmp/s6.out" 2>"$_tmp/s6.err" || :
+_home_env "$_home" -- "$_zsh_bin" -i -c ':' >"$_tmp/s6.out" 2>"$_tmp/s6.err" || :
 if [ "$(_marker_count "$_home/intdep.log")" -eq 0 ]; then
   pass "a missing env plan file blocks the interactive stage"
 else
@@ -305,10 +309,10 @@ fi
 # after the managed block already ran in .zshenv. The later managed block sees
 # the same release, so only a changed PATH can tell it to re-assert the plan.
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/zsh
+_install "$_tmp/release-a" "$_home" "$_zsh_bin"
 printf 'PATH=/usr/bin:/bin\nexport PATH\n' | cat - "$_home/.zshrc" >"$_home/.zshrc.new"
 mv "$_home/.zshrc.new" "$_home/.zshrc"
-_home_env "$_home" -- /bin/zsh -i -c 'printf "%s\n" "${PATH%%:*}"' >"$_tmp/s7.out" 2>"$_tmp/s7.err" || :
+_home_env "$_home" -- "$_zsh_bin" -i -c 'printf "%s\n" "${PATH%%:*}"' >"$_tmp/s7.out" 2>"$_tmp/s7.err" || :
 if [ "$(head -n 1 "$_tmp/s7.out")" = "$_home/startup-toolbin" ]; then
   pass "zsh: a user rc file that resets PATH after the env plan does not lose the valise PATH entry"
 else
@@ -317,8 +321,8 @@ fi
 
 # Scenario 8: control. A reread with an unchanged PATH runs no env body again.
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/zsh
-_home_env "$_home" -- /bin/zsh -i -c '. "$HOME/.zshenv"; . "$HOME/.zshenv"' >/dev/null 2>&1 || :
+_install "$_tmp/release-a" "$_home" "$_zsh_bin"
+_home_env "$_home" -- "$_zsh_bin" -i -c '. "$HOME/.zshenv"; . "$HOME/.zshenv"' >/dev/null 2>&1 || :
 if [ "$(_marker_count "$_home/pathmod.count")" -eq 1 ]; then
   pass "an unchanged PATH reread does not rerun env module bodies"
 else
@@ -343,8 +347,8 @@ _build migrate "$_tmp/release-migrate-b" || { fail "build the migrate-b bundle";
 # (env in .zshenv, interactive in .zshrc) must report the collision and keep the
 # env provider, exactly as one combined plan does.
 _reset_home "$_home"
-_install "$_tmp/release-collide" "$_home" /bin/zsh
-_home_env "$_home" -- /bin/zsh -i -c 'shared_fn' >"$_tmp/s9.out" 2>"$_tmp/s9.err" || :
+_install "$_tmp/release-collide" "$_home" "$_zsh_bin"
+_home_env "$_home" -- "$_zsh_bin" -i -c 'shared_fn' >"$_tmp/s9.out" 2>"$_tmp/s9.err" || :
 if [ "$(cat "$_tmp/s9.out")" = env ]; then
   pass "zsh: a different module's export is not replaced across startup files"
 else
@@ -359,9 +363,9 @@ fi
 # Scenario 10: control. One module moves from env (release A) to interactive
 # (release B); a switch in one zsh process must replace its own export.
 _reset_home "$_home"
-_install "$_tmp/release-migrate-a" "$_home" /bin/zsh
+_install "$_tmp/release-migrate-a" "$_home" "$_zsh_bin"
 _active=$(_active_link_of "$_home")
-_home_env "$_home" "MIG_B=$_tmp/release-migrate-b" "ACTIVE_LINK=$_active" -- /bin/zsh -i -c \
+_home_env "$_home" "MIG_B=$_tmp/release-migrate-b" "ACTIVE_LINK=$_active" -- "$_zsh_bin" -i -c \
   'ln -sfn "$MIG_B" "$ACTIVE_LINK"; . "$HOME/.zshenv"; . "$HOME/.zshrc"; mover_fn' \
   >"$_tmp/s10.out" 2>"$_tmp/s10.err" || :
 if [ "$(tail -n 1 "$_tmp/s10.out")" = B-int ]; then
@@ -374,9 +378,9 @@ fi
 # The release that first loaded ownA_old is gone, so its ledger entry must not
 # let the reload unset the caller's function for the newcomer.
 _reset_home "$_home"
-_install "$_tmp/release-own-a" "$_home" /bin/zsh
+_install "$_tmp/release-own-a" "$_home" "$_zsh_bin"
 _active=$(_active_link_of "$_home")
-_home_env "$_home" "OWN_B=$_tmp/release-own-b" "ACTIVE_LINK=$_active" -- /bin/zsh -i -c \
+_home_env "$_home" "OWN_B=$_tmp/release-own-b" "ACTIVE_LINK=$_active" -- "$_zsh_bin" -i -c \
   'reused_fn() { echo caller; }; ln -sfn "$OWN_B" "$ACTIVE_LINK"; . "$HOME/.zshenv"; reused_fn' \
   >"$_tmp/s11.out" 2>"$_tmp/s11.err" || :
 if [ "$(tail -n 1 "$_tmp/s11.out")" = caller ]; then
@@ -398,12 +402,12 @@ _build activation "$_tmp/release-act-a" || { fail "build the activation bundle f
 _module actmod '' actmod_fn env '' read-only 'actmod_fn() { echo B-env; }'
 _build activation "$_tmp/release-act-b" || { fail "build the activation bundle for B"; exit 1; }
 _reset_home "$_home"
-_install "$_tmp/release-act-a" "$_home" /bin/zsh
+_install "$_tmp/release-act-a" "$_home" "$_zsh_bin"
 _active=$(_active_link_of "$_home")
 # Return to A's INSTALLED release (its store directory and release id), which is
 # how a real `valise release use` comes back to it.
 _store_a=$(readlink "$_active")
-_home_env "$_home" "ACT_A=$_store_a" "ACT_B=$_tmp/release-act-b" "ACTIVE_LINK=$_active" -- /bin/zsh -i -c \
+_home_env "$_home" "ACT_A=$_store_a" "ACT_B=$_tmp/release-act-b" "ACTIVE_LINK=$_active" -- "$_zsh_bin" -i -c \
   'first=$(actmod_fn); ln -sfn "$ACT_B" "$ACTIVE_LINK"; . "$HOME/.zshenv"; . "$HOME/.zshrc"; second=$(actmod_fn); ln -sfn "$ACT_A" "$ACTIVE_LINK"; . "$HOME/.zshenv"; . "$HOME/.zshrc"; third=$(actmod_fn); printf "%s %s %s\n" "$first" "$second" "$third"' \
   >"$_tmp/s12.out" 2>"$_tmp/s12.err" || :
 if [ "$(tail -n 1 "$_tmp/s12.out")" = "A-int B-env A-int" ]; then
@@ -412,19 +416,16 @@ else
   fail "A -> B -> A returned the wrong implementation (got: $(tail -n 1 "$_tmp/s12.out"))"
 fi
 
-if [ ! -x /bin/bash ]; then
-  skip "bash scenarios 13-15: /bin/bash is not installed"
-  printf '\n%s: %d total, %d pass, %d fail, %d skip\n' "startup-state" "$_total" "$_pass" "$_fail" "$_skip"
-  [ "$_fail" -eq 0 ] || exit 1
-  exit 0
+
 fi
 
+if [ -n "$_bash_bin" ]; then
 # Scenario 13: a fresh bash home (no login or rc files) with bash as the login
 # shell. `bash --login -i` reads only the login file, never .bashrc, so the
 # interactive plan must be reachable from that login file.
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/bash
-_home_env "$_home" -- /bin/bash --login -i -c ':' >"$_tmp/s13.out" 2>"$_tmp/s13.err" || :
+_install "$_tmp/release-a" "$_home" "$_bash_bin"
+_home_env "$_home" -- "$_bash_bin" --login -i -c ':' >"$_tmp/s13.out" 2>"$_tmp/s13.err" || :
 if [ "$(_marker_count "$_home/intdep.log")" -eq 1 ]; then
   pass "bash login: an interactive login shell reaches the interactive stage in a fresh home"
 else
@@ -435,16 +436,16 @@ fi
 # Scenario 14: control. A non-login interactive bash reads .bashrc, and a
 # non-interactive `bash -c` stays silent and loads no interactive module.
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/bash
-_home_env "$_home" -- /bin/bash -i -c ':' >"$_tmp/s14.out" 2>"$_tmp/s14.err" || :
+_install "$_tmp/release-a" "$_home" "$_bash_bin"
+_home_env "$_home" -- "$_bash_bin" -i -c ':' >"$_tmp/s14.out" 2>"$_tmp/s14.err" || :
 if [ "$(_marker_count "$_home/intdep.log")" -eq 1 ]; then
   pass "bash: an interactive non-login shell loads the interactive plan once from .bashrc"
 else
   fail "bash: an interactive non-login shell did not load the interactive plan"
 fi
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/bash
-_home_env "$_home" -- /bin/bash -c ':' >"$_tmp/s14b.out" 2>"$_tmp/s14b.err" || :
+_install "$_tmp/release-a" "$_home" "$_bash_bin"
+_home_env "$_home" -- "$_bash_bin" -c ':' >"$_tmp/s14b.out" 2>"$_tmp/s14b.err" || :
 if [ "$(_marker_count "$_home/intdep.log")" -eq 0 ] && [ ! -s "$_tmp/s14b.out" ] && [ ! -s "$_tmp/s14b.err" ]; then
   pass "bash -c stays silent and loads no interactive module"
 else
@@ -455,21 +456,70 @@ fi
 # plan must load exactly once: from .bashrc, with the login file's stage a no-op.
 _reset_home "$_home"
 printf 'if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n' >"$_home/.profile"
-_install "$_tmp/release-a" "$_home" /bin/bash
-_home_env "$_home" -- /bin/bash --login -i -c ':' >"$_tmp/s15.out" 2>"$_tmp/s15.err" || :
+_install "$_tmp/release-a" "$_home" "$_bash_bin"
+_home_env "$_home" -- "$_bash_bin" --login -i -c ':' >"$_tmp/s15.out" 2>"$_tmp/s15.err" || :
 if [ "$(_marker_count "$_home/intdep.log")" -eq 1 ]; then
   pass "bash login: a login file that sources .bashrc loads the interactive plan exactly once"
 else
   fail "bash login: a login file that sources .bashrc loaded the interactive plan $(_marker_count "$_home/intdep.log") times"
 fi
+# The env plan must ALSO run exactly once in that login. A login bash does not
+# set `l` in `$-` (measured), so the repair ticket cannot fire for bash and the
+# rc-chain login must not double-run the env bodies.
+if [ "$(_marker_count "$_home/envdep.count")" -eq 1 ]; then
+  pass "bash login: a login file that sources .bashrc runs the env plan exactly once"
+else
+  fail "bash login: a login file that sources .bashrc ran the env plan $(_marker_count "$_home/envdep.count") times"
+fi
 
+fi
+
+if [ -n "$_bash_bin" ]; then
+# Scenario 16: a bash-only login file must carry the interactive stage even when
+# $SHELL is not bash and there is no ~/.bashrc. Only bash reads .bash_profile, so
+# stage 2 there is inert for every other shell, while leaving it env-only gave an
+# interactive `bash --login -i` no interactive setup at all (bash ignores ENV).
+_reset_home "$_home"
+printf '# user profile\n' >"$_home/.bash_profile"
+_install "$_tmp/release-a" "$_home" "$_zsh_bin"
+if grep -q 'case \$- in \*i\*)' "$_home/.bash_profile" 2>/dev/null; then
+  pass "zsh-default home: a bash-only login file carries the interactive stage"
+else
+  fail "zsh-default home: .bash_profile was left env-only, so an interactive login bash never reaches stage 2"
+fi
+_home_env "$_home" -- "$_bash_bin" --login -i -c ':' >"$_tmp/s16.out" 2>"$_tmp/s16.err" || :
+if [ "$(_marker_count "$_home/intdep.log")" -eq 1 ]; then
+  pass "zsh-default home: bash --login -i reaches the interactive stage through .bash_profile"
+else
+  fail "zsh-default home: bash --login -i did not run the interactive module"
+  cat "$_tmp/s16.err" >&2
+fi
+
+# Scenario 17: a DANGLING .bash_profile symlink is ignored by bash (stat returns
+# ENOENT) and it falls back to .profile, so the block must land in .profile, not
+# in a file bash never reads.
+_reset_home "$_home"
+ln -s /nonexistent-valise-target "$_home/.bash_profile"
+_install "$_tmp/release-a" "$_home" "$_bash_bin"
+if [ -f "$_home/.profile" ] && grep -q '# BEGIN valise managed block' "$_home/.profile" 2>/dev/null &&
+  [ ! -e "$_home/.bash_profile" ]; then
+  pass "a dangling .bash_profile symlink does not shadow .profile"
+else
+  fail "a dangling .bash_profile symlink was treated as the bash login file"
+  ls -l "$_home/.bash_profile" "$_home/.profile" >&2 2>/dev/null || :
+fi
+fi
+
+if [ -n "$_zsh_bin" ]; then
 # Scenario 16: doctor. A fresh zsh install writes env-only blocks into .zprofile
 # and .zshenv; those are current, so doctor must not call them a legacy shape.
 # A genuine single-stage rc-file block (no interactivity gate) must still be
-# reported.
+# reported, and so must one in an ENV-stage file: a 0.2-era block in .zshenv
+# ran interactive setup in every `zsh -c`, which is the bug 0.3 fixed, and the
+# gate heuristic alone cannot tell it from a current env-only block.
 _reset_home "$_home"
-_install "$_tmp/release-a" "$_home" /bin/zsh
-_home_env "$_home" SHELL=/bin/zsh -- "$_valise" doctor >"$_tmp/s16.out" 2>&1 || :
+_install "$_tmp/release-a" "$_home" "$_zsh_bin"
+_home_env "$_home" SHELL="$_zsh_bin" -- "$_valise" doctor >"$_tmp/s16.out" 2>&1 || :
 if grep -q 'legacy single-stage' "$_tmp/s16.out"; then
   fail "doctor reports a fresh install's env-only block as legacy"
   grep 'legacy' "$_tmp/s16.out" >&2
@@ -478,16 +528,19 @@ else
 fi
 _reset_home "$_home"
 printf '# BEGIN valise managed block\n: single stage\n# END valise managed block\n' >"$_home/.zshrc"
-_home_env "$_home" SHELL=/bin/zsh -- "$_valise" doctor >"$_tmp/s16b.out" 2>&1 || :
+printf '# BEGIN valise managed block\n: single stage\n# END valise managed block\n' >"$_home/.zshenv"
+_home_env "$_home" SHELL="$_zsh_bin" -- "$_valise" doctor >"$_tmp/s16b.out" 2>&1 || :
 # doctor exits nonzero via die on findings, so || : is expected here; what
 # must NOT happen is a set -u unbound-variable crash before the footer.
 if grep -q 'zshrc has a legacy single-stage block' "$_tmp/s16b.out" &&
+  grep -q 'zshenv has a legacy single-stage block' "$_tmp/s16b.out" &&
   grep -q 'some checks failed' "$_tmp/s16b.out" &&
   ! grep -q 'unbound variable' "$_tmp/s16b.out"; then
-  pass "doctor still reports a genuine single-stage rc-file block"
+  pass "doctor reports a genuine single-stage rc-file block and one in an env-stage file"
 else
-  fail "doctor did not report a genuine single-stage rc-file block"
+  fail "doctor did not report a genuine single-stage block in every file"
   cat "$_tmp/s16b.out" >&2
+fi
 fi
 
 printf '\n%s: %d total, %d pass, %d fail, %d skip\n' "startup-state" "$_total" "$_pass" "$_fail" "$_skip"

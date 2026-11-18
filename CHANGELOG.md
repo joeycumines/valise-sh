@@ -39,9 +39,17 @@ for startup state, environment capture, and release transactions.
   `valise_path_remove` removes every occurrence of the named entries and drops
   empty components, and `valise_path_normalize` drops empty components and
   duplicates in place. All five are idempotent, safe under `set -u` with an
-  unset `PATH`, preserve the caller's `IFS` and noglob option, match entries
-  byte-exactly when they contain pattern metacharacters, and reject empty or
-  colon-bearing arguments with a diagnostic.
+  unset `PATH`, and leave the caller's `IFS` and shell options alone: they walk
+  PATH one colon-delimited component at a time instead of word-splitting it, so
+  nothing has to be saved, restored, or switched off. Every comparison is
+  byte-exact, so a metacharacter entry never matches a lookalike and a
+  case-distinct entry survives even under `shopt -s nocasematch`. Entries that
+  contain a glob character are compared literally, never expanded against the
+  filesystem.
+  `valise_path_contains` and `valise_path_remove` reject an empty or
+  colon-bearing argument with a diagnostic on stderr, and `valise_path_remove`
+  also returns nonzero and leaves `PATH` exactly as it found it.
+  `valise_path_prepend` and `valise_path_append` skip empty arguments.
 
 ### Changed
 
@@ -157,9 +165,10 @@ for startup state, environment capture, and release transactions.
 - `valise test`/`valise run` no longer leak `VALISE_MODULE_ROOT` and
   `_valise_plan_carried` into the module body, so a test can catch a module
   that reads them at runtime instead of load time.
-- The managed block tolerates an unset `PATH` under `set -u`, treats a
-  dangling `$ENV` symlink as absent, and clears the env success markers when
-  the env plan file disappears mid-startup.
+- The managed block tolerates an unset `PATH` under `set -u`, leaves a
+  dangling `$ENV` symlink alone (a symlink belongs to whoever created it, the
+  same rule `valise install` follows for a symlinked shim), and clears the env
+  success markers when the env plan file disappears mid-startup.
 - Compile rejects two modules that share a display name in one closure (the
   export-ownership ledger names providers by display name).
 

@@ -215,24 +215,27 @@ fi
 # to the sh/ksh diagnostics branch.
 
 if _env; then
-  # Restore a good block in .profile, then rewrite it as a legacy
-  # single-stage block (markers present, no $- gate inside).
+  # A legacy block is identified by the two-stage MARKER it never wrote, not by
+  # a missing gate: `.profile` is env-stage and legitimately has no gate unless
+  # bash has an rc chain, so stripping the gate on a non-bash host produced a
+  # byte-identical file and asserted nothing (that is how this scenario passed
+  # on macOS and failed on Linux). The block is built from `init posix` and the
+  # marker line is removed, which is the 0.2 shape on every platform.
   if [ -f "$HOME/.profile" ]; then
-    # Regenerate a legacy single-stage block: keep the markers, drop the
-    # whole stage-2 'case $- in *i*) ... esac' gate.
-    awk '
-      /^  case \$- in \*i\*\)$/ { skip = 1; next }
-      skip && /^  esac$/ { skip = 0; next }
-      skip { next }
-      { print }
-    ' "$HOME/.profile" >"$_test_root/legacy-profile"
-    cp "$_test_root/legacy-profile" "$HOME/.profile"
-    "$_valise" doctor >"$_test_root/doctor-legacy.out" 2>&1 || :
-    if grep -F 'legacy single-stage block' "$_test_root/doctor-legacy.out" >/dev/null 2>&1; then
-      pass "doctor flags a legacy single-stage block as upgradeable"
+    "$_valise" init posix >"$_test_root/legacy-block.txt" 2>/dev/null || :
+    if grep -q '_valise_stage1_ok=' "$_test_root/legacy-block.txt" 2>/dev/null; then
+      grep -v '_valise_stage1_ok=' "$_test_root/legacy-block.txt" >"$_test_root/legacy-profile"
+      cp "$_test_root/legacy-profile" "$HOME/.profile"
+      "$_valise" doctor >"$_test_root/doctor-legacy.out" 2>&1 || :
+      if grep -F "$HOME/.profile has a legacy single-stage block" "$_test_root/doctor-legacy.out" >/dev/null 2>&1; then
+        pass "doctor flags a legacy single-stage block as upgradeable"
+      else
+        fail "doctor did not flag the legacy single-stage block"
+        cat "$_test_root/doctor-legacy.out" >&2
+      fi
     else
-      fail "doctor did not flag the legacy single-stage block"
-      cat "$_test_root/doctor-legacy.out" >&2
+      fail "the generated block carries no _valise_stage1_ok marker, so the legacy case cannot be constructed"
+      cat "$_test_root/legacy-block.txt" >&2 2>/dev/null || :
     fi
     # Restore the good two-stage block for later scenarios.
     "$_valise" install >/dev/null 2>&1 || :

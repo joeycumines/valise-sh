@@ -444,6 +444,76 @@ else
   cat "$_tmp/owned-reload.out" "$_tmp/owned-reload.err" >&2
 fi
 
+# A module that FAILS on a reload must take its ownership token with it. The
+# prelude unsets the function; if the token survived, the next reload would
+# find it and silently unset whatever the caller had since defined under that
+# name, instead of reporting the collision.
+_stale_src="$_tmp/stale-src"
+_stale_rel="$_tmp/stale-rel"
+mkdir -p "$_stale_src/module.d" "$_stale_src/modules"
+: >"$_stale_src/valise.conf"
+printf '%s\n' 'name=stalemod' 'version=' 'side_effect=read-only' 'requires=' 'optional=' \
+  'shells=posix' 'platforms=any' 'exports=stale_fn' 'load=modules/stalemod.sh' \
+  >"$_stale_src/module.d/stalemod.meta"
+printf '%s\n' '[ ! -f "$STALE_FAIL" ] || return 42' 'stale_fn() { printf "OWN\n"; }' \
+  >"$_stale_src/modules/stalemod.sh"
+printf '# bundle\tshell\troots\ndefault\tbash\tstalemod\n' >"$_stale_src/bundles.tsv"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_stale_src/variants.tsv"
+rm -rf "$_stale_rel"
+( cd "$_stale_src" && "$_valise" build "$_stale_rel" ) >/dev/null 2>&1
+STALE_FAIL="$_tmp/stale-fail" STALE_ERR="$_tmp/stale.err" VALISE_MODULE_ROOT="$_stale_rel" /bin/bash -c '
+  . "$VALISE_MODULE_ROOT/plans/bash.sh"
+  printf "first_owned=[%s]\n" "${_valise_plan_owned:-}"
+  : >"$STALE_FAIL"
+  VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh" 2>/dev/null
+  printf "failed_owned=[%s]\n" "${_valise_plan_owned:-}"
+  rm -f "$STALE_FAIL"
+  stale_fn() { printf "CALLER\n"; }
+  VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh" 2>>"$STALE_ERR"
+  printf "final_owned=[%s]\n" "${_valise_plan_owned:-}"
+  printf "caller_fn=%s\n" "$(stale_fn)"
+' >"$_tmp/stale.out" 2>/dev/null || :
+if grep -Fx 'failed_owned=[]' "$_tmp/stale.out" >/dev/null &&
+  grep -Fx 'caller_fn=CALLER' "$_tmp/stale.out" >/dev/null &&
+  grep -F 'declared export already exists before load: stale_fn' "$_tmp/stale.err" >/dev/null; then
+  pass "a failed reload drops the export's ownership token instead of claiming a function valise no longer provides"
+else
+  fail "a failed reload left a stale ownership token that unset a caller's function"
+  cat "$_tmp/stale.out" "$_tmp/stale.err" >&2 2>/dev/null || :
+fi
+
+# The ownership token must be dropped by the PRELUDE, on every shell, BEFORE the
+# module body can re-add it. zsh does not word-split an unquoted expansion, so a
+# `for tok in $ledger` implementation silently kept every token there while
+# looking correct under bash. Each shell runs the prelude alone, against a
+# hand-built ledger, so only the removal is under test.
+sed -n '/^if \[ "\${VALISE_RELOAD:-}" = 1 \]; then$/,/^fi$/p' \
+  "$_tmp/release-reload/plans/bash.sh" >"$_tmp/prune-prelude.sh"
+if [ -s "$_tmp/prune-prelude.sh" ]; then
+  for _pr_sh in /bin/sh /bin/dash /bin/bash /bin/zsh /bin/ksh; do
+    [ -x "$_pr_sh" ] || continue
+    _pr_out=$(
+      "$_pr_sh" -c '
+        . "$1"
+        reload_probe_loaded() { :; }
+        _valise_plan_owned="a:b reload_probe:reload_probe_loaded c:d"
+        VALISE_RELOAD=1
+        . "$1"
+        printf "owned=[%s] fn=%s\n" "$_valise_plan_owned" \
+          "$(command -v reload_probe_loaded >/dev/null 2>&1 && echo set || echo unset)"
+      ' -- "$_tmp/prune-prelude.sh" 2>&1
+    )
+    if printf '%s\n' "$_pr_out" | grep -Fxq 'owned=[a:b c:d] fn=unset'; then
+      pass "the reload prelude drops its ownership token and unsets the function ($_pr_sh)"
+    else
+      fail "the reload prelude did not drop its ownership token under $_pr_sh"
+      printf '%s\n' "$_pr_out" >&2
+    fi
+  done
+else
+  fail "could not extract the reload prelude from the compiled plan"
+fi
+
 # Phase migration across a release switch: a module that was env-phase in the
 # release this process loaded and is interactive-phase in the next one must be
 # reloaded when the block re-sources. The reload decision is per RELEASE, not

@@ -138,7 +138,7 @@ devtool_runner() {
         '  if [ "$_valise_dev_status" -eq 0 ] && [ -f "$_valise_dev_int" ]; then' \
         '    . "$_valise_dev_int" || _valise_dev_status=$?' \
         '  fi' \
-        '  unset VALISE_RELOAD VALISE_MODULE_ROOT' \
+        '  unset VALISE_RELOAD VALISE_MODULE_ROOT _valise_plan_carried' \
         '  return "$_valise_dev_status"' \
         '}' \
         'VALISE_MODULE_ROOT=$_valise_dev_release' \
@@ -154,8 +154,8 @@ devtool_runner() {
         "    printf '%s\\n' 'valise: the interactive modules failed to load' >&2" \
         '    exit 97' \
         '  }' \
-        '  unset VALISE_MODULE_ROOT' \
-        'fi'
+        'fi' \
+        'unset VALISE_MODULE_ROOT _valise_plan_carried'
       # The body goes LAST: it calls valise_test_reload, which needs the plan
       # paths, so they must survive until it runs.
       "$_dr_cat" "$4"
@@ -197,6 +197,40 @@ devtool_exec() {
 }
 
 # --- env ---
+
+# _eec_byte_count <tr> <wc> <scratch-dir> <input-file> <tr-args...>
+# Print the byte count of tr's output, or fail when tr itself fails.
+#
+# A pipeline cannot be used: `tr ... | wc -c` reports wc's status, so a tr that
+# cannot read its input leaves wc counting zero bytes and exiting 0 - a clean
+# "no offending bytes" result from a scan that never ran. tr writes a scratch
+# file whose status is checked first, and wc counts that file.
+_eec_byte_count() {
+  _ebc_tr=$1
+  _ebc_wc=$2
+  _ebc_scratch=$3
+  _ebc_input=$4
+  shift 4
+  _ebc_rc=1
+  if [ -n "$_ebc_tr" ] && [ -n "$_ebc_wc" ] &&
+    LC_ALL=C "$_ebc_tr" "$@" <"$_ebc_input" >"$_ebc_scratch/count.out" 2>/dev/null; then
+    _ebc_rc=0
+    # wc -c pads with leading spaces on BSD; the caller strips whitespace
+    # before its digit check, so the raw output is passed through.
+    "$_ebc_wc" -c <"$_ebc_scratch/count.out" || _ebc_rc=1
+  fi
+  _ebc_status=$_ebc_rc
+  unset _ebc_tr _ebc_wc _ebc_scratch _ebc_input _ebc_rc
+  # Return a literal, not "$_ebc_status": the caller's cleanup contract is that
+  # no private variable survives the call, and a value can only be returned from
+  # a variable that still exists.
+  if [ "$_ebc_status" -eq 0 ]; then
+    unset _ebc_status
+    return 0
+  fi
+  unset _ebc_status
+  return 1
+}
 
 # env_export_capture <shell> [release-dir]: run a release's env plan for
 # <shell> in a quarantined environment and print the exported scalar
@@ -375,6 +409,11 @@ env_export_capture() {
   # count is what decides, so a continuation line that happens to look like
   # NAME=value can never be mistaken for a real variable.
   _eec_result=0
+  # Claims a diagnostic is printed, so the fallback at the end never repeats it.
+  # It MUST start defined: the script runs `set -eu`, and most failure paths set
+  # _eec_result without claiming a message, so an unset read below would abort
+  # with "unbound variable" instead of printing the message this flag exists to
+  # guarantee.
   _eec_diagnosed=0
   _eec_tr=$(trusted_utility_path tr) || _eec_result=1
   _eec_wc=$(trusted_utility_path wc) || _eec_result=1
@@ -394,12 +433,16 @@ env_export_capture() {
       # Without a trusted iconv the UTF-8 check cannot run, so a value with any byte
       # above 0x7F is refused rather than published unchecked. ASCII is valid UTF-8
       # by definition and still exports.
-      _eec_high=$(LC_ALL=C "$_eec_tr" -d '\000-\177' <"$_eec_scratch/target" 2>/dev/null |
-        "$_eec_wc" -c) || _eec_result=1
+      _eec_high=$(_eec_byte_count "$_eec_tr" "$_eec_wc" "$_eec_scratch" \
+        "$_eec_scratch/target" -d '\000-\177') || _eec_result=1
       _eec_high=${_eec_high#"${_eec_high%%[![:space:]]*}"}
       _eec_high=${_eec_high%"${_eec_high##*[![:space:]]}"}
       case "${_eec_high:-}" in
-      '' | *[!0-9]*) _eec_result=1 ; _eec_diagnosed=1 ;;
+      '' | *[!0-9]*)
+        printf 'valise: error: the env capture for shell %s could not count its bytes\n' "$_eec_shell" >&2
+        _eec_result=1
+        _eec_diagnosed=1
+        ;;
       0) ;;
       *)
         printf 'valise: error: the env plan produced a non-ASCII value, and no trusted iconv is available to check it as UTF-8\n' >&2
@@ -412,12 +455,12 @@ env_export_capture() {
   if [ "$_eec_result" -eq 0 ]; then
     for _eec_dump in base target; do
       _eec_dump_file="$_eec_scratch/$_eec_dump"
-      _eec_lf=$(LC_ALL=C "$_eec_tr" -cd '\012' <"$_eec_dump_file" 2>/dev/null |
-        "$_eec_wc" -c) || _eec_result=1
+      _eec_lf=$(_eec_byte_count "$_eec_tr" "$_eec_wc" "$_eec_scratch" \
+        "$_eec_dump_file" -cd '\012') || _eec_result=1
       _eec_c0=
       [ "$_eec_result" -ne 0 ] ||
-        _eec_c0=$(LC_ALL=C "$_eec_tr" -cd '\001-\010\013-\037' <"$_eec_dump_file" 2>/dev/null |
-          "$_eec_wc" -c) || _eec_result=1
+        _eec_c0=$(_eec_byte_count "$_eec_tr" "$_eec_wc" "$_eec_scratch" \
+          "$_eec_dump_file" -cd '\001-\010\013-\037') || _eec_result=1
       [ "$_eec_result" -eq 0 ] || break
       # wc -c pads with leading spaces on BSD, so strip whitespace in shell
       # before the digit check: a failed tr/wc (empty or non-digit) is a
@@ -438,8 +481,14 @@ env_export_capture() {
       # that starts a record; a byte on a continuation line has no reliable owner
       # in the dump, so the message says so instead of naming a neighbour.
       _eec_result=1
+      # A diagNOSTIC is claimed only once one is printed, here or by the naming
+      # pass below; setting the flag first would suppress the fallback message
+      # when tr or awk then failed, failing the capture with empty stderr.
       _eec_diagnosed=1
-      "$_eec_tr" '\000' '\012' <"$_eec_dump_file" >"$_eec_scratch/$_eec_dump.lf" || break
+      if ! LC_ALL=C "$_eec_tr" '\000' '\012' <"$_eec_dump_file" >"$_eec_scratch/$_eec_dump.lf"; then
+        printf 'valise: error: the env capture for shell %s could not translate its dump\n' "$_eec_shell" >&2
+        break
+      fi
       _eec_named=0
       LC_ALL=C "$_eec_awk" '
         BEGIN { lastkey = ""; printed = 0 }
@@ -476,8 +525,8 @@ env_export_capture() {
   if [ "$_eec_result" -eq 0 ]; then
     # No value contains LF (proved above), so a NUL -> LF translation now gives
     # an unambiguous one-record-per-line stream for the diff.
-    "$_eec_tr" '\000' '\012' <"$_eec_scratch/base" >"$_eec_scratch/base.lf" || _eec_result=1
-    "$_eec_tr" '\000' '\012' <"$_eec_scratch/target" >"$_eec_scratch/target.lf" || _eec_result=1
+    LC_ALL=C "$_eec_tr" '\000' '\012' <"$_eec_scratch/base" >"$_eec_scratch/base.lf" || _eec_result=1
+    LC_ALL=C "$_eec_tr" '\000' '\012' <"$_eec_scratch/target" >"$_eec_scratch/target.lf" || _eec_result=1
   fi
   if [ "$_eec_result" -eq 0 ]; then
     # Diff the two dumps. Both sides come from the SAME interpreter and fixture
@@ -506,7 +555,19 @@ env_export_capture() {
     if [ "$_eec_result" -eq 0 ]; then
       _eec_nc1=$(printf '\357\277\276')
       _eec_nc2=$(printf '\357\277\277')
+      # grep's status distinguishes match (0), no match (1) and error (2+).
+      # Reading an error as "no noncharacters" would publish a value this check
+      # never examined, so anything above 1 refuses.
       if LC_ALL=C "$_eec_grep" -q -F -e "$_eec_nc1" -e "$_eec_nc2" "$_eec_scratch/diff" 2>/dev/null; then
+        _eec_nc_found=0
+      else
+        _eec_nc_found=$?
+      fi
+      if [ "$_eec_nc_found" -gt 1 ]; then
+        printf 'valise: error: the env capture for shell %s could not be scanned for XML noncharacters\n' "$_eec_shell" >&2
+        _eec_result=1
+        _eec_diagnosed=1
+      elif [ "$_eec_nc_found" -eq 0 ]; then
         _eec_nc_key=$(LC_ALL=C "$_eec_grep" -F -e "$_eec_nc1" -e "$_eec_nc2" "$_eec_scratch/diff" 2>/dev/null |
           LC_ALL=C "$_eec_awk" -F= 'NR == 1 { print $1; exit }')
         printf 'valise: error: %s is set to a value containing U+FFFE or U+FFFF, which XML 1.0 forbids; GUI env formats cannot represent it
@@ -515,6 +576,7 @@ env_export_capture() {
         _eec_result=1
         _eec_diagnosed=1
       fi
+      unset _eec_nc_found
     fi
   fi
   if [ "$_eec_result" -eq 0 ]; then
@@ -551,7 +613,7 @@ env_export_capture() {
   _eec_rc=$_eec_result
   unset _eec_shell _eec_active _eec_plan _eec_interp _eec_env _eec_sh _eec_awk _eec_scratch _eec_mkdir _eec_probe \
     _eec_env_abs _eec_plan_err _eec_status _eec_line
-  unset _eec_tr _eec_wc _eec_iconv _eec_result _eec_diagnosed _eec_dump _eec_named _eec_high _eec_grep _eec_nc1 _eec_nc2 _eec_nc_key
+  unset _eec_tr _eec_wc _eec_iconv _eec_result _eec_diagnosed _eec_dump _eec_named _eec_high _eec_grep _eec_nc1 _eec_nc2 _eec_nc_key _ebc_status
   return "$_eec_rc"
 }
 
@@ -589,6 +651,22 @@ env_export_emit() {
         }
         return 0
       }
+      # Escaping is a character scan, not gsub. A gsub replacement string has
+      # its own backslash rules: "\\\\" (two backslashes) yields TWO on BWK,
+      # gawk, gawk --traditional and mawk, but ONE on BusyBox awk and
+      # `gawk --posix` - measured - which writes a\\b as "a\b" (systemd reads
+      # it as ab) and lets a trailing backslash escape the closing quote. A
+      # substr loop produces the same bytes on all six.
+      function dq_escape(val,   i, c, out) {
+        out = ""
+        for (i = 1; i <= length(val); i++) {
+          c = substr(val, i, 1)
+          if (c == "\\") out = out "\\\\"
+          else if (c == "\"") out = out "\\\""
+          else out = out c
+        }
+        return out
+      }
       BEGIN { out = ""; bad = 0 }
       /^[A-Za-z_][A-Za-z0-9_]*=/ {
         key = $1
@@ -601,8 +679,7 @@ env_export_emit() {
         }
         gsub(/\$/, "$$", val)
         if (needs_quoting(val)) {
-          gsub(/\\/, "\\\\", val); gsub(/"/, "\\\"", val)
-          out = out sprintf("%s=\"%s\"\n", key, val)
+          out = out sprintf("%s=\"%s\"\n", key, dq_escape(val))
         } else {
           out = out sprintf("%s=%s\n", key, val)
         }

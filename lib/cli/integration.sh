@@ -32,9 +32,9 @@
 #     startup-file stage has been reached.
 #
 # Three private markers make re-evaluation safe and cheap:
-#   _valise_env_tried / _valise_int_tried  the release this process has
-#     already attempted in each stage. Neither is exported, so a child process
-#     always attempts the plan for itself (functions are not inherited).
+#   _valise_env_tried  the release this process has already sourced the env
+#     plan for. It is not exported, so a child process always attempts the plan
+#     for itself (functions are not inherited).
 #     Whenever the block is about to source a plan for a release this process
 #     has already sourced EITHER stage of, it sets VALISE_RELOAD=1 for that
 #     source (a plain assignment: the plan reads it as a shell variable, so it
@@ -132,7 +132,7 @@ print_posix_integration() {
     '      _valise_env_carry=${_valise_plan_carried:-}' \
     '      if [ "$_valise_rc" -eq 0 ]; then' \
     '        _valise_env_ok=1' \
-    '        _valise_env_path=$PATH' \
+    '        _valise_env_path=${PATH-}' \
     '        _valise_profile_loaded=$_valise_release_id' \
     '        case $- in' \
     '        *l*) [ -n "${_valise_env_repair:-}" ] || _valise_env_repair=armed ;;' \
@@ -170,7 +170,10 @@ print_posix_integration() {
       '        _valise_rc=$?' \
       '        unset VALISE_MODULE_ROOT' \
       '        if [ -n "$_valise_had" ]; then VALISE_RELOAD=$_valise_old; else unset VALISE_RELOAD; fi' \
-      '        if [ "$_valise_rc" -eq 0 ]; then _valise_interactive_loaded=$_valise_release_id; fi' \
+      '        if [ "$_valise_rc" -eq 0 ]; then' \
+      '          _valise_interactive_loaded=$_valise_release_id' \
+      '          _valise_env_path=${PATH-}' \
+      '        fi' \
       '      else' \
       '        _valise_interactive_loaded=$_valise_release_id' \
       '      fi' \
@@ -180,7 +183,7 @@ print_posix_integration() {
       '  fi'
   fi
   printf '%s\n' \
-    '  unset _valise_release_id _valise_want _valise_had _valise_old _valise_rc _valise_seen _valise_stage1_ok _valise_int_tried' \
+    '  unset _valise_release_id _valise_want _valise_had _valise_old _valise_rc _valise_seen _valise_stage1_ok' \
     'fi' \
     'unset _valise_plan_carried'
   if [ -n "$_pix_shim_literal" ]; then
@@ -275,9 +278,9 @@ integration_has_managed_block() {
 integration_shell_files() {
   case "$1" in
   bash)
-    if [ -e "$2/.bash_profile" ] || [ -L "$2/.bash_profile" ]; then
+    if [ -e "$2/.bash_profile" ]; then
       printf '%s\n' "$2/.bash_profile"
-    elif [ -e "$2/.bash_login" ] || [ -L "$2/.bash_login" ]; then
+    elif [ -e "$2/.bash_login" ]; then
       printf '%s\n' "$2/.bash_login"
     else
       printf '%s\n' "$2/.profile"
@@ -314,10 +317,18 @@ integration_shell_files() {
 # prints one "<stage>\t<path>" record per line.
 posix_startup_targets() {
   # A login bash reads the FIRST of .bash_profile, .bash_login and .profile that
-  # exists, and never .bashrc. The file it reads therefore carries the
-  # interactive stage whenever bash has an rc chain, placed at its END: a
-  # `. ~/.bashrc` the user wrote above the block has already run, and the
-  # release-keyed guard keeps the interactive plan from loading twice.
+  # exists, and never .bashrc. Those two bash-only files therefore ALWAYS carry
+  # the interactive stage, placed at its END: only bash reads them, so stage 2
+  # there is inert for every other shell, and leaving them env-only left a
+  # `bash --login -i` in a zsh-default home (no .bashrc) with no interactive
+  # setup at all, because bash ignores ENV. A `. ~/.bashrc` the user wrote above
+  # the block has already run by then, and the release-keyed guard keeps the
+  # interactive plan from loading twice.
+  #
+  # Precedence follows what bash ACTUALLY reads. A dangling .bash_profile or
+  # .bash_login symlink is ignored by bash (stat returns ENOENT) and it falls
+  # back to .profile, so only an existing target shadows .profile; the write
+  # path still skips a symlink it is asked to write.
   _pst_bash_rc=0
   case "${SHELL:-}" in
   */bash | bash) _pst_bash_rc=1 ;;
@@ -326,18 +337,21 @@ posix_startup_targets() {
   _pst_bash_stage=env
   [ "$_pst_bash_rc" -eq 0 ] || _pst_bash_stage=all
   _pst_bash_login=$1/.profile
-  if [ -e "$1/.bash_profile" ] || [ -L "$1/.bash_profile" ]; then
+  _pst_login_stage=$_pst_bash_stage
+  if [ -e "$1/.bash_profile" ]; then
     _pst_bash_login=$1/.bash_profile
-  elif [ -e "$1/.bash_login" ] || [ -L "$1/.bash_login" ]; then
+    _pst_login_stage=all
+  elif [ -e "$1/.bash_login" ]; then
     _pst_bash_login=$1/.bash_login
+    _pst_login_stage=all
   fi
   # .profile is always written: sh, ksh and dash read it at login. It is the
   # bash login file only when no .bash_profile or .bash_login exists.
   if [ "$_pst_bash_login" != "$1/.profile" ]; then
     printf 'env\t%s\n' "$1/.profile"
   fi
-  printf '%s\t%s\n' "$_pst_bash_stage" "$_pst_bash_login"
-  unset _pst_bash_rc _pst_bash_stage _pst_bash_login
+  printf '%s\t%s\n' "$_pst_login_stage" "$_pst_bash_login"
+  unset _pst_bash_rc _pst_bash_stage _pst_bash_login _pst_login_stage
   case "${SHELL:-}" in
   */bash | bash) printf 'all\t%s\n' "$1/.bashrc" ;;
   *) if [ -e "$1/.bashrc" ] || [ -L "$1/.bashrc" ]; then printf 'all\t%s\n' "$1/.bashrc"; fi ;;
@@ -509,9 +523,11 @@ cmd_doctor() {
   fi
 
   if [ -n "${HOME:-}" ]; then
-    # Check the startup files the running shell actually reads. The shell is
-    # taken from $SHELL, which is the same signal install uses to pick its
-    # per-shell startup file.
+    # Check the startup files the running shell actually reads, using the SAME
+    # normalized home the write path uses (HOME=/ must not become //.zshenv).
+    _doctor_home=$(path_normalize "$HOME") || die "cannot resolve HOME"
+    # The shell is taken from $SHELL, which is the same signal install uses to
+    # pick its per-shell startup file.
     if [ "$_doctor_check_integration" -eq 1 ]; then
       _doctor_shell=""
       case "${SHELL:-}" in
@@ -532,7 +548,7 @@ cmd_doctor() {
       # through a staging file instead.
       _doctor_cand_file=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-doctor-candidates.XXXXXX") ||
         die "cannot create doctor candidate staging file"
-      integration_shell_files "$_doctor_shell" "$HOME" >"$_doctor_cand_file"
+      integration_shell_files "$_doctor_shell" "$_doctor_home" >"$_doctor_cand_file"
       while IFS= read -r _doctor_candidate; do
         [ -n "$_doctor_candidate" ] || continue
         _doctor_candidates="$_doctor_candidates $_doctor_candidate"
@@ -563,48 +579,77 @@ cmd_doctor() {
           "${_doctor_shell:-the current shell}" "$_doctor_candidates"
         _status=1
       fi
-      # Archetype diagnostics: a legacy single-stage block (no $- gate inside
-      # the markers) is upgradeable; an sh/ksh login shell whose ENV does not
-      # point at the valise shim misses interactive subshells; zsh without a
-      # .zshenv block misses non-login 'zsh -c' env.
+      # Archetype diagnostics: a legacy single-stage block is upgradeable; an
+      # sh/ksh login shell whose ENV does not point at the valise shim misses
+      # interactive subshells; zsh without a .zshenv block misses non-login
+      # 'zsh -c' env.
       _doctor_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
-      # Every startup file valise manages is inspected, not only ~/.profile: an
-      # upgrade from a single-stage install may have left a legacy block in
-      # .bashrc, .zshrc or .zprofile alone.
-      # The file a login bash reads carries the interactive stage when bash has an
-      # rc chain (see posix_startup_targets), so it is judged by the gate exactly
-      # like the rc-stage files. Every other env-only file is the current shape.
+      # A block is CURRENT when it can reach the interactive stage where one is
+      # expected, and env-only files are current by carrying the two-stage
+      # shape. The shape is decided by a marker the current block always emits:
+      # `_valise_stage1_ok`, which a 0.2-era single-stage block never wrote.
+      # Without that marker an env-stage block is indistinguishable from a
+      # legacy combined block, so .zshenv and .profile (the exact bug 0.3 fixed
+      # for `zsh -c`) would be accepted forever.
       _doctor_bash_rc=0
       case "${SHELL:-}" in
       */bash | bash) _doctor_bash_rc=1 ;;
       esac
-      if [ -e "$HOME/.bashrc" ] || [ -L "$HOME/.bashrc" ]; then _doctor_bash_rc=1; fi
+      if [ -e "$_doctor_home/.bashrc" ] || [ -L "$_doctor_home/.bashrc" ]; then _doctor_bash_rc=1; fi
       _doctor_bash_login=.profile
-      if [ -e "$HOME/.bash_profile" ] || [ -L "$HOME/.bash_profile" ]; then
+      if [ -e "$_doctor_home/.bash_profile" ]; then
         _doctor_bash_login=.bash_profile
-      elif [ -e "$HOME/.bash_login" ] || [ -L "$HOME/.bash_login" ]; then
+      elif [ -e "$_doctor_home/.bash_login" ]; then
         _doctor_bash_login=.bash_login
       fi
+      # .bash_profile and .bash_login are read only by bash, so they always
+      # carry stage 2 (posix_startup_targets writes them as `all`); .bashrc and
+      # .zshrc are rc-stage files; every other managed file must be env-stage.
       for _doctor_name in $VALISE_STARTUP_NAMES; do
-        _doctor_file="$HOME/$_doctor_name"
+        _doctor_file="$_doctor_home/$_doctor_name"
         [ -f "$_doctor_file" ] && [ ! -L "$_doctor_file" ] || continue
         integration_has_posix_block "$_doctor_file" || continue
+        _doctor_want_gate=0
         case "$_doctor_name" in
-        .bashrc | .zshrc) ;;
+        .bashrc | .zshrc) _doctor_want_gate=1 ;;
+        .bash_profile | .bash_login) _doctor_want_gate=1 ;;
         "$_doctor_bash_login")
-          [ "$_doctor_bash_rc" -eq 1 ] || continue
+          # The bash login file carries stage 2 whenever bash has an rc chain.
+          # It is .profile when neither bash-only file exists.
+          [ "$_doctor_bash_rc" -eq 1 ] && _doctor_want_gate=1
           ;;
-        *) continue ;;
         esac
-        if ! "$_doctor_awk" '
-          /^# BEGIN valise managed block$/ { inblock = 1 }
+        if ! "$_doctor_awk" -v want_gate="$_doctor_want_gate" '
+          /^# BEGIN valise managed block$/ { inblock = 1; gate = 0; marker = 0; next }
           inblock && /case \$- in \*i\*\)/ { gate = 1 }
-          /^# END valise managed block$/ { inblock = 0 }
-          END { exit gate ? 0 : 1 }
+          inblock && index($0, "_valise_stage1_ok=") == 1 { marker = 1 }
+          /^# END valise managed block$/ {
+            inblock = 0
+            # A file that should reach stage 2 needs the gate; a block with no
+            # two-stage marker anywhere is the legacy single-stage shape.
+            if (want_gate && !gate) bad = 1
+            if (!marker) bad = 1
+          }
+          END { exit bad ? 1 : 0 }
         ' "$_doctor_file"; then
           printf '  warn: %s has a legacy single-stage block; run valise install again to upgrade to the two-stage block\n' "$_doctor_file"
         fi
       done
+      # The $ENV shim is an rc-stage managed file too.
+      if _doctor_shim_probe=$(env_shim_path); then
+        if [ -f "$_doctor_shim_probe" ] && [ ! -L "$_doctor_shim_probe" ] &&
+          integration_has_posix_block "$_doctor_shim_probe"; then
+          if ! "$_doctor_awk" '
+            /^# BEGIN valise managed block$/ { inblock = 1; gate = 0; marker = 0; next }
+            inblock && /case \$- in \*i\*\)/ { gate = 1 }
+            inblock && index($0, "_valise_stage1_ok=") == 1 { marker = 1 }
+            /^# END valise managed block$/ { inblock = 0; if (!gate || !marker) bad = 1 }
+            END { exit bad ? 1 : 0 }
+          ' "$_doctor_shim_probe"; then
+            printf '  warn: %s has a legacy single-stage block; run valise install again to upgrade to the two-stage block\n' "$_doctor_shim_probe"
+          fi
+        fi
+      fi
       # $ENV wiring for sh/ksh: unset is as broken as foreign, because an
       # interactive sh/ksh subshell then reads nothing at all.
       #
@@ -642,7 +687,7 @@ cmd_doctor() {
       # whenever zsh is INSTALLED - install writes the block on zsh presence,
       # not on $SHELL.
       if command -v zsh >/dev/null 2>&1; then
-        if [ ! -f "$HOME/.zshenv" ] || ! integration_has_managed_block "$HOME/.zshenv" 2>/dev/null; then
+        if [ ! -f "$_doctor_home/.zshenv" ] || ! integration_has_managed_block "$_doctor_home/.zshenv" 2>/dev/null; then
           printf '  warn: no valise managed block in ~/.zshenv; non-login zsh (zsh -c) will not load the env plan\n'
         fi
       fi
@@ -665,12 +710,14 @@ cmd_doctor() {
           if [ -n "$_doctor_bridge_os" ] && [ "$(cli_os_name)" = "$_doctor_bridge_os" ]; then
             case "$_doctor_bridge_mode" in
             systemd)
-              if [ ! -f "$(gui_env_file systemd 2>/dev/null)" ]; then
+              _doctor_gui=$(gui_env_file systemd 2>/dev/null) || _doctor_gui=
+              if [ -n "$_doctor_gui" ] && [ ! -f "$_doctor_gui" ]; then
                 printf '  warn: the active release sets gui_env=systemd but there is no environment.d/10-valise.conf; run valise install again\n'
               fi
               ;;
             launchd)
-              if [ ! -f "$(gui_env_file launchd 2>/dev/null)" ]; then
+              _doctor_gui=$(gui_env_file launchd 2>/dev/null) || _doctor_gui=
+              if [ -n "$_doctor_gui" ] && [ ! -f "$_doctor_gui" ]; then
                 printf '  warn: the active release sets gui_env=launchd but there is no ~/Library/LaunchAgents/sh.valise.env.plist; run valise install again\n'
               fi
               ;;
@@ -678,7 +725,9 @@ cmd_doctor() {
           fi
         fi
       fi
-      unset _doctor_awk _doctor_name _doctor_file _doctor_shim _doctor_env _doctor_env_norm _doctor_bridge_mode _doctor_bridge_os _doctor_bash_rc _doctor_bash_login _doctor_active_target _doctor_active_ok
+      unset _doctor_awk _doctor_name _doctor_file _doctor_shim _doctor_env _doctor_env_norm _doctor_bridge_mode
+      unset _doctor_bridge_os _doctor_bash_rc _doctor_bash_login _doctor_home _doctor_gui _doctor_shim_probe
+      unset _doctor_want_gate
     else
       printf '  info: skipping the shell integration check\n'
     fi

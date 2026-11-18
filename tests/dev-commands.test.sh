@@ -914,6 +914,31 @@ else
   fail "env export environment.d did not double \$"
   grep 'TORMENT1' "$_tmp/torture.ed" >&2 2>/dev/null || :
 fi
+# environment.d must escape backslashes and double quotes CHARACTER BY
+# CHARACTER. A gsub replacement string has its own backslash rules: two
+# backslashes yield two on BWK/gawk/mawk but ONE on BusyBox awk and
+# `gawk --posix`, which writes a\b as "a\b" (systemd reads ab) and lets a
+# trailing backslash escape the closing quote. Asserted on the bytes rather
+# than trusting the implementation, so the host awk that runs is the oracle.
+_bs_proj="$_tmp/proj-backslash"
+cp -R "$_proj" "$_bs_proj"
+cat >>"$_bs_proj/modules/main.sh" <<'EOF2'
+BSMID='a\b'
+BSQUOTE='x"y'
+BSTRAIL='end\'
+export BSMID BSQUOTE BSTRAIL
+EOF2
+if _v "$_bs_proj" apply >/dev/null 2>&1 &&
+  _v "$_bs_proj" env export environment.d >"$_tmp/bs.ed" 2>&1 &&
+  grep -Fx 'BSMID="a\\b"' "$_tmp/bs.ed" >/dev/null &&
+  grep -Fx 'BSQUOTE="x\"y"' "$_tmp/bs.ed" >/dev/null &&
+  grep -Fx 'BSTRAIL="end\\"' "$_tmp/bs.ed" >/dev/null; then
+  pass "env export environment.d escapes backslashes and quotes byte-exactly"
+else
+  fail "env export environment.d corrupted a backslash or a double quote"
+  grep -F 'BS' "$_tmp/bs.ed" >&2 2>/dev/null || :
+  cat "$_tmp/bs.ed" >&2 2>/dev/null || :
+fi
 # WSLENV flags follow the value shape, not a substring of the key.
 _wsl_proj="$_tmp/proj-wsl"
 cp -R "$_proj" "$_wsl_proj"
@@ -1208,6 +1233,83 @@ else
   fail "valise_test_reload kept a repaired dependency unavailable"
   cat "$_tmp/reload.out" >&2
 fi
+
+# The runner must not leak its own bookkeeping into the body it runs. An
+# env-only release has no interactive plan, which is what used to keep
+# VALISE_MODULE_ROOT set, and the plan leaves _valise_plan_carried set even
+# when empty, so `${...+set}` detects it. The MODULE body legitimately runs
+# while VALISE_MODULE_ROOT is set (the plan sources capabilities.sh through
+# it); the leak the runner used to have was into the TEST callback and into a
+# `run` script, which execute after the plans. Those are the oracles here: each
+# exits nonzero when a private name is visible, so the command itself fails.
+_rl="$_tmp/leak-proj"
+mkdir -p "$_rl/module.d" "$_rl/modules" "$_rl/tests"
+printf '%s\n' 'bundle=default' 'variant=default' >"$_rl/valise.conf"
+printf 'default\tbash\tenvonly\ndefault\tbash\tinteractiveone\n' >"$_rl/bundles.tsv"
+_meta "$_rl/module.d/envonly.meta" name=envonly version=1.0.0 side_effect=read-only \
+  'requires=' 'optional=' shells=bash platforms=any exports=envonly_fn \
+  load=modules/envonly.sh tests=tests/check.sh
+_meta "$_rl/module.d/interactiveone.meta" name=interactiveone version=1.0.0 side_effect=read-only \
+  'requires=' 'optional=' shells=bash platforms=any phase=interactive exports=interactiveone_fn \
+  load=modules/interactiveone.sh tests=tests/check.sh
+printf 'envonly_fn() { :; }\n' >"$_rl/modules/envonly.sh"
+printf 'interactiveone_fn() { :; }\n' >"$_rl/modules/interactiveone.sh"
+# check.sh is shared by both modules and is also used as the `run` script.
+# It checks the state BEFORE and AFTER a reload, because valise_test_reload
+# sets both names around the plan sources and must clear them again.
+cat >"$_rl/tests/check.sh" <<'EOF2'
+if [ "${VALISE_MODULE_ROOT+x}" = x ]; then
+  printf 'leaked: VALISE_MODULE_ROOT\n' >&2
+  exit 1
+fi
+if [ "${_valise_plan_carried+x}" = x ]; then
+  printf 'leaked: _valise_plan_carried\n' >&2
+  exit 1
+fi
+if [ "${1-}" = reload ]; then
+  valise_test_reload || { printf 'reload failed\n' >&2; exit 1; }
+  if [ "${VALISE_MODULE_ROOT+x}" = x ]; then
+    printf 'leaked after reload: VALISE_MODULE_ROOT\n' >&2
+    exit 1
+  fi
+  if [ "${_valise_plan_carried+x}" = x ]; then
+    printf 'leaked after reload: _valise_plan_carried\n' >&2
+    exit 1
+  fi
+fi
+EOF2
+# The test callback takes no arguments, so it gets a reload-free variant.
+printf '%s\n' \
+  'if [ "${VALISE_MODULE_ROOT+x}" = x ]; then printf "leaked: VALISE_MODULE_ROOT\n" >&2; exit 1; fi' \
+  'if [ "${_valise_plan_carried+x}" = x ]; then printf "leaked: _valise_plan_carried\n" >&2; exit 1; fi' \
+  'valise_test_reload || { printf "reload failed\n" >&2; exit 1; }' \
+  'if [ "${VALISE_MODULE_ROOT+x}" = x ]; then printf "leaked after reload: VALISE_MODULE_ROOT\n" >&2; exit 1; fi' \
+  'if [ "${_valise_plan_carried+x}" = x ]; then printf "leaked after reload: _valise_plan_carried\n" >&2; exit 1; fi' \
+  >"$_rl/tests/check.sh"
+for _leak_mod in envonly interactiveone; do
+  if _v "$_rl" test --shell=bash >"$_tmp/leak-$_leak_mod-test.out" 2>&1; then
+    pass "valise test leaks no runner state into a $_leak_mod callback"
+  else
+    fail "valise test leaked runner state into a $_leak_mod callback"
+    cat "$_tmp/leak-$_leak_mod-test.out" >&2
+  fi
+  # `valise run -- <script>` takes the script INLINE, so it carries the same
+  # checks the callback does.
+  _leak_script=$(
+    printf '%s\n' \
+      'if [ "${VALISE_MODULE_ROOT+x}" = x ]; then printf "leaked: VALISE_MODULE_ROOT\n" >&2; exit 1; fi' \
+      'if [ "${_valise_plan_carried+x}" = x ]; then printf "leaked: _valise_plan_carried\n" >&2; exit 1; fi' \
+      'valise_test_reload || { printf "reload failed\n" >&2; exit 1; }' \
+      'if [ "${VALISE_MODULE_ROOT+x}" = x ]; then printf "leaked after reload: VALISE_MODULE_ROOT\n" >&2; exit 1; fi' \
+      'if [ "${_valise_plan_carried+x}" = x ]; then printf "leaked after reload: _valise_plan_carried\n" >&2; exit 1; fi'
+  )
+  if _v "$_rl" run --shell=bash --module="$_leak_mod" -- "$_leak_script" >"$_tmp/leak-$_leak_mod-run.out" 2>&1; then
+    pass "valise run leaks no runner state into a $_leak_mod script"
+  else
+    fail "valise run leaked runner state into a $_leak_mod script"
+    cat "$_tmp/leak-$_leak_mod-run.out" >&2
+  fi
+done
 
 # --- GUI env capture fidelity and refusal (review findings on env export) ---
 # One fixture project, one module whose body is replaced per case, applied with

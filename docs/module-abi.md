@@ -264,6 +264,16 @@ successfully loaded. An export must name a function, so shell reserved words
 (`case`, `do`, `done`, `elif`, `else`, `esac`, `fi`, `for`, `if`, `in`,
 `then`, `until`, `while`, and `time`) are rejected.
 
+The ledger of installed exports records the PROVIDER of each one, as
+`<module>:<export>`. A reload therefore clears only the exports the same
+module previously installed: a different module exporting the same name is
+reported as a conflict instead of silently replacing it, and a function the
+caller defined is left alone. The ledger is per shell process and never
+pruned, so renaming an export-providing module (`foo:fn` to `bar:fn`) leaves
+the old provider recorded in every shell that is already running. Shells
+started after the rename are unaffected; an already-running shell keeps its
+existing export until it is restarted.
+
 ### Published commands
 
 `commands` names exports that should also run as ordinary commands, from any
@@ -327,7 +337,17 @@ and that is all most use cases need. The module also exports
 `valise_path_contains` (test whether a directory is exactly one PATH entry),
 `valise_path_remove` (remove every occurrence of the named entries and drop
 empty components), and `valise_path_normalize` (drop empty components and
-duplicate entries in place) for inspection and cleanup. The engine's own
+duplicate entries in place) for inspection and cleanup. Both
+`valise_path_remove` and `valise_path_normalize` UNSET `PATH` when nothing is
+left, rather than leaving it set to an empty string: an empty `PATH` means
+"look only in the current directory" to the command search, and an unset one
+is what tests use to mean "no PATH". A caller that reads `$PATH` directly
+right after such a call therefore needs `${PATH-}` under `set -u`; the helper
+itself never aborts. `valise_path_prepend` and `valise_path_append` are the
+exception: when their rebuild produces nothing they leave `PATH` exactly as
+they found it, set-but-empty included, because a caller that passed no
+arguments asked for a cleanup, not for the variable to disappear. The engine's
+own
 `valise_path` module is the exempt implementer of those helpers.
 
 The lint scan is a line-based authoring aid, not a security boundary: releases

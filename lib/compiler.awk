@@ -436,8 +436,41 @@ END {
             n_pe = split(mod_exports[name], pe_values, " ")
             for (pei = 1; pei <= n_pe; pei++) {
                 if (pe_values[pei] == "") continue
+                # The token leaves the ledger with the function. Ownership is
+                # re-established below only when the module loads successfully,
+                # so a module that FAILS on this reload cannot leave a token
+                # claiming a function valise no longer provides - which would
+                # make the next reload silently unset a caller's replacement
+                # instead of reporting the collision.
+                #
+                # The removal uses case PREFIX/SUFFIX matches over a space-padded
+                # copy, NOT `for tok in $ledger`: zsh does not word-split an
+                # unquoted expansion by default, so a for loop silently kept
+                # every token there. The pattern is held in a VARIABLE and
+                # quoted at the use site, because a quoted pattern written
+                # inline in ${var#...} does not match at all.
                 printf "  case \" ${_valise_plan_owned:-} \" in\n"
-                printf "  *\" %s:%s \"*) unset -f %s 2>/dev/null || : ;;\n", mod_display[name], pe_values[pei], pe_values[pei]
+                printf "  *\" %s:%s \"*)\n", mod_display[name], pe_values[pei]
+                printf "    unset -f %s 2>/dev/null || :\n", pe_values[pei]
+                printf "    _valise_owned_pat=' %s:%s '\n", mod_display[name], pe_values[pei]
+                printf "    _valise_owned_pad=\" ${_valise_plan_owned:-} \"\n"
+                printf "    case $_valise_owned_pad in\n"
+                printf "    \"$_valise_owned_pat\"*)\n"
+                printf "      _valise_plan_owned=${_valise_owned_pad#\"$_valise_owned_pat\"}\n"
+                printf "      ;;\n"
+                printf "    *\"$_valise_owned_pat\")\n"
+                printf "      _valise_plan_owned=${_valise_owned_pad%%\"$_valise_owned_pat\"}\n"
+                printf "      ;;\n"
+                printf "    *\"$_valise_owned_pat\"*)\n"
+                printf "      _valise_owned_left=${_valise_owned_pad%%%%\"$_valise_owned_pat\"*}\n"
+                printf "      _valise_owned_right=${_valise_owned_pad#*\"$_valise_owned_pat\"}\n"
+                printf "      _valise_plan_owned=\"$_valise_owned_left $_valise_owned_right\"\n"
+                printf "      ;;\n"
+                printf "    esac\n"
+                printf "    _valise_plan_owned=${_valise_plan_owned# }\n"
+                printf "    _valise_plan_owned=${_valise_plan_owned%% }\n"
+                printf "    unset _valise_owned_pat _valise_owned_pad _valise_owned_left _valise_owned_right\n"
+                printf "    ;;\n"
                 printf "  esac\n"
             }
         }

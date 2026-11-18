@@ -99,9 +99,9 @@ usage_install() {
     "When the release declares gui_env=systemd (Linux) or gui_env=launchd" \
     "(macOS), the matching environment.d or LaunchAgent bridge is written from the" \
     "release's env plan, mode 0600, and prepared before the active release" \
-    "changes; gui_env=off removes a bridge an earlier release wrote. PATH and the" \
-    "XDG root variables are deliberately not bridged (a GUI session sets its own)" \
-    "and are reported as excluded." \
+    "changes; gui_env=off removes a bridge an earlier release wrote. PATH," \
+    "TMPDIR and the XDG root variables are deliberately not bridged (a GUI" \
+    "session sets its own) and are reported as excluded." \
     "" \
     "Every startup file, the shim, and the bridge directory are checked before the" \
     "active release changes. If a later step fails, the previous active release is" \

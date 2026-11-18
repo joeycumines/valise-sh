@@ -89,6 +89,8 @@ the env plan, so a new login or tmux pane repairs PATH after `path_helper`.
 `VALISE_RELOAD=1` forces a reload in the same shell. The guard is set only
 after a plan loads successfully, so a shell that started while the release
 was missing or after a plan failed retries at the next startup file it reads.
+The block is safe in a `set -u` shell with no `PATH`: it never expands `PATH`
+unguarded, and it still records and cleans its own markers.
 Stage 2 sources `plans/<class>-interactive.sh` only when `$-` contains `i`
 and the bundle has interactive modules, so a non-interactive `ssh host cmd`
 or `scp` stays silent; it carries its own release-id guard, so a login that
