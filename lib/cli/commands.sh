@@ -14,6 +14,58 @@ _rc_tmp=""
 _rc_stub=""
 _rc_pub=""
 
+# PATH-gap diagnostics consult VALISE_CALLER_PATH when the caller set it (even
+# to an empty value), otherwise the real PATH. Command lookup still uses the
+# real PATH. The expansion is used directly at each call site: a helper that
+# printed the value would need a subshell, which strips trailing newlines.
+# See path_contains_dir below.
+
+# path_contains_dir <path-value> <dir>: succeed when <dir> names one entry of
+# <path-value>. Entries and the target are normalized, so a trailing slash or a
+# doubled separator (common in $TMPDIR-derived homes) is not a false gap. Empty
+# entries (from leading/doubled colons) are skipped: they denote the caller's
+# working directory, which is not the directory valise runs in after -C.
+# Each path_normalize capture appends a sentinel (&& printf x): command
+# substitution strips trailing newlines, so without the sentinel an entry like
+# "/bin/dir<LF>" would normalize to "/bin/dir<LF>\n", lose its newlines in the
+# capture, and falsely match "/bin/dir".
+path_contains_dir() {
+  _pcd_path=$1
+  if ! _pcd_dir=$(path_normalize "$2" && printf x); then
+    unset _pcd_path _pcd_dir
+    return 1
+  fi
+  _pcd_old_ifs=${IFS-}
+  if [ "${IFS+x}" = x ]; then
+    _pcd_ifs_set=1
+  else
+    _pcd_ifs_set=0
+  fi
+  case $- in
+  *f*) _pcd_glob_was_set=1 ;;
+  *) _pcd_glob_was_set=0 ;;
+  esac
+  # Split once with IFS=: and globbing off, then restore the caller's settings
+  # before calling path_normalize so both sides of the comparison normalize
+  # under the same environment.
+  set -f
+  IFS=:
+  set -- $_pcd_path
+  if [ "$_pcd_ifs_set" -eq 1 ]; then IFS=$_pcd_old_ifs; else unset IFS; fi
+  [ "$_pcd_glob_was_set" -eq 1 ] || set +f
+  unset _pcd_path _pcd_old_ifs _pcd_ifs_set _pcd_glob_was_set
+  for _pcd_entry in "$@"; do
+    [ -n "$_pcd_entry" ] || continue
+    if _pcd_norm=$(path_normalize "$_pcd_entry" && printf x) &&
+      [ "$_pcd_norm" = "$_pcd_dir" ]; then
+      unset _pcd_dir _pcd_entry _pcd_norm
+      return 0
+    fi
+  done
+  unset _pcd_dir _pcd_entry _pcd_norm
+  return 1
+}
+
 # commands_bin_dir: the directory stubs are written to.
 commands_bin_dir() {
   [ -n "${VALISE_BIN_DIR:-}${XDG_BIN_HOME:-}${HOME:-}" ] || return 1
@@ -201,10 +253,9 @@ reconcile_commands() {
   "$_rcm_mv" -f "$_rc_tmp" "$_rcm_ledger" || die "cannot publish command ledger"
   _rc_tmp=""
   if [ -n "$_rcm_want" ]; then
-    case ":${PATH:-}:" in
-    *":$_rcm_bin:"*) ;;
-    *) info "warning: $_rcm_bin is not on PATH; add it to use the published commands" ;;
-    esac
+    if ! path_contains_dir "${VALISE_CALLER_PATH-${PATH:-}}" "$_rcm_bin"; then
+      info "warning: $_rcm_bin is not on PATH; add it to use the published commands"
+    fi
   fi
   unset _rcm_release _rcm_bin _rcm_ledger _rcm_want _rcm_tab _rcm_rm _rcm_mkdir _rcm_chmod _rcm_ln _rcm_mv \
     _rcm_cat _rcm_awk _rcm_owned _rcm_name _rcm_path _rcm_sha _rcm_keep
@@ -270,9 +321,10 @@ doctor_commands() {
       _status=1
     fi
   done
-  case ":${PATH:-}:" in
-  *":$_dc_bin:"*) printf '  ok: command directory is on PATH: %s\n' "$_dc_bin" ;;
-  *) printf '  warn: command directory is not on PATH: %s\n' "$_dc_bin" ;;
-  esac
+  if path_contains_dir "${VALISE_CALLER_PATH-${PATH:-}}" "$_dc_bin"; then
+    printf '  ok: command directory is on PATH: %s\n' "$_dc_bin"
+  else
+    printf '  warn: command directory is not on PATH: %s\n' "$_dc_bin"
+  fi
   unset _dc_want _dc_bin _dc_ledger _dc_awk _dc_name _dc_path _dc_sha
 }

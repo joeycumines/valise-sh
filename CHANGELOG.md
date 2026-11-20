@@ -3,6 +3,17 @@
 Notable user-facing changes are recorded here. Versions before 1.0 may include
 module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 
+## [Unreleased]
+
+### Added
+
+- `VALISE_CALLER_PATH` lets a caller that sanitizes `PATH` before invoking
+  valise supply the original for PATH-gap diagnostics. It is consulted by the
+  install and doctor warnings, never for command lookup or generated profile
+  content; an explicitly empty value means the caller's PATH is empty. PATH
+  entries are normalized before matching, so a trailing slash or doubled
+  separator is not reported as a gap.
+
 ## [0.4.0] - 2026-11-18
 
 0.4.0 adds phase-separated plans, GUI-session environment bridges, and fixes

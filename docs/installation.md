@@ -270,7 +270,18 @@ a name the build would have rejected:
 
 `valise install --no-integration` writes no stubs and no ledger, and a later
 `valise release use` leaves the command directory alone. Install and
-`valise doctor` warn when the command directory is not on PATH.
+`valise doctor` warn when the command directory is not on PATH. A caller that
+sanitizes `PATH` before invoking valise can pass the original in
+`VALISE_CALLER_PATH`; it is used only
+for these PATH diagnostics and never for command lookup or generated profile
+content. Setting it to an empty value means the caller's PATH is empty, so the
+gap is still reported.
+
+`VALISE_CALLER_PATH` is inherited by child processes. A wrapper that captured a
+value should unset it before invoking a nested valise run, so the nested run
+reports against its own PATH rather than a stale one. The variable never
+reaches command lookup or generated content: utility resolution reads the real
+PATH, and the GUI environment bridge and exported profile content exclude it.
 
 ## Integrity and provenance
 
