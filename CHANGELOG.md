@@ -5,6 +5,11 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-20
+
+0.4.1 hardens phase probing, release-activation transactions, POSIX startup
+reloads, compiler export-ownership matching, and GUI environment capture.
+
 ### Added
 
 - `VALISE_CALLER_PATH` lets a caller that sanitizes `PATH` before invoking
@@ -13,6 +18,55 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
   content; an explicitly empty value means the caller's PATH is empty. PATH
   entries are normalized before matching, so a trailing slash or doubled
   separator is not reported as a gap.
+
+### Fixed
+
+- `valise compile` and `valise build` now abort when interactive-phase probing
+  cannot allocate or inspect its scratch files (for example under an unwritable
+  or missing `TMPDIR`), instead of publishing a release without interactive
+  plans.
+- `valise release use` and `valise release rollback` arm transaction rollback
+  before moving outgoing GUI bridges aside, pre-validate the active link and
+  previous-release record, and abort before switching if backing up an owned
+  predecessor bridge fails. Fatal errors and signals during activation now
+  restore outgoing bridges and clean up temporary files.
+- Activation and install rollback resolve relative active symlinks to their
+  canonical release directory before reconciling command stubs, preventing
+  rollback from deleting outgoing stubs.
+- `remove_gui_env_bridge` separates pre-commit rename failures from post-commit
+  backup deletion failures, so a failed delete of an already-committed aside
+  file no longer triggers a release rollback after an earlier backup was
+  removed.
+- Bridge ownership detection requires a regular non-symlink file before
+  reading, preventing a foreign FIFO at the bridge path from blocking
+  activation or installation.
+- The POSIX managed block invalidates `_valise_interactive_loaded` before
+  entering another release (including through env-only startup files) and
+  before re-running stage 2, so rolling back after a partially failed or
+  env-only switch restores the previous release's interactive definitions.
+- The runtime `$ENV` stanza and `valise doctor` require the shim path to be a
+  regular non-symlink file carrying the exact managed block header, so startup
+  never adopts a foreign file or symlink that `valise install` refused.
+- A fresh zsh-default home without `.bash_profile`, `.bash_login`, or
+  `.bashrc` now writes a `bash-login` stage to `.profile` so `bash --login -i`
+  loads interactive modules without changing `sh`/`ksh` startup ordering.
+- Compiled plans compare `_valise_plan_owned` tokens byte-for-byte instead of
+  using shell `case` patterns, so Bash `shopt -s nocasematch` cannot conflate
+  case-distinct provider names across releases.
+- `env_export_capture` preserves the caller's `PATH` as input to both baseline
+  and target runs so PATH-dependent exports (such as `valise_editor_defaults`
+  and `command -v` probes) match an installed env plan while `PATH` remains
+  excluded from bridge output.
+- `environment.d` export rejects TAB, DEL, and all Unicode noncharacters by
+  variable name so systemd does not corrupt or abort on published values,
+  while `launchd` continues to preserve UTF-8, TAB, and DEL.
+- `valise_path_remove` validates all arguments before modifying `PATH`, so a
+  mixed valid/invalid call fails nonzero and leaves `PATH` untouched.
+- Qualified [docs/architecture.md](docs/architecture.md) and
+  [docs/module-abi.md](docs/module-abi.md) to state the exact env
+  re-evaluation triggers and pre-ownership caller-function protection scope.
+- Guarded the `/bin/ksh` probe in `tests/project-ux.test.sh` when `ksh` is
+  absent locally.
 
 ## [0.4.0] - 2026-11-18
 
@@ -504,7 +558,8 @@ for startup state, environment capture, and release transactions.
 - The editor-defaults test is independent of host-installed editors by
   supplying a temporary test `vi` executable.
 
-[Unreleased]: https://github.com/joeycumines/valise-sh/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/joeycumines/valise-sh/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/joeycumines/valise-sh/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/joeycumines/valise-sh/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/joeycumines/valise-sh/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/joeycumines/valise-sh/compare/v0.1.0...v0.2.0
