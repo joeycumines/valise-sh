@@ -1437,19 +1437,115 @@ export CAP_NONCHAR
 EOF
 _refuse_case "U+FFFF, an XML noncharacter" 'CAP_NONCHAR'
 
-# Scenario E: representable values still export: valid multibyte UTF-8, TAB, DEL.
+# Scenario E: representable values still export: valid multibyte UTF-8 exports
+# to both environment.d and launchd; TAB and DEL are preserved by launchd and
+# refused by name for environment.d (systemd alters TAB/DEL on round-trip);
+# Unicode noncharacters (e.g. U+FDD0, U+1FFFE, U+10FFFF) are refused by name
+# for environment.d.
+_cap_body <<'EOF'
+CAP_UTF=$(printf 'caf\303\251')
+export CAP_UTF
+EOF
+if _cap_apply && _cap_export environment.d && grep -F 'CAP_UTF=' "$_tmp/cap-export.out" >/dev/null; then
+  pass "valid multibyte UTF-8 values are exported to environment.d"
+else
+  fail "a valid UTF-8 value was refused or dropped by environment.d"
+  cat "$_tmp/cap-export.out" "$_tmp/cap-export.err" >&2 2>/dev/null || :
+fi
+
 _cap_body <<'EOF'
 CAP_UTF=$(printf 'caf\303\251')
 CAP_TAB=$(printf 'a\tb')
 CAP_DEL=$(printf 'a\177b')
 export CAP_UTF CAP_TAB CAP_DEL
 EOF
-if _cap_apply && _cap_export environment.d && grep -F 'CAP_UTF=' "$_tmp/cap-export.out" >/dev/null &&
-  grep -F 'CAP_DEL=' "$_tmp/cap-export.out" >/dev/null && grep -F 'CAP_TAB=' "$_tmp/cap-export.out" >/dev/null; then
-  pass "valid UTF-8, TAB, and DEL values are still exported"
+if _cap_apply && _cap_export launchd &&
+  grep -F 'CAP_UTF' "$_tmp/cap-export.out" >/dev/null &&
+  grep -F 'CAP_TAB' "$_tmp/cap-export.out" >/dev/null &&
+  grep -F 'CAP_DEL' "$_tmp/cap-export.out" >/dev/null; then
+  pass "valid UTF-8, TAB, and DEL values are preserved for launchd"
 else
-  fail "a representable value was refused or dropped"
+  fail "launchd refused or dropped UTF-8, TAB, or DEL"
   cat "$_tmp/cap-export.out" "$_tmp/cap-export.err" >&2 2>/dev/null || :
+fi
+
+_cap_body <<'EOF'
+CAP_TAB=$(printf 'a\tb')
+export CAP_TAB
+EOF
+_refuse_case "a TAB byte for environment.d" 'CAP_TAB'
+
+_cap_body <<'EOF'
+CAP_DEL=$(printf 'a\177b')
+export CAP_DEL
+EOF
+_refuse_case "a DEL byte for environment.d" 'CAP_DEL'
+
+_cap_body <<'EOF'
+CAP_NC_FDD0=$(printf 'a\357\267\220b')
+export CAP_NC_FDD0
+EOF
+_refuse_case "U+FDD0 noncharacter for environment.d" 'CAP_NC_FDD0'
+
+_cap_body <<'EOF'
+CAP_NC_ASTRAL=$(printf 'a\360\237\277\276b')
+export CAP_NC_ASTRAL
+EOF
+_refuse_case "U+1FFFE astral noncharacter for environment.d" 'CAP_NC_ASTRAL'
+
+_cap_body <<'EOF'
+CAP_NC_TOP=$(printf 'a\364\217\277\277b')
+export CAP_NC_TOP
+EOF
+_refuse_case "U+10FFFF astral noncharacter for environment.d" 'CAP_NC_TOP'
+
+# Scenario E2: caller PATH is preserved as input to env capture so PATH-dependent
+# exports (command -v probes and valise_editor_defaults) match an installed env
+# plan, while PATH itself stays excluded from bridge output.
+_custom_bin="$_tmp/caller-custom-bin"
+mkdir -p "$_custom_bin"
+printf '#!/bin/sh\nexit 0\n' >"$_custom_bin/probe-owned-tool"
+printf '#!/bin/sh\nexit 0\n' >"$_custom_bin/nvim"
+chmod 755 "$_custom_bin/probe-owned-tool" "$_custom_bin/nvim"
+_cap_body <<'EOF'
+CAP_TOOL=$(command -v probe-owned-tool 2>/dev/null || printf unavailable)
+export CAP_TOOL
+EOF
+if _cap_apply && env -i HOME="$_cap_home" PATH="$_custom_bin:/usr/bin:/bin" \
+  XDG_DATA_HOME="$_cap_home/.local/share" XDG_CONFIG_HOME="$_cap_home/.config" \
+  XDG_STATE_HOME="$_cap_home/.local/state" SHELL=/bin/sh TMPDIR="$_tmp" \
+  "$_valise" -C "$_cp" env export environment.d >"$_tmp/cap-path.out" 2>"$_tmp/cap-path.err" &&
+  grep -Fx "CAP_TOOL=$_custom_bin/probe-owned-tool" "$_tmp/cap-path.out" >/dev/null &&
+  ! grep -q '^PATH=' "$_tmp/cap-path.out"; then
+  pass "env export preserves caller PATH as input for command -v while excluding PATH from output"
+else
+  fail "env export lost caller PATH for command -v or leaked PATH into output"
+  cat "$_tmp/cap-path.out" "$_tmp/cap-path.err" >&2 2>/dev/null || :
+fi
+
+_ed_proj="$_tmp/cap-editor-proj"
+mkdir -p "$_ed_proj/module.d" "$_ed_proj/modules"
+: >"$_ed_proj/valise.conf"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_ed_proj/variants.tsv"
+printf 'name=cap_ed\nversion=\nside_effect=read-only\nrequires=valise_editor\noptional=\nshells=posix\nplatforms=any\nexports=\nload=modules/cap_ed.sh\n' >"$_ed_proj/module.d/cap_ed.meta"
+printf 'valise_editor_defaults\n' >"$_ed_proj/modules/cap_ed.sh"
+printf '# bundle\tshell\troots\ndefault\tsh\tcap_ed\ndefault\tbash\tcap_ed\n' >"$_ed_proj/bundles.tsv"
+_ed_home="$_tmp/cap-ed-home"
+mkdir -p "$_ed_home"
+if env -i HOME="$_ed_home" PATH="$_custom_bin:/usr/bin:/bin" \
+  XDG_DATA_HOME="$_ed_home/.local/share" XDG_CONFIG_HOME="$_ed_home/.config" \
+  XDG_STATE_HOME="$_ed_home/.local/state" SHELL=/bin/sh TMPDIR="$_tmp" \
+  "$_valise" -C "$_ed_proj" apply --no-integration >/dev/null 2>&1 &&
+  env -i HOME="$_ed_home" PATH="$_custom_bin:/usr/bin:/bin" \
+  XDG_DATA_HOME="$_ed_home/.local/share" XDG_CONFIG_HOME="$_ed_home/.config" \
+  XDG_STATE_HOME="$_ed_home/.local/state" SHELL=/bin/sh TMPDIR="$_tmp" \
+  "$_valise" -C "$_ed_proj" env export environment.d >"$_tmp/cap-ed.out" 2>"$_tmp/cap-ed.err" &&
+  grep -Fx 'EDITOR=nvim' "$_tmp/cap-ed.out" >/dev/null &&
+  grep -Fx 'VISUAL=nvim' "$_tmp/cap-ed.out" >/dev/null; then
+  pass "env export matches installed env plan for valise_editor_defaults with nvim on caller PATH"
+else
+  fail "env export diverged from installed env plan for valise_editor_defaults"
+  cat "$_tmp/cap-ed.out" "$_tmp/cap-ed.err" >&2 2>/dev/null || :
 fi
 
 # Scenario F: an empty value cannot reach environment.d; it is refused by name,

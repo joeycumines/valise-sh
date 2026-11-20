@@ -129,6 +129,9 @@ _ext_out=$(
       valise_path_normalize; printf "normalize-dedupe=%s\n" "$PATH"
       PATH=/usr/bin:/bin
       valise_path_remove "a:b" 2>/dev/null; printf "remove-colon-rc=%s path=%s\n" "$?" "$PATH"
+      PATH=/a:/b
+      valise_path_remove /a "" 2>/dev/null; printf "remove-mixed-rc=%s path=%s\n" "$?" "$PATH"
+      PATH=/usr/bin:/bin
       valise_path_contains "/a*b" && printf "contains-glob=YES\n" || printf "contains-glob=no\n"
       PATH=/a*b:/usr/bin
       valise_path_contains "/a*b" && printf "contains-glob-literal=yes\n" || printf "contains-glob-literal=NO\n"
@@ -153,6 +156,7 @@ assert_contains 'valise_path_remove also drops empty components' "$_ext_out" 're
 assert_contains 'valise_path_normalize drops empty components' "$_ext_out" 'normalize=/x:/y'
 assert_contains 'valise_path_normalize keeps first occurrence of dupes' "$_ext_out" 'normalize-dedupe=/x:/y'
 assert_contains 'valise_path_remove rejects a colon argument and leaves PATH untouched' "$_ext_out" 'remove-colon-rc=1 path=/usr/bin:/bin'
+assert_contains 'valise_path_remove rejects a mixed valid+invalid call atomically' "$_ext_out" 'remove-mixed-rc=1 path=/a:/b'
 assert_contains 'valise_path_contains on an absent glob does not match' "$_ext_out" 'contains-glob=no'
 assert_contains 'valise_path_contains matches a metacharacter entry byte-exactly' "$_ext_out" 'contains-glob-literal=yes'
 assert_contains 'valise_path_remove removes a metacharacter entry byte-exactly' "$_ext_out" 'remove-glob-literal=/usr/bin'

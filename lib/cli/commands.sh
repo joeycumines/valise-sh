@@ -14,6 +14,65 @@ _rc_tmp=""
 _rc_stub=""
 _rc_pub=""
 
+# PATH-gap diagnostics consult VALISE_CALLER_PATH when the caller set it (even
+# to an empty value), otherwise the real PATH. Command lookup still uses the
+# real PATH. The expansion is used directly at each call site: a helper that
+# printed the value would need a subshell, which strips trailing newlines.
+# See path_contains_dir below.
+
+# path_contains_dir <path-value> <dir>: succeed when <dir> names one entry of
+# <path-value>. Entries and the target are normalized, so a trailing slash or a
+# doubled separator (common in $TMPDIR-derived homes) is not a false gap. Empty
+# entries denote the current directory; they are skipped when no caller CWD is
+# known (the directory valise runs in after -C is not the caller's).
+# Relative entries are resolved against VALISE_CALLER_CWD when set: bin/valise
+# records the caller's directory before -C changes it, so `.local/bin` means
+# the caller's `.local/bin`, and an empty entry means the caller's directory,
+# not the project's. Library-only callers (tests and embedded use) leave it
+# unset, and path_normalize then uses the current directory as before.
+# Each path_normalize capture appends a sentinel (&& printf x): command
+# substitution strips trailing newlines, so without the sentinel an entry like
+# "/bin/dir<LF>" would normalize to "/bin/dir<LF>\n", lose its newlines in the
+# capture, and falsely match "/bin/dir".
+path_contains_dir() {
+  _pcd_path=$1
+  # An explicitly empty PATH value has no entries at all, even though the
+  # splitting loop below would otherwise see one empty (CWD) entry.
+  [ -n "$_pcd_path" ] || { unset _pcd_path; return 1; }
+  if ! _pcd_dir=$(path_normalize "$2" && printf x); then
+    unset _pcd_path _pcd_dir
+    return 1
+  fi
+  # Split the path value with POSIX parameter stripping rather than IFS word
+  # splitting: zsh does not split unquoted expansions by default, and `set --`
+  # here would also clobber the caller's positional parameters. A trailing
+  # colon is a final empty entry; it matches the caller's directory when known
+  # and is otherwise skipped.
+  _pcd_rem=${_pcd_path}:
+  while [ -n "$_pcd_rem" ]; do
+    _pcd_entry=${_pcd_rem%%:*}
+    _pcd_rem=${_pcd_rem#*:}
+    _pcd_candidate=$_pcd_entry
+    case "$_pcd_candidate" in
+    /*) : ;;
+    *)
+      # An empty entry denotes the caller's current directory when known.
+      if [ -n "${VALISE_CALLER_CWD:-}" ]; then
+        _pcd_candidate=$VALISE_CALLER_CWD/$_pcd_candidate
+      fi
+      ;;
+    esac
+    [ -n "$_pcd_candidate" ] || continue
+    if _pcd_norm=$(path_normalize "$_pcd_candidate" && printf x) &&
+      [ "$_pcd_norm" = "$_pcd_dir" ]; then
+      unset _pcd_path _pcd_dir _pcd_rem _pcd_entry _pcd_candidate _pcd_norm
+      return 0
+    fi
+  done
+  unset _pcd_path _pcd_dir _pcd_rem _pcd_entry _pcd_candidate _pcd_norm
+  return 1
+}
+
 # commands_bin_dir: the directory stubs are written to.
 commands_bin_dir() {
   [ -n "${VALISE_BIN_DIR:-}${XDG_BIN_HOME:-}${HOME:-}" ] || return 1
@@ -201,10 +260,9 @@ reconcile_commands() {
   "$_rcm_mv" -f "$_rc_tmp" "$_rcm_ledger" || die "cannot publish command ledger"
   _rc_tmp=""
   if [ -n "$_rcm_want" ]; then
-    case ":${PATH:-}:" in
-    *":$_rcm_bin:"*) ;;
-    *) info "warning: $_rcm_bin is not on PATH; add it to use the published commands" ;;
-    esac
+    if ! path_contains_dir "${VALISE_CALLER_PATH-${PATH:-}}" "$_rcm_bin"; then
+      info "warning: $_rcm_bin is not on PATH; add it to use the published commands"
+    fi
   fi
   unset _rcm_release _rcm_bin _rcm_ledger _rcm_want _rcm_tab _rcm_rm _rcm_mkdir _rcm_chmod _rcm_ln _rcm_mv \
     _rcm_cat _rcm_awk _rcm_owned _rcm_name _rcm_path _rcm_sha _rcm_keep
@@ -270,9 +328,10 @@ doctor_commands() {
       _status=1
     fi
   done
-  case ":${PATH:-}:" in
-  *":$_dc_bin:"*) printf '  ok: command directory is on PATH: %s\n' "$_dc_bin" ;;
-  *) printf '  warn: command directory is not on PATH: %s\n' "$_dc_bin" ;;
-  esac
+  if path_contains_dir "${VALISE_CALLER_PATH-${PATH:-}}" "$_dc_bin"; then
+    printf '  ok: command directory is on PATH: %s\n' "$_dc_bin"
+  else
+    printf '  warn: command directory is not on PATH: %s\n' "$_dc_bin"
+  fi
   unset _dc_want _dc_bin _dc_ledger _dc_awk _dc_name _dc_path _dc_sha
 }

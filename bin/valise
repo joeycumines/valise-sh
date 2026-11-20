@@ -7,7 +7,7 @@
 
 set -eu
 
-VALISE_VERSION="0.4.0"
+VALISE_VERSION="0.4.1"
 
 # The path this CLI was invoked by, made absolute before -C can change the
 # working directory. The Fish hook calls the CLI back through it, so a package
@@ -16,6 +16,17 @@ case "$0" in
   /*) _valise_cli_path=$0 ;;
   *) _valise_cli_path="$(pwd -P)/$0" ;;
 esac
+# The caller's working directory must be captured before -C: relative PATH
+# entries are interpreted from where valise was invoked, not from the project
+# directory. Only PATH-gap diagnostics use it; command lookup still uses the
+# real PATH after -C.
+VALISE_CALLER_CWD=$(pwd -P) || {
+  printf 'valise: error: cannot determine the caller working directory\n' >&2
+  exit 1
+}
+# Deliberately not exported: the CLI libraries are sourced into this shell, and
+# generated content, env capture, and child processes must not inherit this
+# diagnostic-only context.
 
 # Locate the engine from this script's physical path, so package installs
 # that expose bin/valise through a symlink (bun, npm) still find ../lib. This

@@ -526,10 +526,11 @@ project_closure_has_phase() {
   _pch_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   _pch_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
   _pch_prelude=$(project_prelude_functions) || exit 1
-  _pch_stream_file=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-closure.XXXXXX") || return 1
+  _pch_stream_file=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-closure.XXXXXX") ||
+    die "cannot create closure probe scratch file"
   _pch_plan_file=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-closure-plan.XXXXXX") || {
-    "$_pch_rm" -f "$_pch_stream_file"
-    return 1
+    "$_pch_rm" -f "$_pch_stream_file" 2>/dev/null || :
+    die "cannot create closure probe scratch file"
   }
   _pch_order=
   # "No module of this phase" and "the graph does not compile" are DIFFERENT
@@ -549,7 +550,11 @@ project_closure_has_phase() {
     unset _pch_stream_file _pch_plan_file _pch_engine _pch_compiler _pch_awk _pch_rm _pch_prelude
     die "cannot compile the $2 module graph while probing for $5-phase modules"
   fi
-  _pch_order=$("$_pch_awk" '/^# order=/ { sub(/^# order=/, ""); print; exit }' "$_pch_plan_file")
+  if ! _pch_order=$("$_pch_awk" '/^# order=/ { sub(/^# order=/, ""); print; exit }' "$_pch_plan_file"); then
+    "$_pch_rm" -f "$_pch_stream_file" "$_pch_plan_file" 2>/dev/null || :
+    unset _pch_stream_file _pch_plan_file _pch_engine _pch_compiler _pch_awk _pch_rm _pch_prelude _pch_order
+    die "cannot inspect the $2 module graph while probing for $5-phase modules"
+  fi
   "$_pch_rm" -f "$_pch_stream_file" "$_pch_plan_file" || die "cannot remove closure probe scratch files"
   unset _pch_stream_file _pch_plan_file _pch_engine _pch_compiler _pch_awk _pch_rm _pch_prelude
   if [ -n "$_pch_order" ]; then

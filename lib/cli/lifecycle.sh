@@ -9,7 +9,11 @@ _prev_tmp=""
 _dry_tmp=""
 _un_tmp=""
 _install_txn=0
+_activate_txn=0
+_activate_txn_aborting=0
+_ra_reconcile_err=""
 _txn_old_target=""
+_txn_old_dir=""
 _txn_had_previous=0
 _txn_old_previous=""
 _txn_changed=""
@@ -58,6 +62,7 @@ gui_env_file() {
 # the caller's PATH, and a forged one could make uninstall delete a foreign
 # file.
 bridge_is_valise_owned() {
+  [ -f "${2:-}" ] && [ ! -L "${2:-}" ] || return 1
   _bivo_awk=$(trusted_utility_path awk) || return 1
   _bivo_marker=
   case "${1:-}" in
@@ -283,11 +288,16 @@ gui_env_bridge_publish() {
     return 0
     ;;
   remove)
-    remove_gui_env_bridge
-    _gbp_rc=$?
+    _gbp_rc=0
+    remove_gui_env_bridge || _gbp_rc=$?
     _gui_action=none
     _gui_mode= _gui_target=
     unset _gbp_mv _gbp_rm _gbp_mode _gbp_target
+    # Exit 2 means Phase 1 removed every public bridge file (committed) and
+    # only post-commit deletion of a .valise-remove.* backup failed. Rolling
+    # back the active release would be inconsistent because earlier backups
+    # may already have been deleted.
+    [ "$_gbp_rc" -eq 2 ] && return 0
     return "$_gbp_rc"
     ;;
   publish)
@@ -401,13 +411,14 @@ remove_gui_env_bridge() {
     return 1
   fi
   # Phase 2: the set is committed. A delete that fails leaves its moved file
-  # behind, and that path is named.
+  # behind, names that path, and returns 2 (post-commit cleanup failure) so
+  # release-switch callers do not roll back after earlier backups are gone.
   if [ -n "$_rgb_sys_aside" ]; then
     if "$_rgb_rm" -f "$_rgb_sys_aside"; then
       info "removed the systemd bridge: $_rgb_sys"
     else
       printf 'valise: error: cannot remove the systemd GUI env bridge: %s\n' "$_rgb_sys_aside" >&2
-      _rgb_rc=1
+      _rgb_rc=2
     fi
   fi
   if [ -n "$_rgb_lad_aside" ]; then
@@ -415,7 +426,7 @@ remove_gui_env_bridge() {
       info "removed the launchd bridge: $_rgb_lad"
     else
       printf 'valise: error: cannot remove the launchd GUI env bridge: %s\n' "$_rgb_lad_aside" >&2
-      _rgb_rc=1
+      _rgb_rc=2
     fi
   fi
   unset _rgb_rm _rgb_mv _rgb_sys _rgb_lad _rgb_sys_aside _rgb_lad_aside _rgb_sys_parent _rgb_lad_parent
@@ -543,6 +554,143 @@ note_switch() {
   unset _ns_id
 }
 
+# activate_txn_abort: restore the active link, previous-release record,
+# outgoing GUI bridges, and command stubs when release_activate fails or is
+# interrupted. Called both inline on publish/reconcile failure and from the
+# EXIT/INT/TERM traps so fatal errors inside switch_active_link or signals
+# never strand an outgoing bridge backup. Must not call die.
+activate_txn_abort() {
+  # Keep _activate_txn armed until every restore step finishes, so a second
+  # INT/TERM during the rollback re-enters this function instead of letting the
+  # trap skip it and strand a half-restored transaction. A separate guard makes
+  # the re-entry a no-op; the outer call still completes the restore.
+  [ "${_activate_txn_aborting:-0}" -eq 1 ] && return 0
+  _activate_txn_aborting=1
+  [ -z "${_gui_stage:-}" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_gui_stage" 2>/dev/null || :
+  _gui_stage= _gui_action=none _gui_mode= _gui_target=
+  [ -z "${_ra_reconcile_err:-}" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_ra_reconcile_err" 2>/dev/null || :
+  _ra_reconcile_err=
+  _ra_rolled=0
+  _ra_restored=""
+  if [ "${_ra_had_link:-0}" -eq 1 ] && [ -n "${_ra_old_target:-}" ]; then
+    if [ -L "$VALISE_ACTIVE_LINK" ] &&
+      [ "$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)" = "$_ra_old_target" ]; then
+      _ra_rolled=1
+      _ra_restored="${_ra_old_target##*/}"
+    elif [ -n "${_ra_ln:-}" ] && "$_ra_ln" -sfn "$_ra_old_target" "$VALISE_ACTIVE_LINK" 2>/dev/null; then
+      _ra_rolled=1
+      _ra_restored="${_ra_old_target##*/}"
+    fi
+  elif [ "${_ra_had_link:-0}" -eq 0 ]; then
+    if [ ! -L "$VALISE_ACTIVE_LINK" ] && [ ! -e "$VALISE_ACTIVE_LINK" ]; then
+      _ra_rolled=1
+      _ra_restored="no release"
+    elif [ -n "${_ra_rm:-}" ] && "$_ra_rm" -f "$VALISE_ACTIVE_LINK" 2>/dev/null; then
+      _ra_rolled=1
+      _ra_restored="no release"
+    fi
+  fi
+  # Restore the previous-release record whenever the switch may have rewritten
+  # it, even if the active link itself could not be rolled back. Leaving the
+  # record from an aborted activation would make a later `release rollback`
+  # consult the wrong release.
+  _ata_prev_changed=0
+  if [ "${_ra_had_previous:-0}" -eq 1 ]; then
+    if _ata_cur_prev=$(read_previous_record 2>/dev/null); then
+      [ "$_ata_cur_prev" = "${_ra_old_previous:-}" ] || _ata_prev_changed=1
+    else
+      _ata_prev_changed=1
+    fi
+  elif [ -e "$(previous_record_path)" ] && [ ! -L "$(previous_record_path)" ]; then
+    _ata_prev_changed=1
+  fi
+  if [ "$_ata_prev_changed" -eq 1 ]; then
+    ( restore_previous_record "${_ra_had_previous:-0}" "${_ra_old_previous:-}" ) >/dev/null 2>&1 ||
+      printf 'valise: cannot restore the previous-release record\n' >&2
+  fi
+  unset _ata_prev_changed _ata_cur_prev
+  if [ "$_ra_rolled" -eq 1 ]; then
+    # Only restore command stubs when forward reconciliation actually ran. Use
+    # the canonical outgoing release directory (not the raw symlink target,
+    # which may be relative to the symlink's parent) and never pass a missing
+    # directory to reconcile_commands (which would delete owned stubs).
+    if [ "${_ra_reconcile_attempted:-0}" -eq 1 ] && [ -f "$(commands_ledger_path)" ]; then
+      if [ "${_ra_had_link:-0}" -eq 1 ]; then
+        if [ -n "${_ra_old_dir:-}" ] && [ -d "$_ra_old_dir" ] &&
+          [ -f "$_ra_old_dir/valise-release.conf" ]; then
+          if ! (
+            trap 'for _ra_t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do
+              [ -z "$_ra_t" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_ra_t" 2>/dev/null
+            done' EXIT
+            reconcile_commands "$_ra_old_dir"
+          ) >/dev/null 2>&1; then
+            printf 'valise: error: the command stubs could not be brought back to the restored release\n' >&2
+          fi
+        elif [ -n "${_ra_old_dir:-}" ] && [ -d "$_ra_old_dir" ]; then
+          # The release exists but its manifest is unreadable; still try the
+          # canonical path so an otherwise recoverable rollback is not lost.
+          if ! (
+            trap 'for _ra_t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do
+              [ -z "$_ra_t" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_ra_t" 2>/dev/null
+            done' EXIT
+            reconcile_commands "$_ra_old_dir"
+          ) >/dev/null 2>&1; then
+            printf 'valise: error: the command stubs could not be brought back to the restored release\n' >&2
+          fi
+        else
+          # The outgoing release directory is gone (a dangling active link), so
+          # there is no outgoing stub set to restore. Remove the stubs this
+          # activation published rather than pointing them at a missing release.
+          ( remove_owned_commands ) >/dev/null 2>&1 ||
+            printf 'valise: error: the command stubs could not be brought back to the restored release\n' >&2
+        fi
+      else
+        # No release was active before this activation, so no stub may point at
+        # one now. Mirror install_txn_abort's cleanup for this case.
+        ( remove_owned_commands ) >/dev/null 2>&1 ||
+          printf 'valise: error: the command stubs this activation published could not be removed\n' >&2
+      fi
+    fi
+    # The bridge follows the release that is active again. Each aside goes back
+    # to the exact path it was taken from. Only delete a newly published bridge
+    # when no owned predecessor existed before activation.
+    if [ -n "${_ra_aside:-}" ] && [ -n "${_ra_aside_tgt:-}" ] && [ -n "${_ra_mv:-}" ] &&
+      "$_ra_mv" -f "$_ra_aside" "$_ra_aside_tgt" 2>/dev/null; then
+      _ra_aside= _ra_aside_tgt=
+    elif [ -n "${_ra_aside:-}" ]; then
+      printf 'valise: error: the outgoing GUI env bridge could not be put back: %s\n' "$_ra_aside" >&2
+    elif [ "${_ra_published:-0}" -eq 1 ] && [ "${_ra_had_predecessor:-0}" -eq 0 ] &&
+      [ -n "${_ra_rm:-}" ] && [ -n "${_ra_gui_target:-}" ] && [ "${_ra_action:-none}" != remove ]; then
+      "$_ra_rm" -f "$_ra_gui_target" 2>/dev/null || :
+    fi
+    if [ -n "${_ra_aside2:-}" ] && [ -n "${_ra_aside2_tgt:-}" ] && [ -n "${_ra_mv:-}" ] &&
+      "$_ra_mv" -f "$_ra_aside2" "$_ra_aside2_tgt" 2>/dev/null; then
+      _ra_aside2= _ra_aside2_tgt=
+    elif [ -n "${_ra_aside2:-}" ]; then
+      printf 'valise: error: the outgoing GUI env bridge could not be put back: %s\n' "$_ra_aside2" >&2
+    fi
+  fi
+  for _ra_pair in 1 2; do
+    if [ "$_ra_pair" -eq 1 ]; then
+      _ra_a=${_ra_aside:-} _ra_t=${_ra_aside_tgt:-}
+    else
+      _ra_a=${_ra_aside2:-} _ra_t=${_ra_aside2_tgt:-}
+    fi
+    [ -n "$_ra_a" ] || continue
+    if [ -n "${_ra_mv:-}" ] && [ -n "$_ra_t" ] &&
+      "$_ra_mv" -f "$_ra_a" "$_ra_t" 2>/dev/null; then
+      if [ "$_ra_pair" -eq 1 ]; then _ra_aside= _ra_aside_tgt=; else _ra_aside2= _ra_aside2_tgt=; fi
+      continue
+    fi
+    printf 'valise: error: the outgoing GUI env bridge is preserved at %s\n' "$_ra_a" >&2
+  done
+  unset _ra_pair _ra_a _ra_t
+  # Restore is complete (or a re-entrant call found one already in progress):
+  # only now disarm the trap guard.
+  _activate_txn=0
+  _activate_txn_aborting=0
+}
+
 # release_activate <release-id>
 # Verify an installed release, make it active, and move the command stubs to
 # it when install published them. Used by release use and release rollback.
@@ -572,6 +720,13 @@ release_activate() {
     "$_ra_mkdir" -p "$_ra_config_parent" || die "cannot create $_ra_config_parent"
   fi
   acquire_lock
+  # Pre-validate paths that switch_active_link mutates before moving any
+  # outgoing bridge aside.
+  if [ -e "$VALISE_ACTIVE_LINK" ] && [ ! -L "$VALISE_ACTIVE_LINK" ]; then
+    die "active path exists and is not a symlink: $VALISE_ACTIVE_LINK"
+  fi
+  [ ! -L "$(previous_record_path)" ] ||
+    die "previous-release record must not be a symlink: $(previous_record_path)"
   # Prepare the GUI env bridge BEFORE the active link moves. A capture or render
   # failure then leaves the outgoing release active with its own bridge, instead
   # of switching to a release whose env the GUI session will never see.
@@ -592,59 +747,66 @@ release_activate() {
   else
     _gui_action=none
   fi
-  # Remember the outgoing target so a publish failure can undo the switch: with
-  # `release use` there is no install transaction to do it.
+  # Remember the outgoing literal symlink target AND canonical release directory
+  # separately: the literal target restores the link, while the canonical path
+  # is passed to reconcile_commands if rollback runs.
   _ra_old_target=
+  _ra_old_dir=
   _ra_had_link=0
   if [ -L "$VALISE_ACTIVE_LINK" ]; then
     _ra_old_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
     [ -n "$_ra_old_target" ] && _ra_had_link=1
+    # Resolve the canonical directory WITHOUT requiring the target to exist:
+    # a dangling active symlink is a supported state, and rollback must still
+    # know which release's stubs to restore. Mirror active_release_dir's
+    # relative-target handling.
+    case "$_ra_old_target" in
+    /*) _ra_old_dir=$(path_normalize "$_ra_old_target" 2>/dev/null || :) ;;
+    *)
+      _ra_old_link_parent=$(cd "$(path_parent "$VALISE_ACTIVE_LINK")" 2>/dev/null && pwd -P || :)
+      if [ -n "$_ra_old_link_parent" ]; then
+        _ra_old_dir=$(path_normalize "$_ra_old_link_parent/$_ra_old_target" 2>/dev/null || :)
+      fi
+      unset _ra_old_link_parent
+      ;;
+    esac
   fi
   # The switch rewrites the previous-release record to the outgoing release. If
-  # the bridge publish then fails, that record is put back as well as the link.
+  # a later step fails, that record is put back as well as the link.
   _ra_had_previous=0
   _ra_old_previous=
   if _ra_old_previous=$(read_previous_record); then
     _ra_had_previous=1
   fi
-  # The OUTGOING release's bridge is moved aside before anything changes, so a
-  # rollback can put back the exact bytes that described the outgoing release.
-  # Without this, a publish that succeeded followed by a failed reconcile left
-  # the link on the old release and the bridge on the new one.
-  # At most two owned bridges exist for one home (systemd and launchd), so each
-  # aside is tracked with the path it came from in parallel variables. The
-  # asides live in the SAME directory as their bridge, so mv is a rename and
-  # cannot fail across filesystems.
   _ra_aside=
   _ra_aside_tgt=
   _ra_aside2=
   _ra_aside2_tgt=
+  _ra_had_predecessor=0
+  _ra_reconcile_attempted=0
   _ra_rm=$(trusted_utility_path rm 2>/dev/null || :)
   _ra_ln=$(trusted_utility_path ln 2>/dev/null || :)
   _ra_mv=$(trusted_utility_path mv 2>/dev/null || :)
   _ra_published=0
+  _ra_gui_target=${_gui_target:-}
+  _ra_action=${_gui_action:-none}
+  # Arm rollback BEFORE the first outgoing bridge rename so any die or signal
+  # (including inside switch_active_link) restores every moved bridge.
+  _activate_txn=1
   if [ "${_gui_action:-none}" = remove ]; then
-    # The INCOMING release wants no bridge (gui_env=off, or a mode this platform
-    # cannot write, which stages as `remove`). gui_env_bridge_stage leaves
-    # _gui_target EMPTY for that action, so a guard keyed on _gui_target cannot
-    # see the OUTGOING bridge - and remove_gui_env_bridge would then delete it
-    # for good. A failing reconcile afterwards would roll the link back to a
-    # release whose bridge is already gone: the exact inconsistency this
-    # transaction exists to prevent, in the other direction. Both owned
-    # candidates are therefore set aside first.
     for _ra_cand_mode in systemd launchd; do
       _ra_cand=$(gui_env_file "$_ra_cand_mode" 2>/dev/null) || _ra_cand=
       [ -n "$_ra_cand" ] || continue
       [ -f "$_ra_cand" ] && [ ! -L "$_ra_cand" ] || continue
       bridge_is_valise_owned "$_ra_cand_mode" "$_ra_cand" || continue
-      [ -n "$_ra_mv" ] || continue
+      _ra_had_predecessor=1
+      [ -n "$_ra_mv" ] || die "no trusted mv utility available to back up the outgoing GUI env bridge"
       _ra_cand_parent=$(path_parent "$_ra_cand")
-      _ra_new_aside=$(trusted_mktemp_at "$_ra_cand_parent" file "$_ra_cand_parent/.valise-outgoing.XXXXXX") || _ra_new_aside=
-      [ -n "$_ra_new_aside" ] || continue
+      _ra_new_aside=$(trusted_mktemp_at "$_ra_cand_parent" file "$_ra_cand_parent/.valise-outgoing.XXXXXX") ||
+        die "cannot create a backup for the outgoing $_ra_cand_mode GUI env bridge: $_ra_cand"
       if ! "$_ra_mv" -f "$_ra_cand" "$_ra_new_aside" 2>/dev/null; then
-        # mktemp created the file; never strand it.
         [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_new_aside" 2>/dev/null || :
-        continue
+        die "cannot back up the outgoing $_ra_cand_mode GUI env bridge: $_ra_cand"
       fi
       if [ -z "$_ra_aside" ]; then
         _ra_aside=$_ra_new_aside
@@ -655,34 +817,22 @@ release_activate() {
       fi
     done
     unset _ra_cand_mode _ra_cand _ra_cand_parent _ra_new_aside
-  elif [ "${_gui_action:-none}" != none ] && [ -n "${_gui_target:-}" ] && [ -n "$_ra_mv" ] &&
-    [ -f "$_gui_target" ] && bridge_is_valise_owned "$_gui_mode" "$_gui_target"; then
+  elif [ "${_gui_action:-none}" != none ] && [ -n "${_gui_target:-}" ] &&
+    [ -f "$_gui_target" ] && [ ! -L "$_gui_target" ] &&
+    bridge_is_valise_owned "$_gui_mode" "$_gui_target"; then
+    _ra_had_predecessor=1
+    [ -n "$_ra_mv" ] || die "no trusted mv utility available to back up the outgoing GUI env bridge"
     _ra_aside_parent=$(path_parent "$_gui_target")
-    _ra_aside=$(trusted_mktemp_at "$_ra_aside_parent" file "$_ra_aside_parent/.valise-outgoing.XXXXXX") || _ra_aside=
-    if [ -n "$_ra_aside" ]; then
-      # trusted_mktemp_at already CREATED the file. If the move then fails (an
-      # immutable bridge is the deterministic case: BSD refuses to rename it),
-      # clearing the variable would strand that empty file in the bridge
-      # directory forever, so it is removed here first.
-      if "$_ra_mv" -f "$_gui_target" "$_ra_aside" 2>/dev/null; then
-        _ra_aside_tgt=$_gui_target
-      else
-        [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_aside" 2>/dev/null || :
-        _ra_aside=
-      fi
+    _ra_aside=$(trusted_mktemp_at "$_ra_aside_parent" file "$_ra_aside_parent/.valise-outgoing.XXXXXX") ||
+      die "cannot create a backup for the outgoing GUI env bridge: $_gui_target"
+    if "$_ra_mv" -f "$_gui_target" "$_ra_aside" 2>/dev/null; then
+      _ra_aside_tgt=$_gui_target
+    else
+      [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_aside" 2>/dev/null || :
+      _ra_aside=
+      die "cannot back up the outgoing GUI env bridge: $_gui_target"
     fi
   fi
-  # A rollback below must leave the link, the previous-release record, the
-  # bridge and the stubs describing ONE release. That is why the outgoing
-  # bridge is moved aside first, and why a staged 0600 file (which can hold a
-  # value read from a protected file) is always removed.
-  # The bridge path and mode are saved here because gui_env_bridge_publish
-  # CLEARS _gui_target/_gui_mode on every path; a rollback after a successful
-  # publish needs them to put the outgoing bytes back.
-  _ra_gui_target=${_gui_target:-}
-  # gui_env_bridge_publish sets _gui_action=none on every path, so the action
-  # that was performed is captured here for the rollback to reason about.
-  _ra_action=${_gui_action:-none}
   _ra_reconcile_err=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-reconcile.XXXXXX") || _ra_reconcile_err=
   switch_active_link "$_ra_dir"
   _ra_publish_failed=0
@@ -695,12 +845,7 @@ release_activate() {
   fi
   _ra_reconcile_failed=0
   if [ "$_ra_publish_failed" -eq 0 ] && [ -f "$(commands_ledger_path)" ]; then
-    # reconcile_commands reports failures with `die`, which EXITS the process;
-    # running it in a subshell is what lets this activation roll back instead of
-    # leaving the link and the bridge on different releases. Its staging files
-    # are removed by the subshell's own EXIT trap.
-    # A failed mktemp must not turn the redirection itself into an error, so the
-    # diagnostic goes to /dev/null in that case; the rollback still happens.
+    _ra_reconcile_attempted=1
     if [ -n "$_ra_reconcile_err" ]; then
       _ra_rc_err_target=$_ra_reconcile_err
     else
@@ -716,80 +861,10 @@ release_activate() {
       cat "$_ra_rc_err_target" >&2 2>/dev/null || :
     fi
   fi
-  # The captured diagnostic has been reported (or was never produced); the file
-  # must not outlive this function on either the rollback or the commit path.
   [ -z "$_ra_reconcile_err" ] || [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_reconcile_err" 2>/dev/null || :
   _ra_reconcile_err=
   if [ "$_ra_publish_failed" -eq 1 ] || [ "$_ra_reconcile_failed" -eq 1 ]; then
-    [ -z "${_gui_stage:-}" ] || [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_gui_stage" 2>/dev/null || :
-    _gui_stage= _gui_action=none _gui_mode= _gui_target=
-    _ra_rolled=0
-    if [ "$_ra_had_link" -eq 1 ] && [ -n "$_ra_old_target" ] && [ -n "$_ra_ln" ] &&
-      "$_ra_ln" -sfn "$_ra_old_target" "$VALISE_ACTIVE_LINK" 2>/dev/null; then
-      _ra_rolled=1
-      _ra_restored="${_ra_old_target##*/}"
-    elif [ "$_ra_had_link" -eq 0 ] && [ -n "$_ra_rm" ] &&
-      "$_ra_rm" -f "$VALISE_ACTIVE_LINK" 2>/dev/null; then
-      _ra_rolled=1
-      _ra_restored="no release"
-    fi
-    if [ "$_ra_rolled" -eq 1 ]; then
-      ( restore_previous_record "$_ra_had_previous" "$_ra_old_previous" ) >/dev/null 2>&1 ||
-        printf 'valise: cannot restore the previous-release record\n' >&2
-      # Reconcile also removes stubs, so a run that failed part way may already
-      # have dropped some. Bringing the stubs back to the release that is active
-      # again is what makes the restored store describe ONE release; a failure
-      # here is reported but does not replace the primary diagnostic.
-      if [ "$_ra_had_link" -eq 1 ] && [ -n "$_ra_old_target" ] && [ -f "$(commands_ledger_path)" ]; then
-        if ! (
-          trap 'for _ra_t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do
-            [ -z "$_ra_t" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_ra_t" 2>/dev/null
-          done' EXIT
-          reconcile_commands "$_ra_old_target"
-        ) >/dev/null 2>&1; then
-          printf 'valise: error: the command stubs could not be brought back to the restored release\n' >&2
-        fi
-      fi
-      # The bridge follows the release that is active again. Each aside goes
-      # back to the exact path it was taken from, which is the only correct
-      # destination for a remove-direction backup (there _gui_target is empty).
-      if [ -n "$_ra_aside" ] && [ -n "$_ra_aside_tgt" ] && [ -n "$_ra_mv" ] &&
-        "$_ra_mv" -f "$_ra_aside" "$_ra_aside_tgt" 2>/dev/null; then
-        _ra_aside= _ra_aside_tgt=
-      elif [ -n "$_ra_aside" ]; then
-        printf 'valise: error: the outgoing GUI env bridge could not be put back: %s\n' "$_ra_aside" >&2
-      elif [ "$_ra_published" -eq 1 ] && [ -n "$_ra_rm" ] && [ -n "$_ra_gui_target" ] &&
-        [ "$_ra_action" != remove ]; then
-        # No predecessor existed, so the bridge this activation wrote must go.
-        "$_ra_rm" -f "$_ra_gui_target" 2>/dev/null || :
-      fi
-      if [ -n "$_ra_aside2" ] && [ -n "$_ra_aside2_tgt" ] && [ -n "$_ra_mv" ] &&
-        "$_ra_mv" -f "$_ra_aside2" "$_ra_aside2_tgt" 2>/dev/null; then
-        _ra_aside2= _ra_aside2_tgt=
-      elif [ -n "$_ra_aside2" ]; then
-        printf 'valise: error: the outgoing GUI env bridge could not be put back: %s\n' "$_ra_aside2" >&2
-      fi
-    fi
-    # Whatever happened above, an aside must not outlive this function
-    # silently. This also covers _ra_rolled=0, where the link rollback itself
-    # failed and the bridge bytes are the only record of the outgoing release
-    # left: moving them back is attempted, and if that is impossible the path is
-    # named rather than stranded (deleting it would destroy the only surviving
-    # copy of the outgoing release's bridge).
-    for _ra_pair in 1 2; do
-      if [ "$_ra_pair" -eq 1 ]; then
-        _ra_a=$_ra_aside _ra_t=$_ra_aside_tgt
-      else
-        _ra_a=$_ra_aside2 _ra_t=$_ra_aside2_tgt
-      fi
-      [ -n "$_ra_a" ] || continue
-      if [ -n "$_ra_mv" ] && [ -n "$_ra_t" ] &&
-        "$_ra_mv" -f "$_ra_a" "$_ra_t" 2>/dev/null; then
-        continue
-      fi
-      printf 'valise: error: the outgoing GUI env bridge is preserved at %s\n' "$_ra_a" >&2
-    done
-    unset _ra_pair _ra_a _ra_t
+    activate_txn_abort
     if [ "$_ra_publish_failed" -eq 1 ]; then
       _ra_fail_msg="cannot publish the GUI env bridge for $_ra_id"
     else
@@ -800,15 +875,16 @@ release_activate() {
     fi
     die "$_ra_fail_msg; the active release was changed"
   fi
-  # Committed: both aside copies are no longer needed.
+  # Committed: disarm rollback before deleting aside copies.
+  _activate_txn=0
   for _ra_pair in "$_ra_aside" "$_ra_aside2"; do
     [ -z "$_ra_pair" ] || [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_pair" 2>/dev/null || :
   done
   unset _ra_pair
   _ra_aside= _ra_aside_tgt= _ra_aside2= _ra_aside2_tgt=
   release_lock
-  unset _ra_id _ra_dir _ra_root _ra_parent _ra_manifest _ra_config_parent _ra_mkdir _ra_bridge _ra_old_target _ra_ln _ra_rm _ra_mv _ra_had_link
-  unset _ra_had_previous _ra_old_previous _ra_aside _ra_aside_parent _ra_published
+  unset _ra_id _ra_dir _ra_root _ra_parent _ra_manifest _ra_config_parent _ra_mkdir _ra_bridge _ra_old_target _ra_old_dir _ra_ln _ra_rm _ra_mv _ra_had_link
+  unset _ra_had_previous _ra_old_previous _ra_aside _ra_aside_parent _ra_published _ra_had_predecessor _ra_reconcile_attempted
   unset _ra_publish_failed _ra_reconcile_failed _ra_rolled _ra_restored _ra_fail_msg _ra_gui_target _ra_reconcile_err _ra_rc_err_target _ra_t
   unset _ra_aside_tgt _ra_aside2 _ra_aside2_tgt _ra_action
 }
@@ -843,8 +919,10 @@ cmd_release_rollback() {
 # install_txn_begin: remember what an install may have to restore.
 install_txn_begin() {
   _txn_old_target=
+  _txn_old_dir=
   if [ -L "$VALISE_ACTIVE_LINK" ]; then
     _txn_old_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
+    _txn_old_dir=$(cd "$VALISE_ACTIVE_LINK" 2>/dev/null && pwd -P || :)
   fi
   _txn_had_previous=0
   _txn_old_previous=
@@ -886,13 +964,18 @@ install_txn_abort() {
   # The subshells remove their own staging files: a die inside them exits
   # the subshell, and this process's lock handler never saw those names.
   if [ -f "$(commands_ledger_path)" ]; then
-    if [ -n "$_txn_old_target" ] && [ -d "$_txn_old_target" ]; then
-      (
-        trap 'for _t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do [ -z "$_t" ] || [ -z "$_ita_rm" ] || "$_ita_rm" -f "$_t"; done' EXIT
-        reconcile_commands "$_txn_old_target"
-      ) >/dev/null 2>&1 ||
+    if [ -n "$_txn_old_target" ]; then
+      if [ -n "${_txn_old_dir:-}" ] && [ -d "$_txn_old_dir" ] &&
+        [ -f "$_txn_old_dir/valise-release.conf" ]; then
+        (
+          trap 'for _t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do [ -z "$_t" ] || [ -z "$_ita_rm" ] || "$_ita_rm" -f "$_t"; done' EXIT
+          reconcile_commands "$_txn_old_dir"
+        ) >/dev/null 2>&1 ||
+          printf 'valise: cannot move the command stubs back to the restored release\n' >&2
+      else
         printf 'valise: cannot move the command stubs back to the restored release\n' >&2
-    elif [ -z "$_txn_old_target" ]; then
+      fi
+    else
       # No release was active before, so no stub may point at one now.
       (remove_owned_commands) >/dev/null 2>&1 ||
         printf 'valise: cannot remove the command stubs this install published\n' >&2

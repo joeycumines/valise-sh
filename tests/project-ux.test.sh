@@ -160,7 +160,13 @@ else
   fail "bash login shell loads the applied module"
   cat "$_test_home/bash.err" >&2
 fi
-if HOME="$_home" /bin/ksh -lc 'hello' 2>"$_test_home/ksh.err" | grep -F 'project ux hello' >/dev/null; then
+if [ ! -x /bin/ksh ]; then
+  if [ "${VALISE_REQUIRE_TOOLING:-0}" = 1 ]; then
+    fail "ksh login shell loads the applied module (/bin/ksh unavailable)"
+  else
+    skip "ksh login shell loads the applied module (/bin/ksh unavailable)"
+  fi
+elif HOME="$_home" /bin/ksh -lc 'hello' 2>"$_test_home/ksh.err" | grep -F 'project ux hello' >/dev/null; then
   pass "ksh login shell loads the applied module"
 else
   fail "ksh login shell loads the applied module"
@@ -546,6 +552,78 @@ if (cd "$_vendor_project" && _vendor_env build) >"$_test_home/vendor.out" 2>"$_t
 else
   fail "apply installs the manifest it built, not a stale one at the project root"
   cat "$_test_home/vendor.err" >&2
+fi
+
+# --- phase-probe failure must abort compile and build -------------------------
+# An unwritable or nonexistent TMPDIR makes project_closure_has_phase fail to
+# allocate scratch files; compile and build must abort nonzero rather than
+# publishing an incomplete release that omits the interactive plans.
+_probe_project="$_test_home/probe-project"
+(cd "$_test_home" && _env new probe-project) >/dev/null 2>&1 || :
+cat >"$_probe_project/module.d/int_mod.meta" <<'EOF'
+name=int_mod
+version=
+side_effect=read-only
+phase=interactive
+requires=
+optional=
+shells=posix
+platforms=any
+exports=int_mod_fn
+load=modules/int_mod.sh
+EOF
+printf '%s\n' 'int_mod_fn() { printf "int-ok\n"; }' >"$_probe_project/modules/int_mod.sh"
+printf 'default\tbash\tprofile_main int_mod\ndefault\tzsh\tprofile_main int_mod\ndefault\tsh\tprofile_main int_mod\n' >"$_probe_project/bundles.tsv"
+if (cd "$_probe_project" && _env build) >/dev/null 2>&1 &&
+  [ -f "$_probe_project/build/release/plans/bash-interactive.sh" ]; then
+  _orig_manifest=$(cksum <"$_probe_project/build/release/manifest.tsv")
+  _bad_tmp_missing="$_test_home/no-such-tmpdir"
+  _compile_bad_out="$_test_home/compile-missing-tmp"
+  if (cd "$_probe_project" && TMPDIR="$_bad_tmp_missing" _env compile "$_compile_bad_out") \
+    >"$_test_home/probe-compile-missing.out" 2>"$_test_home/probe-compile-missing.err"; then
+    fail "compile with nonexistent TMPDIR must fail rather than omit interactive plans"
+  elif [ ! -e "$_compile_bad_out" ]; then
+    pass "compile with nonexistent TMPDIR fails and publishes nothing"
+  else
+    fail "compile with nonexistent TMPDIR left output behind"
+  fi
+  if (cd "$_probe_project" && TMPDIR="$_bad_tmp_missing" _env build) \
+    >"$_test_home/probe-build-missing.out" 2>"$_test_home/probe-build-missing.err"; then
+    fail "build with nonexistent TMPDIR must fail rather than omit interactive plans"
+  elif [ -f "$_probe_project/build/release/plans/bash-interactive.sh" ] &&
+    [ "$(cksum <"$_probe_project/build/release/manifest.tsv")" = "$_orig_manifest" ]; then
+    pass "build with nonexistent TMPDIR fails and preserves existing build/release"
+  else
+    fail "build with nonexistent TMPDIR damaged existing build/release"
+  fi
+  if [ "$(id -u)" -eq 0 ]; then
+    skip "compile and build with mode-0500 TMPDIR fail (chmod 0500 is ineffective for uid 0)"
+  else
+    _bad_tmp_ro="$_test_home/ro-tmpdir"
+    mkdir -p "$_bad_tmp_ro"
+    chmod 0500 "$_bad_tmp_ro"
+    _compile_ro_out="$_test_home/compile-ro-tmp"
+    if (cd "$_probe_project" && TMPDIR="$_bad_tmp_ro" _env compile "$_compile_ro_out") \
+      >"$_test_home/probe-compile-ro.out" 2>"$_test_home/probe-compile-ro.err"; then
+      fail "compile with mode-0500 TMPDIR must fail rather than omit interactive plans"
+    elif [ ! -e "$_compile_ro_out" ]; then
+      pass "compile with mode-0500 TMPDIR fails and publishes nothing"
+    else
+      fail "compile with mode-0500 TMPDIR left output behind"
+    fi
+    if (cd "$_probe_project" && TMPDIR="$_bad_tmp_ro" _env build) \
+      >"$_test_home/probe-build-ro.out" 2>"$_test_home/probe-build-ro.err"; then
+      fail "build with mode-0500 TMPDIR must fail rather than omit interactive plans"
+    elif [ -f "$_probe_project/build/release/plans/bash-interactive.sh" ] &&
+      [ "$(cksum <"$_probe_project/build/release/manifest.tsv")" = "$_orig_manifest" ]; then
+      pass "build with mode-0500 TMPDIR fails and preserves existing build/release"
+    else
+      fail "build with mode-0500 TMPDIR damaged existing build/release"
+    fi
+    chmod 0700 "$_bad_tmp_ro"
+  fi
+else
+  fail "probe-project baseline build did not produce interactive plans"
 fi
 
 printf '\n=== valise project UX summary ===\n'

@@ -443,35 +443,38 @@ END {
                 # make the next reload silently unset a caller's replacement
                 # instead of reporting the collision.
                 #
-                # The removal uses case PREFIX/SUFFIX matches over a space-padded
-                # copy, NOT `for tok in $ledger`: zsh does not word-split an
-                # unquoted expansion by default, so a for loop silently kept
-                # every token there. The pattern is held in a VARIABLE and
-                # quoted at the use site, because a quoted pattern written
-                # inline in ${var#...} does not match at all.
-                printf "  case \" ${_valise_plan_owned:-} \" in\n"
-                printf "  *\" %s:%s \"*)\n", mod_display[name], pe_values[pei]
-                printf "    unset -f %s 2>/dev/null || :\n", pe_values[pei]
-                printf "    _valise_owned_pat=' %s:%s '\n", mod_display[name], pe_values[pei]
-                printf "    _valise_owned_pad=\" ${_valise_plan_owned:-} \"\n"
-                printf "    case $_valise_owned_pad in\n"
-                printf "    \"$_valise_owned_pat\"*)\n"
-                printf "      _valise_plan_owned=${_valise_owned_pad#\"$_valise_owned_pat\"}\n"
+                # Walk the space-delimited ledger one token at a time using
+                # parameter stripping and `[ = ]` comparison:
+                #   * avoids unquoted `for tok in $ledger` (zsh does not
+                #     word-split by default)
+                #   * avoids `case` pattern matching over provider/export names
+                #     (Bash `shopt -s nocasematch` makes `case` case-insensitive,
+                #     conflating distinct providers like caseMod vs casemod).
+                printf "  _valise_owned_rem=${_valise_plan_owned:-}\n"
+                printf "  _valise_owned_new=\n"
+                printf "  _valise_owned_hit=0\n"
+                printf "  while [ -n \"$_valise_owned_rem\" ]; do\n"
+                printf "    case $_valise_owned_rem in\n"
+                printf "    *' '*)\n"
+                printf "      _valise_owned_tok=${_valise_owned_rem%%%% *}\n"
+                printf "      _valise_owned_rem=${_valise_owned_rem#* }\n"
                 printf "      ;;\n"
-                printf "    *\"$_valise_owned_pat\")\n"
-                printf "      _valise_plan_owned=${_valise_owned_pad%%\"$_valise_owned_pat\"}\n"
-                printf "      ;;\n"
-                printf "    *\"$_valise_owned_pat\"*)\n"
-                printf "      _valise_owned_left=${_valise_owned_pad%%%%\"$_valise_owned_pat\"*}\n"
-                printf "      _valise_owned_right=${_valise_owned_pad#*\"$_valise_owned_pat\"}\n"
-                printf "      _valise_plan_owned=\"$_valise_owned_left $_valise_owned_right\"\n"
+                printf "    *)\n"
+                printf "      _valise_owned_tok=$_valise_owned_rem\n"
+                printf "      _valise_owned_rem=\n"
                 printf "      ;;\n"
                 printf "    esac\n"
-                printf "    _valise_plan_owned=${_valise_plan_owned# }\n"
-                printf "    _valise_plan_owned=${_valise_plan_owned%% }\n"
-                printf "    unset _valise_owned_pat _valise_owned_pad _valise_owned_left _valise_owned_right\n"
-                printf "    ;;\n"
-                printf "  esac\n"
+                printf "    if [ \"$_valise_owned_tok\" = '%s:%s' ]; then\n", mod_display[name], pe_values[pei]
+                printf "      _valise_owned_hit=1\n"
+                printf "    elif [ -n \"$_valise_owned_tok\" ]; then\n"
+                printf "      _valise_owned_new=\"${_valise_owned_new:+$_valise_owned_new }$_valise_owned_tok\"\n"
+                printf "    fi\n"
+                printf "  done\n"
+                printf "  if [ \"$_valise_owned_hit\" -eq 1 ]; then\n"
+                printf "    unset -f %s 2>/dev/null || :\n", pe_values[pei]
+                printf "    _valise_plan_owned=$_valise_owned_new\n"
+                printf "  fi\n"
+                printf "  unset _valise_owned_rem _valise_owned_new _valise_owned_tok _valise_owned_hit\n"
             }
         }
         printf "fi\n"
@@ -627,10 +630,28 @@ END {
                     printf " %s", module_exports[ei]
                 }
                 printf "; do\n"
-                printf "%s    case \" ${_valise_plan_owned:-} \" in\n", body_indent
-                printf "%s    *\" %s:$%sexport \"*) ;;\n", body_indent, mod_display[name], prefix
-                printf "%s    *) _valise_plan_owned=\"${_valise_plan_owned:+$_valise_plan_owned }%s:$%sexport\" ;;\n", body_indent, mod_display[name], prefix
-                printf "%s    esac\n", body_indent
+                printf "%s    _valise_owned_rem=${_valise_plan_owned:-}\n", body_indent
+                printf "%s    _valise_owned_hit=0\n", body_indent
+                printf "%s    while [ -n \"$_valise_owned_rem\" ]; do\n", body_indent
+                printf "%s      case $_valise_owned_rem in\n", body_indent
+                printf "%s      *' '*)\n", body_indent
+                printf "%s        _valise_owned_tok=${_valise_owned_rem%%%% *}\n", body_indent
+                printf "%s        _valise_owned_rem=${_valise_owned_rem#* }\n", body_indent
+                printf "%s        ;;\n", body_indent
+                printf "%s      *)\n", body_indent
+                printf "%s        _valise_owned_tok=$_valise_owned_rem\n", body_indent
+                printf "%s        _valise_owned_rem=\n", body_indent
+                printf "%s        ;;\n", body_indent
+                printf "%s      esac\n", body_indent
+                printf "%s      if [ \"$_valise_owned_tok\" = \"%s:$%sexport\" ]; then\n", body_indent, mod_display[name], prefix
+                printf "%s        _valise_owned_hit=1\n", body_indent
+                printf "%s        break\n", body_indent
+                printf "%s      fi\n", body_indent
+                printf "%s    done\n", body_indent
+                printf "%s    if [ \"$_valise_owned_hit\" -eq 0 ]; then\n", body_indent
+                printf "%s      _valise_plan_owned=\"${_valise_plan_owned:+$_valise_plan_owned }%s:$%sexport\"\n", body_indent, mod_display[name], prefix
+                printf "%s    fi\n", body_indent
+                printf "%s    unset _valise_owned_rem _valise_owned_tok _valise_owned_hit\n", body_indent
                 printf "%s  done\n", body_indent
                 printf "%s  unset %sexport\n", body_indent, prefix
                 printf "%sfi\n", body_indent

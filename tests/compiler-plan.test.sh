@@ -514,6 +514,47 @@ else
   fail "could not extract the reload prelude from the compiled plan"
 fi
 
+# Case-distinct provider names across releases must not be conflated when Bash
+# has `shopt -s nocasematch` enabled (control: nocasematch off; regression: on).
+_nc_a="$_tmp/nc-a"
+_nc_b="$_tmp/nc-b"
+mkdir -p "$_nc_a/module.d" "$_nc_a/modules" "$_nc_b/module.d" "$_nc_b/modules"
+: >"$_nc_a/valise.conf"
+: >"$_nc_b/valise.conf"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_nc_a/variants.tsv"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_nc_b/variants.tsv"
+printf 'name=caseMod\nversion=\nside_effect=read-only\nrequires=\noptional=\nshells=posix\nplatforms=any\nexports=review_common\nload=modules/cm.sh\n' >"$_nc_a/module.d/caseMod.meta"
+printf 'review_common() { printf "A\\n"; }\n' >"$_nc_a/modules/cm.sh"
+printf '# bundle\tshell\troots\ndefault\tbash\tcaseMod\n' >"$_nc_a/bundles.tsv"
+printf 'name=casemod\nversion=\nside_effect=read-only\nrequires=\noptional=\nshells=posix\nplatforms=any\nexports=review_common\nload=modules/cm.sh\n' >"$_nc_b/module.d/casemod.meta"
+printf 'review_common() { printf "B\\n"; }\n' >"$_nc_b/modules/cm.sh"
+printf '# bundle\tshell\troots\ndefault\tbash\tcasemod\n' >"$_nc_b/bundles.tsv"
+rm -rf "$_tmp/nc-rel-a" "$_tmp/nc-rel-b"
+(cd "$_nc_a" && "$_valise" build "$_tmp/nc-rel-a") >/dev/null 2>&1
+(cd "$_nc_b" && "$_valise" build "$_tmp/nc-rel-b") >/dev/null 2>&1
+for _nc_mode in off on; do
+  _nc_out=$(/bin/bash -c '
+    if [ "$1" = on ]; then shopt -s nocasematch; else shopt -u nocasematch; fi
+    VALISE_MODULE_ROOT="$2"
+    . "$VALISE_MODULE_ROOT/plans/bash.sh"
+    printf "before=%s ledger=%s\n" "$(review_common)" "${_valise_plan_owned:-}"
+    VALISE_MODULE_ROOT="$3"
+    VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh" 2>"$4"
+    printf "rc=%s after=%s ledger=%s\n" "$?" "$(review_common)" "${_valise_plan_owned:-}"
+    shopt -q nocasematch && printf "opt=on\n" || printf "opt=off\n"
+  ' -- "$_nc_mode" "$_tmp/nc-rel-a" "$_tmp/nc-rel-b" "$_tmp/nc-$_nc_mode.err" 2>/dev/null || :)
+  if printf '%s\n' "$_nc_out" | grep -Fx 'before=A ledger=caseMod:review_common' >/dev/null &&
+    printf '%s\n' "$_nc_out" | grep -Fx 'rc=1 after=A ledger=caseMod:review_common' >/dev/null &&
+    printf '%s\n' "$_nc_out" | grep -Fx "opt=$_nc_mode" >/dev/null &&
+    grep -F 'declared export already exists before load: review_common' "$_tmp/nc-$_nc_mode.err" >/dev/null; then
+    pass "provider ownership ledger stays byte-exact with nocasematch $_nc_mode"
+  else
+    fail "provider ownership ledger conflated case-distinct providers with nocasematch $_nc_mode"
+    printf '%s\n' "$_nc_out" >&2
+    cat "$_tmp/nc-$_nc_mode.err" >&2 2>/dev/null || :
+  fi
+done
+
 # Phase migration across a release switch: a module that was env-phase in the
 # release this process loaded and is interactive-phase in the next one must be
 # reloaded when the block re-sources. The reload decision is per RELEASE, not

@@ -355,12 +355,14 @@ env_export_capture() {
     return 1
   }
   # The outer environment is the one the plan sees, for baseline AND target: the
-  # caller's TMPDIR and each XDG root are passed through exactly when the caller
-  # set them (`${VAR+x}`), so an unset root stays unset and a module's default
-  # applies as it would in the session. The words are accumulated with `set --`
-  # so a value containing spaces survives intact.
+  # caller's PATH, TMPDIR and each XDG root are passed through (PATH defaults to
+  # /usr/bin:/bin when unset/empty; TMPDIR and XDG roots only when set via
+  # ${VAR+x}), so PATH-dependent exports (such as valise_editor_defaults or
+  # command -v probes) match a real session while PATH itself stays excluded
+  # from bridge output. The words are accumulated with `set --` so values
+  # containing spaces survive intact.
   _eec_status=0
-  set -- PATH=/usr/bin:/bin HOME="${HOME:-/}" \
+  set -- PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/}" \
     EEC_HOME="${HOME:-/}" EEC_ZDOT="$_eec_scratch/zdot" EEC_PLAN_ERR="$_eec_plan_err"
   if [ "${TMPDIR+x}" = x ]; then set -- "$@" TMPDIR="$TMPDIR"; fi
   if [ "${XDG_CONFIG_HOME+x}" = x ]; then set -- "$@" XDG_CONFIG_HOME="$XDG_CONFIG_HOME"; fi
@@ -676,13 +678,43 @@ env_export_emit() {
         }
         return out
       }
-      BEGIN { out = ""; bad = 0 }
+      BEGIN {
+        out = ""; bad = 0
+        tab_ch = sprintf("%c", 9)
+        del_ch = sprintf("%c", 127)
+        n_nc = 0
+        for (b = 144; b <= 175; b++) nc[++n_nc] = sprintf("%c%c%c", 239, 183, b)
+        nc[++n_nc] = sprintf("%c%c%c", 239, 191, 190)
+        nc[++n_nc] = sprintf("%c%c%c", 239, 191, 191)
+        for (p = 1; p <= 16; p++) {
+          b0 = 240 + int(p / 4)
+          b1 = 143 + (p % 4) * 16
+          nc[++n_nc] = sprintf("%c%c%c%c", b0, b1, 191, 190)
+          nc[++n_nc] = sprintf("%c%c%c%c", b0, b1, 191, 191)
+        }
+      }
+      function has_nonchar(val,   i) {
+        for (i = 1; i <= n_nc; i++) {
+          if (index(val, nc[i]) > 0) return 1
+        }
+        return 0
+      }
       /^[A-Za-z_][A-Za-z0-9_]*=/ {
         key = $1
         sub(/^[^=]*=/, "")
         val = $0
         if (val == "") {
           printf "valise: error: %s is exported empty; environment.d cannot represent an empty value, so unset it instead\n", key > "/dev/stderr"
+          bad = 1
+          next
+        }
+        if (index(val, tab_ch) > 0 || index(val, del_ch) > 0) {
+          printf "valise: error: %s contains TAB or DEL, which systemd environment.d alters during parsing; omit or normalize it\n", key > "/dev/stderr"
+          bad = 1
+          next
+        }
+        if (has_nonchar(val)) {
+          printf "valise: error: %s contains a Unicode noncharacter, which systemd environment.d rejects\n", key > "/dev/stderr"
           bad = 1
           next
         }

@@ -268,11 +268,14 @@ The ledger of installed exports records the PROVIDER of each one, as
 `<module>:<export>`. A reload therefore clears only the exports the same
 module previously installed: a different module exporting the same name is
 reported as a conflict instead of silently replacing it, and a function the
-caller defined is left alone. The ledger is per shell process and never
-pruned, so renaming an export-providing module (`foo:fn` to `bar:fn`) leaves
-the old provider recorded in every shell that is already running. Shells
-started after the rename are unaffected; an already-running shell keeps its
-existing export until it is restarted.
+caller defined before valise owned that name is left alone. Because the
+ledger tracks ownership by provider and name rather than by function body,
+a caller redefinition of a function that valise already owns in the current
+shell will be replaced on the next reload of that provider. The ledger is per
+shell process and never pruned, so renaming an export-providing module
+(`foo:fn` to `bar:fn`) leaves the old provider recorded in every shell that is
+already running. Shells started after the rename are unaffected; an
+already-running shell keeps its existing export until it is restarted.
 
 ### Published commands
 

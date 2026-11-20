@@ -115,12 +115,15 @@ _e2e_rc_file_for() {
 }
 
 # _e2e_stage1_only_file <class> <home>: a startup file for the shell that must
-# carry stage 1 but NEVER the interactive stage. ~/.profile is read by every
-# POSIX shell, so it is the strongest witness for bash and ksh; zsh never reads
-# it, so zsh's witness is ~/.zshenv.
+# carry stage 1 but NEVER the interactive stage. For bash that witness is
+# ~/.bashrc (a login bash reads only its login file, which is the bash-login
+# stage and legitimately carries stage 2); ~/.profile is read by every POSIX
+# shell, so it is the strongest witness for sh/ksh; zsh never reads it, so
+# zsh's witness is ~/.zshenv.
 _e2e_stage1_only_file() {
   case "$1" in
     zsh) printf '%s\n' "$2/.zshenv" ;;
+    bash) printf '%s\n' "$2/.bashrc" ;;
     *) printf '%s\n' "$2/.profile" ;;
   esac
 }
@@ -379,6 +382,30 @@ run_lane() {
     # later run.
     _stage2_file=$(_e2e_rc_file_for "$_shell_name" "$_tmp_home")
     _stage1_only=$(_e2e_stage1_only_file "$_class" "$_tmp_home")
+    # Whether the lane's login file carries the bash-login stage: install writes
+    # it whenever no .bash_profile/.bash_login exists, so in a fresh home
+    # .profile legitimately carries the interactive stage (gated on the runtime
+    # plan being bash) regardless of which shell the lane runs - macOS /bin/sh
+    # is bash, so its .profile is bash-login too. Such a login file is not a
+    # stage-1-only witness; pick another env-stage file that must be env-only.
+    _login_class_file=$(HOME="$_tmp_home" "$_shell_path" -c 'for _f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do [ -e "$_f" ] && { printf "%s\n" "$_f"; break; }; done' 2>/dev/null || :)
+    if [ "$_login_class_file" = "$_tmp_home/.profile" ] &&
+       grep -q 'case \$- in \*i\*)' "$_tmp_home/.profile" 2>/dev/null; then
+      case "$_class" in
+        zsh) _stage1_only="$_tmp_home/.zshenv" ;;
+        bash) _stage1_only="$_tmp_home/.bashrc" ;;
+        *)
+          # .zprofile is only written when zsh is installed or already present;
+          # without zsh the grep below would run on a missing file and pass
+          # vacuously. Fall back to .zshenv, which is written in that case.
+          if [ -f "$_tmp_home/.zprofile" ]; then
+            _stage1_only="$_tmp_home/.zprofile"
+          else
+            _stage1_only="$_tmp_home/.zshenv"
+          fi
+          ;;
+      esac
+    fi
     if [ "$_class" = bash ] && [ "$_shell_name" = bash ]; then
       # A login bash reads ONLY its login file (never .bashrc), so that file is
       # the one place a login shell can reach the interactive stage. In a fresh
@@ -391,6 +418,11 @@ run_lane() {
         fail "$_lane/$_shell_name: the bash login file does not carry the interactive stage"
       fi
     elif [ "$_stage1_only" = "$_stage2_file" ]; then
+      :
+    elif [ ! -f "$_stage1_only" ]; then
+      # No stage-1-only witness file was installed in this lane; there is
+      # nothing to assert here (the original code's grep also passed
+      # vacuously). Skip rather than fail so zsh-less homes still pass.
       :
     elif grep -q 'case \$- in \*i\*)' "$_stage1_only" 2>/dev/null; then
       fail "$_lane/$_shell_name: $_stage1_only carries the interactive stage"
@@ -418,14 +450,17 @@ run_lane() {
     fi
     # sh/ksh interactive subshells read $ENV. The .profile block wires ENV to
     # the valise shim unconditionally (bash ignores ENV as bash and reads it as
-    # `sh`; dash and ksh read it), the shim is the RC-STAGE entry point for those
-    # shells - so it carries BOTH stages - and .profile itself carries stage 1
-    # only, exactly like every other env-stage file.
+    # `sh`; dash and ksh read it), and the shim is the RC-STAGE entry point for
+    # those shells - so it carries BOTH stages. The ENV wiring lives in the
+    # login file (.profile in a fresh home, which may also carry the bash-login
+    # interactive stage); what must be env-only for sh/ksh is the non-login
+    # env-stage file .zprofile.
     case $_class in
       sh|ksh)
         _shim="$_tmp_home/.config/valise/env.sh"
-        if grep -qF "ENV='$_shim'" "$_tmp_home/.profile" &&
-          ! grep -q 'case \$- in \*i\*)' "$_tmp_home/.profile" &&
+        if grep -qF "_valise_shim='$_shim'" "$_tmp_home/.profile" &&
+          grep -q 'ENV=$_valise_shim; export ENV' "$_tmp_home/.profile" &&
+          ! grep -q 'case \$- in \*i\*)' "$_tmp_home/.zprofile" &&
           [ -f "$_shim" ] &&
           grep -q '# BEGIN valise managed block' "$_shim" &&
           grep -q 'case \$- in \*i\*)' "$_shim"; then

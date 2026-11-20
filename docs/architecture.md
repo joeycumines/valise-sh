@@ -79,7 +79,7 @@ run.
 ## The env re-evaluation contract
 
 The env plan is a convergent projection, not a once-per-session increment:
-after any startup file evaluates, the exported environment equals the
+when the guard triggers evaluation, the exported environment converges to the
 compiled intended environment regardless of what `/etc/profile`, macOS
 `path_helper`, or an outer shell did. Concretely:
 
@@ -90,9 +90,13 @@ compiled intended environment regardless of what `/etc/profile`, macOS
   entry point, the interactive plan on a release switch or an explicit
   `source ~/.bashrc`) and a raw assignment duplicates on each evaluation.
 - The load guard `_valise_profile_loaded` records the active release id, so
-  the same shell with the same release is a no-op, a switched release forces
-  a reload, and a fresh nested shell always re-runs the env plan — which is
-  what repairs `path_helper` damage in new tmux panes.
+  re-reading a startup file in the same shell with the same release is a no-op
+  unless `VALISE_RELOAD=1` is set, the one-shot login repair ticket is armed,
+  or `PATH` changed since the last successful env evaluation; arbitrary edits
+  to other exported scalars in the same shell do not trigger re-evaluation on
+  their own. A switched release forces a reload, and a fresh nested shell
+  always re-runs the env plan — which is what repairs `path_helper` damage in
+  new tmux panes.
 - Sourcing the env plan twice in one process yields byte-identical exported
   env (fixed point; no PATH growth).
 - Contexts with no user startup file at all (cron, systemd services,

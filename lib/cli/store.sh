@@ -168,7 +168,7 @@ release_lock() {
     _hook_tmp=""
   fi
   for _release_tmp in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}" "${_prev_tmp:-}" "${_dry_tmp:-}" \
-    "${_un_tmp:-}" "${_gui_stage:-}" "${_rii_tmp:-}"; do
+    "${_un_tmp:-}" "${_gui_stage:-}" "${_rii_tmp:-}" "${_ra_reconcile_err:-}"; do
     [ -n "$_release_tmp" ] || continue
     [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_release_tmp" 2>/dev/null || :
     if [ -e "$_release_tmp" ] || [ -L "$_release_tmp" ]; then _cleanup_failed=1; fi
@@ -181,6 +181,7 @@ release_lock() {
   _un_tmp=""
   _gui_stage=""
   _rii_tmp=""
+  _ra_reconcile_err=""
   if [ -n "$_mm_tmp" ]; then
     [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_mm_tmp" 2>/dev/null || :
     if [ -e "$_mm_tmp" ] || [ -L "$_mm_tmp" ]; then _cleanup_failed=1; fi
@@ -197,6 +198,7 @@ release_lock() {
 
 _handle_int() {
   trap - INT
+  [ "${_activate_txn:-0}" -ne 1 ] || activate_txn_abort
   [ "${_install_txn:-0}" -ne 1 ] || install_txn_abort
   release_lock
   exit 130
@@ -204,12 +206,13 @@ _handle_int() {
 
 _handle_term() {
   trap - TERM
+  [ "${_activate_txn:-0}" -ne 1 ] || activate_txn_abort
   [ "${_install_txn:-0}" -ne 1 ] || install_txn_abort
   release_lock
   exit 143
 }
 
-trap '_exit_status=$?; [ "${_install_txn:-0}" -ne 1 ] || install_txn_abort; release_lock; if [ "$_exit_status" -eq 0 ] && [ "$_cleanup_failed" -ne 0 ]; then _exit_status=1; fi; exit "$_exit_status"' EXIT
+trap '_exit_status=$?; [ "${_activate_txn:-0}" -ne 1 ] || activate_txn_abort; [ "${_install_txn:-0}" -ne 1 ] || install_txn_abort; release_lock; if [ "$_exit_status" -eq 0 ] && [ "$_cleanup_failed" -ne 0 ]; then _exit_status=1; fi; exit "$_exit_status"' EXIT
 trap '_handle_int' INT
 trap '_handle_term' TERM
 
