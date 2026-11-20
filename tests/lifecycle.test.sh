@@ -409,11 +409,13 @@ _shim="$_home/.config/valise/env.sh"
 # The shim is the RC-STAGE entry point for sh/ksh interactive subshells, so it
 # carries BOTH stages; ~/.profile is an env-stage file and must carry only
 # stage 1, because interactive setup belongs in the shell's rc file. The ENV
-# stanza names the shim in both.
+# stanza names the shim in both: the runtime stanza assigns the verified
+# _valise_shim variable, initialized to the single-quoted shim path.
 if [ -f "$_shim" ] &&
   grep -q '# BEGIN valise managed block' "$_shim" &&
   grep -q 'case \$- in \*i\*)' "$_shim" &&
-  grep -qF "ENV='$_shim'" "$_shim" &&
+  grep -qF "_valise_shim='$_shim'" "$_shim" &&
+  grep -q 'ENV=$_valise_shim; export ENV' "$_shim" &&
   [ "$(_mode "$_shim")" = 644 ]; then
   pass "apply deploys a two-stage ENV shim naming itself"
 else
@@ -426,7 +428,8 @@ fi
 # and the ENV stanza. A non-bash login file is covered by the e2e stage lanes.
 if grep -q '# BEGIN valise managed block' "$_home/.profile" &&
   grep -q 'case \$- in \*i\*)' "$_home/.profile" &&
-  grep -qF "ENV='$_shim'" "$_home/.profile"; then
+  grep -qF "_valise_shim='$_shim'" "$_home/.profile" &&
+  grep -q 'ENV=$_valise_shim; export ENV' "$_home/.profile"; then
   pass "~/.profile carries the interactive stage as the bash login file and wires ENV at the shim"
 else
   fail "~/.profile does not carry the interactive stage and the ENV stanza"
@@ -441,7 +444,8 @@ _use_home envshim-bash
 # The ENV stanza is unconditional: bash ignores ENV when invoked as bash and
 # READS it when invoked as `sh`, so gating on the plan class excluded a shell
 # that needs it.
-if grep -qF "ENV='$_home/.config/valise/env.sh'" "$_home/.profile" &&
+if grep -qF "_valise_shim='$_home/.config/valise/env.sh'" "$_home/.profile" &&
+  grep -q 'ENV=$_valise_shim; export ENV' "$_home/.profile" &&
   ! grep -q 'case "$_valise_plan" in' "$_home/.profile" &&
   [ -f "$_home/.config/valise/env.sh" ]; then
   pass "installing under bash wires ENV unconditionally for an sh login shell"
