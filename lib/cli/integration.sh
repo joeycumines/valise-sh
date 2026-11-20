@@ -116,6 +116,9 @@ print_posix_integration() {
     '  fi' \
     '  if [ "${_valise_env_repair:-}" = armed ]; then _valise_env_repair=done; fi' \
     '  if [ "$_valise_want" -eq 1 ]; then' \
+    '    if [ "${_valise_interactive_loaded:-}" != "$_valise_release_id" ]; then' \
+    '      unset _valise_interactive_loaded' \
+    '    fi' \
     '    if [ -f "$_valise_active/plans/$_valise_plan.sh" ]; then' \
     '      _valise_had=${VALISE_RELOAD+x}' \
     '      _valise_old=${VALISE_RELOAD-}' \
@@ -153,13 +156,18 @@ print_posix_integration() {
     '      _valise_stage1_ok=0' \
     '    fi' \
     '  fi'
-  if [ "$_pix_stage" = all ]; then
+  if [ "$_pix_stage" = all ] || [ "$_pix_stage" = bash-login ]; then
+    if [ "$_pix_stage" = bash-login ]; then
+      printf '%s\n' '  if [ "$_valise_stage1_ok" -eq 1 ] && [ "$_valise_plan" = bash ]; then'
+    else
+      printf '%s\n' '  if [ "$_valise_stage1_ok" -eq 1 ]; then'
+    fi
     printf '%s\n' \
-      '  if [ "$_valise_stage1_ok" -eq 1 ]; then' \
       '  case $- in *i*)' \
       '    if [ "${_valise_interactive_loaded:-}" != "$_valise_release_id" ] ||' \
       '      [ "${VALISE_RELOAD:-}" = 1 ]; then' \
       '      if [ -f "$_valise_active/plans/$_valise_plan-interactive.sh" ]; then' \
+      '        unset _valise_interactive_loaded' \
       '        _valise_had=${VALISE_RELOAD+x}' \
       '        _valise_old=${VALISE_RELOAD-}' \
       '        if [ "$_valise_seen" -eq 1 ]; then' \
@@ -189,14 +197,28 @@ print_posix_integration() {
   if [ -n "$_pix_shim_literal" ]; then
     # A `$`-containing ENV is the shell's own indirection (and ksh tilde-expands
     # a leading `~`), so either spelling is user-owned and never repointed.
+    # Require a regular non-symlink file carrying the exact managed block header
+    # so startup never adopts a foreign shim that install refused.
     printf '%s\n' \
-      'if [ -f '"$_pix_shim_literal"' ]; then' \
-      '  case "${ENV:-}" in' \
-      "  '') ENV=$_pix_shim_literal; export ENV ;;" \
-      '  *"\$"* | "~"*) : ;;' \
-      "  *) [ -e \"\$ENV\" ] || [ -L \"\$ENV\" ] || { ENV=$_pix_shim_literal; export ENV; } ;;" \
-      '  esac' \
-      'fi'
+      "_valise_shim=$_pix_shim_literal" \
+      'if [ -f "$_valise_shim" ] && [ ! -L "$_valise_shim" ] && [ -r "$_valise_shim" ]; then' \
+      '  _valise_shim_ok=0' \
+      '  while IFS= read -r _valise_line || [ -n "$_valise_line" ]; do' \
+      '    if [ "$_valise_line" = "# BEGIN valise managed block" ]; then' \
+      '      _valise_shim_ok=1' \
+      '      break' \
+      '    fi' \
+      '  done <"$_valise_shim" 2>/dev/null' \
+      '  if [ "$_valise_shim_ok" -eq 1 ]; then' \
+      '    case "${ENV:-}" in' \
+      '    "") ENV=$_valise_shim; export ENV ;;' \
+      '    *"\$"* | "~"*) : ;;' \
+      '    *) [ -e "$ENV" ] || [ -L "$ENV" ] || { ENV=$_valise_shim; export ENV; } ;;' \
+      '    esac' \
+      '  fi' \
+      '  unset _valise_shim_ok _valise_line' \
+      'fi' \
+      'unset _valise_shim'
   fi
   printf '%s\n' \
     'unset _valise_active _valise_plan' \
@@ -329,15 +351,8 @@ posix_startup_targets() {
   # .bash_login symlink is ignored by bash (stat returns ENOENT) and it falls
   # back to .profile, so only an existing target shadows .profile; the write
   # path still skips a symlink it is asked to write.
-  _pst_bash_rc=0
-  case "${SHELL:-}" in
-  */bash | bash) _pst_bash_rc=1 ;;
-  esac
-  if [ -e "$1/.bashrc" ] || [ -L "$1/.bashrc" ]; then _pst_bash_rc=1; fi
-  _pst_bash_stage=env
-  [ "$_pst_bash_rc" -eq 0 ] || _pst_bash_stage=all
   _pst_bash_login=$1/.profile
-  _pst_login_stage=$_pst_bash_stage
+  _pst_login_stage=bash-login
   if [ -e "$1/.bash_profile" ]; then
     _pst_bash_login=$1/.bash_profile
     _pst_login_stage=all
@@ -345,13 +360,15 @@ posix_startup_targets() {
     _pst_bash_login=$1/.bash_login
     _pst_login_stage=all
   fi
-  # .profile is always written: sh, ksh and dash read it at login. It is the
-  # bash login file only when no .bash_profile or .bash_login exists.
+  # .profile is always written: sh, ksh and dash read it at login. When neither
+  # .bash_profile nor .bash_login exists, .profile is Bash's login file and
+  # carries the bash-login stage so `bash --login -i` always loads interactive
+  # modules without altering sh/ksh startup ordering.
   if [ "$_pst_bash_login" != "$1/.profile" ]; then
     printf 'env\t%s\n' "$1/.profile"
   fi
   printf '%s\t%s\n' "$_pst_login_stage" "$_pst_bash_login"
-  unset _pst_bash_rc _pst_bash_stage _pst_bash_login _pst_login_stage
+  unset _pst_bash_login _pst_login_stage
   case "${SHELL:-}" in
   */bash | bash) printf 'all\t%s\n' "$1/.bashrc" ;;
   *) if [ -e "$1/.bashrc" ] || [ -L "$1/.bashrc" ]; then printf 'all\t%s\n' "$1/.bashrc"; fi ;;
@@ -591,11 +608,6 @@ cmd_doctor() {
       # Without that marker an env-stage block is indistinguishable from a
       # legacy combined block, so .zshenv and .profile (the exact bug 0.3 fixed
       # for `zsh -c`) would be accepted forever.
-      _doctor_bash_rc=0
-      case "${SHELL:-}" in
-      */bash | bash) _doctor_bash_rc=1 ;;
-      esac
-      if [ -e "$_doctor_home/.bashrc" ] || [ -L "$_doctor_home/.bashrc" ]; then _doctor_bash_rc=1; fi
       _doctor_bash_login=.profile
       if [ -e "$_doctor_home/.bash_profile" ]; then
         _doctor_bash_login=.bash_profile
@@ -603,8 +615,9 @@ cmd_doctor() {
         _doctor_bash_login=.bash_login
       fi
       # .bash_profile and .bash_login are read only by bash, so they always
-      # carry stage 2 (posix_startup_targets writes them as `all`); .bashrc and
-      # .zshrc are rc-stage files; every other managed file must be env-stage.
+      # carry stage 2 (posix_startup_targets writes them as `all`); .profile
+      # carries the bash-login stage when neither exists; .bashrc and .zshrc
+      # are rc-stage files; every other managed file must be env-stage.
       for _doctor_name in $VALISE_STARTUP_NAMES; do
         _doctor_file="$_doctor_home/$_doctor_name"
         [ -f "$_doctor_file" ] && [ ! -L "$_doctor_file" ] || continue
@@ -613,11 +626,7 @@ cmd_doctor() {
         case "$_doctor_name" in
         .bashrc | .zshrc) _doctor_want_gate=1 ;;
         .bash_profile | .bash_login) _doctor_want_gate=1 ;;
-        "$_doctor_bash_login")
-          # The bash login file carries stage 2 whenever bash has an rc chain.
-          # It is .profile when neither bash-only file exists.
-          [ "$_doctor_bash_rc" -eq 1 ] && _doctor_want_gate=1
-          ;;
+        "$_doctor_bash_login") _doctor_want_gate=1 ;;
         esac
         if ! "$_doctor_awk" -v want_gate="$_doctor_want_gate" '
           /^# BEGIN valise managed block$/ { inblock = 1; gate = 0; marker = 0; next }
@@ -665,7 +674,8 @@ cmd_doctor() {
           if _doctor_shim=$(env_shim_path); then
             _doctor_env=${ENV:-}
             if [ -z "$_doctor_env" ]; then
-              if [ -f "$_doctor_shim" ]; then
+              if [ -f "$_doctor_shim" ] && [ ! -L "$_doctor_shim" ] &&
+                integration_has_posix_block "$_doctor_shim" 2>/dev/null; then
                 printf '  warn: $ENV is unset; interactive sh/ksh subshells will not load valise (the shim is at %s)\n' "$_doctor_shim"
               fi
             else

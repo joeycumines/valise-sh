@@ -545,5 +545,136 @@ else
 fi
 fi
 
+# Scenario 20: fresh zsh-default home (no .bash_profile, no .bash_login, no
+# .bashrc) must still load interactive modules in `bash --login -i` via the
+# .profile fallback, without creating .bashrc.
+if [ -n "$_bash_bin" ]; then
+  _reset_home "$_home"
+  _install "$_tmp/release-a" "$_home" "${_zsh_bin:-/bin/zsh}"
+  if [ ! -e "$_home/.bashrc" ] && grep -q '\[ "\$_valise_plan" = bash \]' "$_home/.profile" 2>/dev/null; then
+    pass "fresh zsh-default home: .profile carries bash-login stage without creating .bashrc"
+  else
+    fail "fresh zsh-default home: .profile missing bash-login stage or .bashrc was created"
+  fi
+  _home_env "$_home" -- "$_bash_bin" --login -i -c ':' >"$_tmp/s20.out" 2>"$_tmp/s20.err" || :
+  if [ "$(_marker_count "$_home/intdep.log")" -eq 1 ]; then
+    pass "fresh zsh-default home: bash --login -i loads interactive module exactly once"
+  else
+    fail "fresh zsh-default home: bash --login -i ran interactive module $(_marker_count "$_home/intdep.log") times"
+    cat "$_tmp/s20.err" >&2
+  fi
+fi
+
+# Scenario 21: startup must never adopt a foreign regular file or symlink at
+# $XDG_CONFIG_HOME/valise/env.sh into ENV.
+_reset_home "$_home"
+mkdir -p "$_home/.config/valise"
+printf 'printf "foreign-code-ran\\n"\n' >"$_home/.config/valise/env.sh"
+_install "$_tmp/release-a" "$_home" "${_bash_bin:-/bin/sh}"
+_s21_reg=$(_home_env "$_home" -- /bin/sh -c '
+  unset ENV
+  . "$HOME/.profile"
+  printf "ENV=%s\n" "${ENV-unset}"
+  /bin/sh -ic ":"
+' 2>&1 || :)
+if printf '%s\n' "$_s21_reg" | grep -Fx 'ENV=unset' >/dev/null &&
+  ! printf '%s\n' "$_s21_reg" | grep -F 'foreign-code-ran' >/dev/null; then
+  pass "startup refuses to adopt a foreign regular file as the ENV shim"
+else
+  fail "startup adopted or executed a foreign regular file as ENV shim"
+  printf '%s\n' "$_s21_reg" >&2
+fi
+
+_reset_home "$_home"
+mkdir -p "$_home/.config/valise"
+printf '# BEGIN valise managed block\nprintf "symlink-code-ran\\n"\n# END valise managed block\n' >"$_tmp/foreign-shim-target.sh"
+ln -s "$_tmp/foreign-shim-target.sh" "$_home/.config/valise/env.sh"
+_install "$_tmp/release-a" "$_home" "${_bash_bin:-/bin/sh}"
+_s21_sym=$(_home_env "$_home" -- /bin/sh -c '
+  unset ENV
+  . "$HOME/.profile"
+  printf "ENV=%s\n" "${ENV-unset}"
+  /bin/sh -ic ":"
+' 2>&1 || :)
+if printf '%s\n' "$_s21_sym" | grep -Fx 'ENV=unset' >/dev/null &&
+  ! printf '%s\n' "$_s21_sym" | grep -F 'symlink-code-ran' >/dev/null; then
+  pass "startup refuses to adopt a symlink as the ENV shim"
+else
+  fail "startup adopted or executed a symlink as ENV shim"
+  printf '%s\n' "$_s21_sym" >&2
+fi
+
+# Scenario 22: A -> partially failed B -> A and A -> env-only B -> A must
+# invalidate _valise_interactive_loaded so returning to A restores A's exports.
+if [ -n "$_bash_bin" ]; then
+  _pfa="$_tmp/proj-pf-a"
+  _pfb="$_tmp/proj-pf-b"
+  _pfc="$_tmp/proj-pf-c"
+  for _pfd in "$_pfa" "$_pfb" "$_pfc"; do
+    mkdir -p "$_pfd/module.d" "$_pfd/modules"
+    : >"$_pfd/valise.conf"
+    printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_pfd/variants.tsv"
+    printf 'name=envbase\nversion=\nside_effect=read-only\nrequires=\noptional=\nshells=posix\nplatforms=any\nexports=\nload=modules/envbase.sh\n' >"$_pfd/module.d/envbase.meta"
+    printf ': envbase\n' >"$_pfd/modules/envbase.sh"
+  done
+  # Release A: interactive intone (returns A) + inttwo (succeeds)
+  printf 'name=intone\nversion=\nside_effect=read-only\nphase=interactive\nrequires=\noptional=\nshells=posix\nplatforms=any\nexports=review_value\nload=modules/intone.sh\n' >"$_pfa/module.d/intone.meta"
+  printf 'review_value() { printf "A\\n"; }\n' >"$_pfa/modules/intone.sh"
+  printf 'name=inttwo\nversion=\nside_effect=read-only\nphase=interactive\nrequires=intone\noptional=\nshells=posix\nplatforms=any\nexports=\nload=modules/inttwo.sh\n' >"$_pfa/module.d/inttwo.meta"
+  printf ': ok\n' >"$_pfa/modules/inttwo.sh"
+  printf '# bundle\tshell\troots\ndefault\tbash\tenvbase inttwo\ndefault\tzsh\tenvbase inttwo\n' >"$_pfa/bundles.tsv"
+  # Release B: interactive intone (returns B) + inttwo (fails 42)
+  printf 'name=intone\nversion=\nside_effect=read-only\nphase=interactive\nrequires=\noptional=\nshells=posix\nplatforms=any\nexports=review_value\nload=modules/intone.sh\n' >"$_pfb/module.d/intone.meta"
+  printf 'review_value() { printf "B\\n"; }\n' >"$_pfb/modules/intone.sh"
+  printf 'name=inttwo\nversion=\nside_effect=read-only\nphase=interactive\nrequires=intone\noptional=\nshells=posix\nplatforms=any\nexports=\nload=modules/inttwo.sh\n' >"$_pfb/module.d/inttwo.meta"
+  printf 'return 42\n' >"$_pfb/modules/inttwo.sh"
+  printf '# bundle\tshell\troots\ndefault\tbash\tenvbase inttwo\ndefault\tzsh\tenvbase inttwo\n' >"$_pfb/bundles.tsv"
+  # Release C: intone moved to env phase (returns C)
+  printf 'name=intone\nversion=\nside_effect=read-only\nphase=env\nrequires=\noptional=\nshells=posix\nplatforms=any\nexports=review_value\nload=modules/intone.sh\n' >"$_pfc/module.d/intone.meta"
+  printf 'review_value() { printf "C\\n"; }\n' >"$_pfc/modules/intone.sh"
+  printf '# bundle\tshell\troots\ndefault\tbash\tenvbase intone\ndefault\tzsh\tenvbase intone\n' >"$_pfc/bundles.tsv"
+
+  rm -rf "$_tmp/rel-pf-a" "$_tmp/rel-pf-b" "$_tmp/rel-pf-c"
+  (cd "$_pfa" && "$_valise" build "$_tmp/rel-pf-a") >/dev/null 2>&1
+  (cd "$_pfb" && "$_valise" build "$_tmp/rel-pf-b") >/dev/null 2>&1
+  (cd "$_pfc" && "$_valise" build "$_tmp/rel-pf-c") >/dev/null 2>&1
+
+  _reset_home "$_home"
+  printf '# user\n' >"$_home/.bash_profile"
+  _install "$_tmp/rel-pf-b" "$_home" "$_bash_bin"
+  _pf_b_id=$(basename "$(readlink "$_home/.config/valise/active")")
+  _install "$_tmp/rel-pf-c" "$_home" "$_bash_bin"
+  _pf_c_id=$(basename "$(readlink "$_home/.config/valise/active")")
+  _install "$_tmp/rel-pf-a" "$_home" "$_bash_bin"
+  _pf_a_id=$(basename "$(readlink "$_home/.config/valise/active")")
+
+  _s22_out=$(_home_env "$_home" -- "$_bash_bin" -i -c '
+    . "$HOME/.bashrc"
+    printf "initial=%s\n" "$(review_value)"
+    "'"$_valise"'" release use "'"$_pf_b_id"'" >/dev/null 2>&1
+    . "$HOME/.bashrc" 2>/dev/null
+    printf "failed_B=%s\n" "$(review_value)"
+    "'"$_valise"'" release rollback >/dev/null 2>&1
+    . "$HOME/.bashrc"
+    printf "rollback_A=%s\n" "$(review_value)"
+    "'"$_valise"'" release use "'"$_pf_c_id"'" >/dev/null 2>&1
+    . "$HOME/.profile"
+    printf "envonly_C=%s\n" "$(review_value)"
+    "'"$_valise"'" release use "'"$_pf_a_id"'" >/dev/null 2>&1
+    . "$HOME/.bashrc"
+    printf "back_from_C=%s\n" "$(review_value)"
+  ' 2>/dev/null || :)
+  if printf '%s\n' "$_s22_out" | grep -Fx 'initial=A' >/dev/null &&
+    printf '%s\n' "$_s22_out" | grep -Fx 'failed_B=B' >/dev/null &&
+    printf '%s\n' "$_s22_out" | grep -Fx 'rollback_A=A' >/dev/null &&
+    printf '%s\n' "$_s22_out" | grep -Fx 'envonly_C=C' >/dev/null &&
+    printf '%s\n' "$_s22_out" | grep -Fx 'back_from_C=A' >/dev/null; then
+    pass "interactive success marker is invalidated across partially failed and env-only release switches"
+  else
+    fail "interactive reload retained stale definitions after failed or env-only switch"
+    printf '%s\n' "$_s22_out" >&2
+  fi
+fi
+
 printf '\n%s: %d total, %d pass, %d fail, %d skip\n' "startup-state" "$_total" "$_pass" "$_fail" "$_skip"
 [ "$_fail" -eq 0 ]
