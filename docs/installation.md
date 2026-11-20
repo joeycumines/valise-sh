@@ -275,7 +275,11 @@ sanitizes `PATH` before invoking valise can pass the original in
 `VALISE_CALLER_PATH`; it is used only
 for these PATH diagnostics and never for command lookup or generated profile
 content. Setting it to an empty value means the caller's PATH is empty, so the
-gap is still reported.
+gap is still reported. Relative entries are interpreted from the directory
+where valise was invoked, not from `-C <dir>`'s project directory; valise
+records that directory before changing it, so `.local/bin` keeps its meaning
+for a caller that changes into a project with `-C`; an empty entry in a
+non-empty value denotes that invocation directory too.
 
 `VALISE_CALLER_PATH` is inherited by child processes. A wrapper that captured a
 value should unset it before invoking a nested valise run, so the nested run

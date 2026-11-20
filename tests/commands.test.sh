@@ -293,6 +293,60 @@ else
   cat "$_tmp/doctor-slash.out" "$_tmp/doctor-double.out" >&2
 fi
 
+# Relative caller PATH entries are interpreted from the directory where valise
+# was invoked, before -C changes to the project. Run from the home, whose
+# .local/bin is the command directory, and assert both the match and a negative
+# control against a same-named directory inside the project.
+(cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_CALLER_PATH=".local/bin" \
+  "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-relative.out" 2>&1 || :
+mkdir -p "$_proj/.local/bin"
+(cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR="$_proj/.local/bin" VALISE_CALLER_PATH=".local/bin" \
+  "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-relative-neg.out" 2>&1 || :
+if grep -F "ok: command directory is on PATH: $_bin" "$_tmp/doctor-relative.out" >/dev/null &&
+  grep -F "warn: command directory is not on PATH: $_proj/.local/bin" "$_tmp/doctor-relative-neg.out" >/dev/null; then
+  pass "relative caller PATH entries resolve from the invocation directory, not -C"
+else
+  fail "relative caller PATH entries resolved against the project directory"
+  cat "$_tmp/doctor-relative.out" "$_tmp/doctor-relative-neg.out" >&2
+fi
+
+# An empty caller PATH entry denotes the caller's directory. Test both a match
+# and a negative control so the assertion is not vacuous.
+(cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR="$_home" VALISE_CALLER_PATH=":" \
+  "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-empty-cwd.out" 2>&1 || :
+(cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR="$_proj" VALISE_CALLER_PATH=":" \
+  "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-empty-cwd-neg.out" 2>&1 || :
+if grep -F "ok: command directory is on PATH: $_home" "$_tmp/doctor-empty-cwd.out" >/dev/null &&
+  grep -F "warn: command directory is not on PATH: $_proj" "$_tmp/doctor-empty-cwd-neg.out" >/dev/null; then
+  pass "an empty caller PATH entry resolves from the invocation directory"
+else
+  fail "an empty caller PATH entry did not resolve from the invocation directory"
+  cat "$_tmp/doctor-empty-cwd.out" "$_tmp/doctor-empty-cwd-neg.out" >&2
+fi
+
+# The caller CWD is diagnostic context only: it must not leak into generated
+# content or env capture.
+_v_caller "$_bin" "$_proj" env export environment.d >"$_tmp/env-export-cwd.out" 2>&1 || :
+if ! grep -F 'VALISE_CALLER_CWD' "$_tmp/env-export-cwd.out" >/dev/null &&
+  ! grep -F "$_home" "$_tmp/env-export-cwd.out" >/dev/null; then
+  pass "the recorded caller directory does not leak into generated content"
+else
+  fail "the recorded caller directory leaked into generated content"
+  cat "$_tmp/env-export-cwd.out" >&2
+fi
+
 # The caller PATH takes precedence: a real PATH that contains the command dir
 # must not silence a gap reported by the caller PATH.
 env -i HOME="$_home" PATH="$_bin:/usr/bin:/bin" XDG_DATA_HOME="$_home/.local/share" \
@@ -435,7 +489,9 @@ else
   cat "$_tmp/doctor-nl.out" "$_tmp/doctor-nl-only.out" >&2
 fi
 # IFS=: splitting must not break on whitespace inside an entry, and empty
-# entries (leading/trailing/doubled colons) are skipped without false matches.
+# entries must not match a directory that is not the caller's current directory.
+# For callers that invoke valise without recording a CWD (library/embedded use),
+# the project directory is used, so these remain false for the command dir.
 _sp="$_tmp/dir with space"
 mkdir -p "$_sp"
 _v_caller "$_sp:/usr/bin:/bin" "$_proj" doctor >"$_tmp/doctor-space.out" 2>&1 || :

@@ -394,7 +394,16 @@ run_lane() {
       case "$_class" in
         zsh) _stage1_only="$_tmp_home/.zshenv" ;;
         bash) _stage1_only="$_tmp_home/.bashrc" ;;
-        *) _stage1_only="$_tmp_home/.zprofile" ;;
+        *)
+          # .zprofile is only written when zsh is installed or already present;
+          # without zsh the grep below would run on a missing file and pass
+          # vacuously. Fall back to .zshenv, which is written in that case.
+          if [ -f "$_tmp_home/.zprofile" ]; then
+            _stage1_only="$_tmp_home/.zprofile"
+          else
+            _stage1_only="$_tmp_home/.zshenv"
+          fi
+          ;;
       esac
     fi
     if [ "$_class" = bash ] && [ "$_shell_name" = bash ]; then
@@ -409,6 +418,11 @@ run_lane() {
         fail "$_lane/$_shell_name: the bash login file does not carry the interactive stage"
       fi
     elif [ "$_stage1_only" = "$_stage2_file" ]; then
+      :
+    elif [ ! -f "$_stage1_only" ]; then
+      # No stage-1-only witness file was installed in this lane; there is
+      # nothing to assert here (the original code's grep also passed
+      # vacuously). Skip rather than fail so zsh-less homes still pass.
       :
     elif grep -q 'case \$- in \*i\*)' "$_stage1_only" 2>/dev/null; then
       fail "$_lane/$_shell_name: $_stage1_only carries the interactive stage"

@@ -10,6 +10,7 @@ _dry_tmp=""
 _un_tmp=""
 _install_txn=0
 _activate_txn=0
+_activate_txn_aborting=0
 _ra_reconcile_err=""
 _txn_old_target=""
 _txn_old_dir=""
@@ -559,7 +560,12 @@ note_switch() {
 # EXIT/INT/TERM traps so fatal errors inside switch_active_link or signals
 # never strand an outgoing bridge backup. Must not call die.
 activate_txn_abort() {
-  _activate_txn=0
+  # Keep _activate_txn armed until every restore step finishes, so a second
+  # INT/TERM during the rollback re-enters this function instead of letting the
+  # trap skip it and strand a half-restored transaction. A separate guard makes
+  # the re-entry a no-op; the outer call still completes the restore.
+  [ "${_activate_txn_aborting:-0}" -eq 1 ] && return 0
+  _activate_txn_aborting=1
   [ -z "${_gui_stage:-}" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_gui_stage" 2>/dev/null || :
   _gui_stage= _gui_action=none _gui_mode= _gui_target=
   [ -z "${_ra_reconcile_err:-}" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_ra_reconcile_err" 2>/dev/null || :
@@ -584,40 +590,65 @@ activate_txn_abort() {
       _ra_restored="no release"
     fi
   fi
-  if [ "$_ra_rolled" -eq 1 ]; then
-    _ata_prev_changed=0
-    if [ "${_ra_had_previous:-0}" -eq 1 ]; then
-      if _ata_cur_prev=$(read_previous_record 2>/dev/null); then
-        [ "$_ata_cur_prev" = "${_ra_old_previous:-}" ] || _ata_prev_changed=1
-      else
-        _ata_prev_changed=1
-      fi
-    elif [ -e "$(previous_record_path)" ] && [ ! -L "$(previous_record_path)" ]; then
+  # Restore the previous-release record whenever the switch may have rewritten
+  # it, even if the active link itself could not be rolled back. Leaving the
+  # record from an aborted activation would make a later `release rollback`
+  # consult the wrong release.
+  _ata_prev_changed=0
+  if [ "${_ra_had_previous:-0}" -eq 1 ]; then
+    if _ata_cur_prev=$(read_previous_record 2>/dev/null); then
+      [ "$_ata_cur_prev" = "${_ra_old_previous:-}" ] || _ata_prev_changed=1
+    else
       _ata_prev_changed=1
     fi
-    if [ "$_ata_prev_changed" -eq 1 ]; then
-      ( restore_previous_record "${_ra_had_previous:-0}" "${_ra_old_previous:-}" ) >/dev/null 2>&1 ||
-        printf 'valise: cannot restore the previous-release record\n' >&2
-    fi
-    unset _ata_prev_changed _ata_cur_prev
+  elif [ -e "$(previous_record_path)" ] && [ ! -L "$(previous_record_path)" ]; then
+    _ata_prev_changed=1
+  fi
+  if [ "$_ata_prev_changed" -eq 1 ]; then
+    ( restore_previous_record "${_ra_had_previous:-0}" "${_ra_old_previous:-}" ) >/dev/null 2>&1 ||
+      printf 'valise: cannot restore the previous-release record\n' >&2
+  fi
+  unset _ata_prev_changed _ata_cur_prev
+  if [ "$_ra_rolled" -eq 1 ]; then
     # Only restore command stubs when forward reconciliation actually ran. Use
     # the canonical outgoing release directory (not the raw symlink target,
     # which may be relative to the symlink's parent) and never pass a missing
     # directory to reconcile_commands (which would delete owned stubs).
-    if [ "${_ra_reconcile_attempted:-0}" -eq 1 ] && [ "${_ra_had_link:-0}" -eq 1 ] &&
-      [ -f "$(commands_ledger_path)" ]; then
-      if [ -n "${_ra_old_dir:-}" ] && [ -d "$_ra_old_dir" ] &&
-        [ -f "$_ra_old_dir/valise-release.conf" ]; then
-        if ! (
-          trap 'for _ra_t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do
-            [ -z "$_ra_t" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_ra_t" 2>/dev/null
-          done' EXIT
-          reconcile_commands "$_ra_old_dir"
-        ) >/dev/null 2>&1; then
-          printf 'valise: error: the command stubs could not be brought back to the restored release\n' >&2
+    if [ "${_ra_reconcile_attempted:-0}" -eq 1 ] && [ -f "$(commands_ledger_path)" ]; then
+      if [ "${_ra_had_link:-0}" -eq 1 ]; then
+        if [ -n "${_ra_old_dir:-}" ] && [ -d "$_ra_old_dir" ] &&
+          [ -f "$_ra_old_dir/valise-release.conf" ]; then
+          if ! (
+            trap 'for _ra_t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do
+              [ -z "$_ra_t" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_ra_t" 2>/dev/null
+            done' EXIT
+            reconcile_commands "$_ra_old_dir"
+          ) >/dev/null 2>&1; then
+            printf 'valise: error: the command stubs could not be brought back to the restored release\n' >&2
+          fi
+        elif [ -n "${_ra_old_dir:-}" ] && [ -d "$_ra_old_dir" ]; then
+          # The release exists but its manifest is unreadable; still try the
+          # canonical path so an otherwise recoverable rollback is not lost.
+          if ! (
+            trap 'for _ra_t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do
+              [ -z "$_ra_t" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_ra_t" 2>/dev/null
+            done' EXIT
+            reconcile_commands "$_ra_old_dir"
+          ) >/dev/null 2>&1; then
+            printf 'valise: error: the command stubs could not be brought back to the restored release\n' >&2
+          fi
+        else
+          # The outgoing release directory is gone (a dangling active link), so
+          # there is no outgoing stub set to restore. Remove the stubs this
+          # activation published rather than pointing them at a missing release.
+          ( remove_owned_commands ) >/dev/null 2>&1 ||
+            printf 'valise: error: the command stubs could not be brought back to the restored release\n' >&2
         fi
       else
-        printf 'valise: error: the command stubs could not be brought back to the restored release\n' >&2
+        # No release was active before this activation, so no stub may point at
+        # one now. Mirror install_txn_abort's cleanup for this case.
+        ( remove_owned_commands ) >/dev/null 2>&1 ||
+          printf 'valise: error: the command stubs this activation published could not be removed\n' >&2
       fi
     fi
     # The bridge follows the release that is active again. Each aside goes back
@@ -654,6 +685,10 @@ activate_txn_abort() {
     printf 'valise: error: the outgoing GUI env bridge is preserved at %s\n' "$_ra_a" >&2
   done
   unset _ra_pair _ra_a _ra_t
+  # Restore is complete (or a re-entrant call found one already in progress):
+  # only now disarm the trap guard.
+  _activate_txn=0
+  _activate_txn_aborting=0
 }
 
 # release_activate <release-id>
@@ -720,8 +755,21 @@ release_activate() {
   _ra_had_link=0
   if [ -L "$VALISE_ACTIVE_LINK" ]; then
     _ra_old_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
-    _ra_old_dir=$(cd "$VALISE_ACTIVE_LINK" 2>/dev/null && pwd -P || :)
     [ -n "$_ra_old_target" ] && _ra_had_link=1
+    # Resolve the canonical directory WITHOUT requiring the target to exist:
+    # a dangling active symlink is a supported state, and rollback must still
+    # know which release's stubs to restore. Mirror active_release_dir's
+    # relative-target handling.
+    case "$_ra_old_target" in
+    /*) _ra_old_dir=$(path_normalize "$_ra_old_target" 2>/dev/null || :) ;;
+    *)
+      _ra_old_link_parent=$(cd "$(path_parent "$VALISE_ACTIVE_LINK")" 2>/dev/null && pwd -P || :)
+      if [ -n "$_ra_old_link_parent" ]; then
+        _ra_old_dir=$(path_normalize "$_ra_old_link_parent/$_ra_old_target" 2>/dev/null || :)
+      fi
+      unset _ra_old_link_parent
+      ;;
+    esac
   fi
   # The switch rewrites the previous-release record to the outgoing release. If
   # a later step fails, that record is put back as well as the link.

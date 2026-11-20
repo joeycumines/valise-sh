@@ -23,46 +23,53 @@ _rc_pub=""
 # path_contains_dir <path-value> <dir>: succeed when <dir> names one entry of
 # <path-value>. Entries and the target are normalized, so a trailing slash or a
 # doubled separator (common in $TMPDIR-derived homes) is not a false gap. Empty
-# entries (from leading/doubled colons) are skipped: they denote the caller's
-# working directory, which is not the directory valise runs in after -C.
+# entries denote the current directory; they are skipped when no caller CWD is
+# known (the directory valise runs in after -C is not the caller's).
+# Relative entries are resolved against VALISE_CALLER_CWD when set: bin/valise
+# records the caller's directory before -C changes it, so `.local/bin` means
+# the caller's `.local/bin`, and an empty entry means the caller's directory,
+# not the project's. Library-only callers (tests and embedded use) leave it
+# unset, and path_normalize then uses the current directory as before.
 # Each path_normalize capture appends a sentinel (&& printf x): command
 # substitution strips trailing newlines, so without the sentinel an entry like
 # "/bin/dir<LF>" would normalize to "/bin/dir<LF>\n", lose its newlines in the
 # capture, and falsely match "/bin/dir".
 path_contains_dir() {
   _pcd_path=$1
+  # An explicitly empty PATH value has no entries at all, even though the
+  # splitting loop below would otherwise see one empty (CWD) entry.
+  [ -n "$_pcd_path" ] || { unset _pcd_path; return 1; }
   if ! _pcd_dir=$(path_normalize "$2" && printf x); then
     unset _pcd_path _pcd_dir
     return 1
   fi
-  _pcd_old_ifs=${IFS-}
-  if [ "${IFS+x}" = x ]; then
-    _pcd_ifs_set=1
-  else
-    _pcd_ifs_set=0
-  fi
-  case $- in
-  *f*) _pcd_glob_was_set=1 ;;
-  *) _pcd_glob_was_set=0 ;;
-  esac
-  # Split once with IFS=: and globbing off, then restore the caller's settings
-  # before calling path_normalize so both sides of the comparison normalize
-  # under the same environment.
-  set -f
-  IFS=:
-  set -- $_pcd_path
-  if [ "$_pcd_ifs_set" -eq 1 ]; then IFS=$_pcd_old_ifs; else unset IFS; fi
-  [ "$_pcd_glob_was_set" -eq 1 ] || set +f
-  unset _pcd_path _pcd_old_ifs _pcd_ifs_set _pcd_glob_was_set
-  for _pcd_entry in "$@"; do
-    [ -n "$_pcd_entry" ] || continue
-    if _pcd_norm=$(path_normalize "$_pcd_entry" && printf x) &&
+  # Split the path value with POSIX parameter stripping rather than IFS word
+  # splitting: zsh does not split unquoted expansions by default, and `set --`
+  # here would also clobber the caller's positional parameters. A trailing
+  # colon is a final empty entry; it matches the caller's directory when known
+  # and is otherwise skipped.
+  _pcd_rem=${_pcd_path}:
+  while [ -n "$_pcd_rem" ]; do
+    _pcd_entry=${_pcd_rem%%:*}
+    _pcd_rem=${_pcd_rem#*:}
+    _pcd_candidate=$_pcd_entry
+    case "$_pcd_candidate" in
+    /*) : ;;
+    *)
+      # An empty entry denotes the caller's current directory when known.
+      if [ -n "${VALISE_CALLER_CWD:-}" ]; then
+        _pcd_candidate=$VALISE_CALLER_CWD/$_pcd_candidate
+      fi
+      ;;
+    esac
+    [ -n "$_pcd_candidate" ] || continue
+    if _pcd_norm=$(path_normalize "$_pcd_candidate" && printf x) &&
       [ "$_pcd_norm" = "$_pcd_dir" ]; then
-      unset _pcd_dir _pcd_entry _pcd_norm
+      unset _pcd_path _pcd_dir _pcd_rem _pcd_entry _pcd_candidate _pcd_norm
       return 0
     fi
   done
-  unset _pcd_dir _pcd_entry _pcd_norm
+  unset _pcd_path _pcd_dir _pcd_rem _pcd_entry _pcd_candidate _pcd_norm
   return 1
 }
 

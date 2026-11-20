@@ -158,7 +158,26 @@ print_posix_integration() {
     '  fi'
   if [ "$_pix_stage" = all ] || [ "$_pix_stage" = bash-login ]; then
     if [ "$_pix_stage" = bash-login ]; then
-      printf '%s\n' '  if [ "$_valise_stage1_ok" -eq 1 ] && [ "$_valise_plan" = bash ]; then'
+      # Gate on the shell ACTUALLY running, not _valise_plan: a bash login can
+      # inherit KSH_VERSION/ZSH_VERSION from its parent, which would make the
+      # plan-based gate skip stage 2 in the very shell this stage is for. The
+      # POSIX-mode check keeps bash invoked as `sh` on its env-only stage. Use
+      # `set +o` and match the option name exactly: `set -o` also lists
+      # `verbose on` / `xtrace on` after `posix off`, so a loose *posix*on*
+      # pattern would skip stage 2 whenever either option was enabled.
+      printf '%s\n' \
+        '  _valise_bash_native=0' \
+        '  # bash-login marker: doctor keys its gate expectation on this line.' \
+        '  # A .profile without it is a pre-0.4.1 env-only install for a' \
+        '  # non-bash default shell and must not be flagged as legacy.' \
+        '  _valise_bash_login_stage=1' \
+        '  if [ -n "${BASH_VERSION-}" ]; then' \
+        '    case "$(set +o 2>/dev/null)" in' \
+        '    *"set -o posix"*) : ;;' \
+        '    *) _valise_bash_native=1 ;;' \
+        '    esac' \
+        '  fi' \
+        '  if [ "$_valise_stage1_ok" -eq 1 ] && [ "$_valise_bash_native" -eq 1 ]; then'
     else
       printf '%s\n' '  if [ "$_valise_stage1_ok" -eq 1 ]; then'
     fi
@@ -191,7 +210,7 @@ print_posix_integration() {
       '  fi'
   fi
   printf '%s\n' \
-    '  unset _valise_release_id _valise_want _valise_had _valise_old _valise_rc _valise_seen _valise_stage1_ok' \
+    '  unset _valise_release_id _valise_want _valise_had _valise_old _valise_rc _valise_seen _valise_stage1_ok _valise_bash_native _valise_bash_login_stage' \
     'fi' \
     'unset _valise_plan_carried'
   if [ -n "$_pix_shim_literal" ]; then
@@ -618,6 +637,14 @@ cmd_doctor() {
       # carry stage 2 (posix_startup_targets writes them as `all`); .profile
       # carries the bash-login stage when neither exists; .bashrc and .zshrc
       # are rc-stage files; every other managed file must be env-stage.
+      # A pre-0.4.1 .profile may legitimately be env-only when bash has no rc
+      # chain (SHELL is not bash and no .bashrc). Keep that expectation unless
+      # the new bash-login marker is present.
+      _doctor_bash_rc=0
+      case "${SHELL:-}" in
+      */bash | bash) _doctor_bash_rc=1 ;;
+      esac
+      if [ -e "$_doctor_home/.bashrc" ] || [ -L "$_doctor_home/.bashrc" ]; then _doctor_bash_rc=1; fi
       for _doctor_name in $VALISE_STARTUP_NAMES; do
         _doctor_file="$_doctor_home/$_doctor_name"
         [ -f "$_doctor_file" ] && [ ! -L "$_doctor_file" ] || continue
@@ -626,7 +653,14 @@ cmd_doctor() {
         case "$_doctor_name" in
         .bashrc | .zshrc) _doctor_want_gate=1 ;;
         .bash_profile | .bash_login) _doctor_want_gate=1 ;;
-        "$_doctor_bash_login") _doctor_want_gate=1 ;;
+        "$_doctor_bash_login")
+          # The bash login file carries stage 2 whenever bash has an rc chain
+          # or the new bash-login marker is present.
+          if [ "$_doctor_bash_rc" -eq 1 ] ||
+             grep -q '_valise_bash_login_stage=1' "$_doctor_file" 2>/dev/null; then
+            _doctor_want_gate=1
+          fi
+          ;;
         esac
         if ! "$_doctor_awk" -v want_gate="$_doctor_want_gate" '
           /^# BEGIN valise managed block$/ { inblock = 1; gate = 0; marker = 0; next }

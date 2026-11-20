@@ -433,6 +433,21 @@ else
   cat "$_tmp/s13.err" >&2
 fi
 
+# A bash login can inherit ZSH_VERSION/KSH_VERSION from its parent and can be
+# launched with shell options such as `verbose` enabled. The bash-login stage
+# must still run: it gates on the running shell, and its POSIX-mode probe must
+# not mistake `verbose on` after `posix off` for POSIX mode.
+_reset_home "$_home"
+_install "$_tmp/release-a" "$_home" "$_bash_bin"
+_home_env "$_home" ZSH_VERSION=5.9 KSH_VERSION=1.0 SHELLOPTS=verbose \
+  -- "$_bash_bin" --login -i -c ':' >"$_tmp/s13b.out" 2>"$_tmp/s13b.err" || :
+if [ "$(_marker_count "$_home/intdep.log")" -eq 1 ]; then
+  pass "bash login with inherited shell versions and verbose option loads the interactive stage once"
+else
+  fail "bash login with inherited shell versions or verbose option skipped the interactive stage"
+  cat "$_tmp/s13b.err" >&2
+fi
+
 # Scenario 14: control. A non-login interactive bash reads .bashrc, and a
 # non-interactive `bash -c` stays silent and loads no interactive module.
 _reset_home "$_home"
@@ -551,7 +566,7 @@ fi
 if [ -n "$_bash_bin" ]; then
   _reset_home "$_home"
   _install "$_tmp/release-a" "$_home" "${_zsh_bin:-/bin/zsh}"
-  if [ ! -e "$_home/.bashrc" ] && grep -q '\[ "\$_valise_plan" = bash \]' "$_home/.profile" 2>/dev/null; then
+  if [ ! -e "$_home/.bashrc" ] && grep -q '_valise_bash_native' "$_home/.profile" 2>/dev/null; then
     pass "fresh zsh-default home: .profile carries bash-login stage without creating .bashrc"
   else
     fail "fresh zsh-default home: .profile missing bash-login stage or .bashrc was created"

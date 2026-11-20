@@ -67,6 +67,14 @@ reloads, compiler export-ownership matching, and GUI environment capture.
   re-evaluation triggers and pre-ownership caller-function protection scope.
 - Guarded the `/bin/ksh` probe in `tests/project-ux.test.sh` when `ksh` is
   absent locally.
+- PATH-gap diagnostics resolve relative and empty `VALISE_CALLER_PATH` entries
+  from the directory where valise was invoked, before `-C` changes to the
+  project. A native bash login with inherited shell-version variables or with
+  `verbose`/`xtrace` enabled still loads the interactive stage.
+- Activation rollback restores the previous-release record even if the active
+  link could not be rolled back, cleans up command stubs when no release was
+  active or its directory is gone, and keeps the rollback armed through a
+  second signal.
 
 ## [0.4.0] - 2026-11-18
 
