@@ -195,22 +195,27 @@ valise_path_contains() {
 
 valise_path_remove() {
   # Remove every occurrence of each argument from PATH and drop empty
-  # components. An empty or colon-bearing argument is rejected with a
-  # diagnostic and leaves PATH untouched for that argument; the return status
-  # is nonzero when any argument was rejected.
+  # components. Every argument is validated before PATH is modified: an empty
+  # or colon-bearing argument is reported on stderr, returns nonzero, and
+  # leaves PATH untouched.
   case "${ZSH_VERSION-}" in
     ?*) emulate -L sh 2>/dev/null || : ;;
   esac
   _vp_rc=0
-  _vp_changed=0
   for _vp_arg in "$@"; do
     case "$_vp_arg" in
       '' | *:*)
         printf "valise_path_remove: invalid entry (empty or contains a colon): '%s'\n" "$_vp_arg" >&2
         _vp_rc=1
-        continue
         ;;
     esac
+  done
+  if [ "$_vp_rc" -ne 0 ]; then
+    unset _vp_arg _vp_rc
+    return 1
+  fi
+  _vp_changed=0
+  for _vp_arg in "$@"; do
     _vp_changed=1
     _vp_kept=
     _vp_rem="${PATH-}${PATH:+:}"
@@ -223,9 +228,8 @@ valise_path_remove() {
     done
     PATH=$_vp_kept
   done
-  # Every argument rejected, or no argument at all: PATH is exactly as the
-  # caller had it, including a set-but-empty one. Unsetting it here would
-  # contradict the promise that a rejected argument leaves PATH untouched.
+  # No argument at all: PATH is left exactly as the caller had it, including a
+  # set-but-empty one.
   if [ "$_vp_changed" -eq 1 ]; then
     if [ -n "${PATH-}" ]; then
       export PATH
@@ -233,15 +237,7 @@ valise_path_remove() {
       unset PATH
     fi
   fi
-  case "${_vp_rc-}" in
-    '' | *[!0-9]*) _vp_rc=0 ;;
-  esac
-  unset _vp_arg _vp_kept _vp_rem _vp_f _vp_changed
-  if [ "$_vp_rc" -ne 0 ]; then
-    unset _vp_rc
-    return 1
-  fi
-  unset _vp_rc
+  unset _vp_arg _vp_kept _vp_rem _vp_f _vp_changed _vp_rc
   return 0
 }
 
