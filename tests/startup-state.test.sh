@@ -448,6 +448,76 @@ else
   cat "$_tmp/s13b.err" >&2
 fi
 
+# The same lane with a bash-ONLY witness: the startup bundle's intdep module is
+# posix-class, so a wrong plan class (ksh/zsh) would still load it and pass
+# silently. A bash-only module proves plans/bash*.sh actually ran: with
+# KSH_VERSION inherited, the old version-variable precedence picked ksh, no
+# bash plan existed, and the interactive module never loaded.
+if [ -n "$_bash_bin" ]; then
+  _bproj="$_tmp/project-bashonly"
+  mkdir -p "$_bproj/module.d" "$_bproj/modules"
+  : >"$_bproj/valise.conf"
+  printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_bproj/variants.tsv"
+  printf 'name=bashwitness\nversion=\nside_effect=read-only\nrequires=\noptional=\nshells=bash\nplatforms=any\nexports=\nload=modules/bashwitness.sh\nphase=interactive\n' >"$_bproj/module.d/bashwitness.meta"
+  printf 'echo ran >>"$HOME/bashwitness.log"\n' >"$_bproj/modules/bashwitness.sh"
+  printf '# bundle\tshell\troots\ndefault\tbash\tbashwitness\n' >"$_bproj/bundles.tsv"
+  rm -rf "$_tmp/release-bashonly"
+  (cd "$_bproj" && "$_valise" build "$_tmp/release-bashonly") >/dev/null 2>&1
+  _reset_home "$_home"
+  _install "$_tmp/release-bashonly" "$_home" "$_bash_bin"
+  _home_env "$_home" KSH_VERSION=1.0 ZSH_VERSION=5.9 \
+    -- "$_bash_bin" --login -i -c ':' >"$_tmp/s13c.out" 2>"$_tmp/s13c.err" || :
+  if [ "$(_marker_count "$_home/bashwitness.log")" -eq 1 ]; then
+    pass "bash login with inherited KSH_VERSION/ZSH_VERSION loads the bash-only interactive plan"
+  else
+    fail "bash login with inherited KSH_VERSION/ZSH_VERSION did not load the bash plan"
+    cat "$_tmp/s13c.err" >&2
+  fi
+
+  # bash invoked as `sh` reads ~/.profile BEFORE enabling POSIX mode, so the
+  # env-only stage must stay in effect there: the interactive module must NOT
+  # load from .profile.
+  _reset_home "$_home"
+  _install "$_tmp/release-a" "$_home" "$_bash_bin"
+  _sh_link="$_tmp/sh-as-sh"
+  ln -sf "$_bash_bin" "$_sh_link"
+  _home_env "$_home" -- "$_sh_link" -l -i -c ':' >"$_tmp/s13d.out" 2>"$_tmp/s13d.err" || :
+  if [ "$(_marker_count "$_home/intdep.log")" -eq 0 ]; then
+    pass "bash invoked as sh stays on the env-only stage while reading the login file"
+  else
+    fail "bash invoked as sh ran the interactive stage during the login file"
+    cat "$_tmp/s13d.err" >&2
+  fi
+fi
+
+# A non-bash shell that inherits an exported BASH_VERSION must not be mistaken
+# for native bash. zsh is the available non-bash login shell here.
+if [ -n "$_zsh_bin" ]; then
+  _reset_home "$_home"
+  _install "$_tmp/release-a" "$_home" "$_zsh_bin"
+  _home_env "$_home" BASH_VERSION=5.3.20 \
+    -- "$_zsh_bin" -l -i -c ':' >"$_tmp/s13e.out" 2>"$_tmp/s13e.err" || :
+  # zsh --login -i reads .zshrc, so the interactive plan SHOULD load exactly
+  # once there - but only because the probe picked the zsh plan, not because
+  # BASH_VERSION made the shell look native bash in .profile. The witness is
+  # the plan class the block chose: the .zshenv block must carry the emulate
+  # probe (zsh), and .profile must not have run stage 2 there. .profile DOES
+  # carry the bash-login stage (the literal marker line) because install
+  # writes it into the bash login file regardless of $SHELL; what matters is
+  # that the gate evaluated false in zsh (no shopt), so stage 2 did not fire
+  # from .profile. The intdep count of exactly 1 (loaded once, via .zshrc)
+  # together with the zsh plan probe in .zshenv proves that.
+  if [ "$(_marker_count "$_home/intdep.log")" -eq 1 ] &&
+    grep -q 'command -v emulate' "$_home/.zshenv" 2>/dev/null &&
+    grep -q 'elif command -v emulate' "$_home/.profile" 2>/dev/null; then
+    pass "zsh login with inherited BASH_VERSION is not treated as native bash"
+  else
+    fail "zsh login with inherited BASH_VERSION picked the wrong plan class or ran stage 2 in .profile"
+    cat "$_tmp/s13e.err" >&2
+    grep -n '_valise_plan=' "$_home/.zshenv" >&2 2>/dev/null || :
+  fi
+fi
+
 # Scenario 14: control. A non-login interactive bash reads .bashrc, and a
 # non-interactive `bash -c` stays silent and loads no interactive module.
 _reset_home "$_home"

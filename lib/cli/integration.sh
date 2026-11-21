@@ -95,7 +95,15 @@ print_posix_integration() {
   printf '%s\n' \
     '# BEGIN valise managed block' \
     "_valise_active_link=$_pix_active_literal" \
-    'if [ -n "${KSH_VERSION-}" ]; then _valise_plan=ksh; elif [ -n "${ZSH_VERSION-}" ]; then _valise_plan=zsh; elif [ -n "${BASH_VERSION-}" ]; then _valise_plan=bash; else _valise_plan=sh; fi' \
+    '# The running shell is identified by probes on shell-specific builtins, not' \
+    '# by inherited *_VERSION variables: a bash login can inherit KSH_VERSION or' \
+    '# ZSH_VERSION, and ksh/dash/zsh can inherit BASH_VERSION, and the version' \
+    '# variables alone would then pick the wrong plan class here.' \
+    '_valise_plan=' \
+    'if command -v shopt >/dev/null 2>&1; then _valise_plan=bash' \
+    'elif command -v emulate >/dev/null 2>&1; then _valise_plan=zsh' \
+    'elif command -v whence >/dev/null 2>&1; then _valise_plan=ksh' \
+    'else _valise_plan=sh; fi' \
     '_valise_active=$(cd "$_valise_active_link" 2>/dev/null && pwd -P)' \
     '_valise_stage1_ok=1' \
     'if [ -n "$_valise_active" ]; then' \
@@ -159,22 +167,33 @@ print_posix_integration() {
   if [ "$_pix_stage" = all ] || [ "$_pix_stage" = bash-login ]; then
     if [ "$_pix_stage" = bash-login ]; then
       # Gate on the shell ACTUALLY running, not _valise_plan: a bash login can
-      # inherit KSH_VERSION/ZSH_VERSION from its parent, which would make the
-      # plan-based gate skip stage 2 in the very shell this stage is for. The
-      # POSIX-mode check keeps bash invoked as `sh` on its env-only stage. Use
-      # `set +o` and match the option name exactly: `set -o` also lists
-      # `verbose on` / `xtrace on` after `posix off`, so a loose *posix*on*
-      # pattern would skip stage 2 whenever either option was enabled.
+      # inherit KSH_VERSION/ZSH_VERSION from its parent, and ksh/dash/zsh can
+      # inherit BASH_VERSION, so a version variable alone cannot prove native
+      # bash. shopt is a bash-only builtin, so its presence identifies bash;
+      # POSIX mode and an `sh` invocation name keep bash-as-sh on its env-only
+      # stage: bash invoked as `sh` reads ~/.profile BEFORE enabling POSIX
+      # mode, so `set +o` still prints `set +o posix` there, while `shopt -q
+      # -o posix` reports the mode that is in effect for the code that
+      # follows. Use `set +o` and match the option name exactly as a fallback:
+      # `set -o` also lists `verbose on` / `xtrace on` after `posix off`, so a
+      # loose *posix*on* pattern would skip stage 2 whenever either option
+      # was enabled. The invocation name is matched with a trailing -sh so a
+      # login shell reached through any symlink whose basename ends in -sh
+      # (or is exactly sh) is treated as an sh invocation.
       printf '%s\n' \
         '  _valise_bash_native=0' \
         '  # bash-login marker: doctor keys its gate expectation on this line.' \
         '  # A .profile without it is a pre-0.4.1 env-only install for a' \
         '  # non-bash default shell and must not be flagged as legacy.' \
         '  _valise_bash_login_stage=1' \
-        '  if [ -n "${BASH_VERSION-}" ]; then' \
-        '    case "$(set +o 2>/dev/null)" in' \
-        '    *"set -o posix"*) : ;;' \
-        '    *) _valise_bash_native=1 ;;' \
+        '  if command -v shopt >/dev/null 2>&1; then' \
+        '    case "${0##*/}" in sh|*-sh) : ;;' \
+        '    *) if shopt -q -o posix 2>/dev/null; then :; else' \
+        '         case "$(set +o 2>/dev/null)" in' \
+        '         *"set -o posix"*) : ;;' \
+        '         *) _valise_bash_native=1 ;;' \
+        '         esac' \
+        '       fi ;;' \
         '    esac' \
         '  fi' \
         '  if [ "$_valise_stage1_ok" -eq 1 ] && [ "$_valise_bash_native" -eq 1 ]; then'
@@ -655,15 +674,18 @@ cmd_doctor() {
         .bash_profile | .bash_login) _doctor_want_gate=1 ;;
         "$_doctor_bash_login")
           # The bash login file carries stage 2 whenever bash has an rc chain
-          # or the new bash-login marker is present.
-          if [ "$_doctor_bash_rc" -eq 1 ] ||
-             grep -q '_valise_bash_login_stage=1' "$_doctor_file" 2>/dev/null; then
+          # or the new bash-login marker is present. The marker is matched as
+          # the exact generated assignment line inside the managed block, via
+          # the trusted awk below, so a user comment cannot set it and no
+          # untrusted grep is resolved from the caller's PATH.
+          if [ "$_doctor_bash_rc" -eq 1 ]; then
             _doctor_want_gate=1
           fi
           ;;
         esac
         if ! "$_doctor_awk" -v want_gate="$_doctor_want_gate" '
-          /^# BEGIN valise managed block$/ { inblock = 1; gate = 0; marker = 0; next }
+          /^# BEGIN valise managed block$/ { inblock = 1; gate = 0; marker = 0; bash_login = 0; next }
+          inblock && $0 == "  _valise_bash_login_stage=1" { bash_login = 1 }
           inblock && /case \$- in \*i\*\)/ { gate = 1 }
           inblock && index($0, "_valise_stage1_ok=") == 1 { marker = 1 }
           /^# END valise managed block$/ {
@@ -672,6 +694,10 @@ cmd_doctor() {
             # two-stage marker anywhere is the legacy single-stage shape.
             if (want_gate && !gate) bad = 1
             if (!marker) bad = 1
+            # The bash-login marker upgrades the expected shape of the login
+            # file that carries it: stage 2 must be reachable there.
+            if (bash_login && !gate) bad = 1
+            if (bash_login) want_gate = 1
           }
           END { exit bad ? 1 : 0 }
         ' "$_doctor_file"; then

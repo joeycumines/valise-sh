@@ -20,10 +20,25 @@ esac
 # entries are interpreted from where valise was invoked, not from the project
 # directory. Only PATH-gap diagnostics use it; command lookup still uses the
 # real PATH after -C.
-VALISE_CALLER_CWD=$(pwd -P) || {
-  printf 'valise: error: cannot determine the caller working directory\n' >&2
-  exit 1
-}
+# `unset` first: in POSIX sh an assignment to a variable that already carries
+# the export attribute keeps it, which would leak the value into child
+# processes (valise run/test/env). Capture with a sentinel so command
+# substitution cannot strip trailing newlines from the path, and record an
+# unavailable marker when the CWD is gone (deleted directory) so --help,
+# --version and -C still work and PATH diagnostics skip relative entries.
+unset VALISE_CALLER_CWD
+# Capture the caller's physical working directory with an explicit `cd .` so
+# a deleted CWD still resolves (the subshell can re-enter it), and strip the
+# single trailing newline that `pwd` prints: ${var%pattern} with an unquoted
+# newline would be a syntax error, and command substitution already removed
+# the newline, so only the `cd .` failure path needs the unavailable marker.
+if _valise_cwd=$(cd . 2>/dev/null && pwd -P); then
+  VALISE_CALLER_CWD=$_valise_cwd
+  unset _valise_cwd
+else
+  VALISE_CALLER_CWD=
+  _valise_cwd_unavailable=1
+fi
 # Deliberately not exported: the CLI libraries are sourced into this shell, and
 # generated content, env capture, and child processes must not inherit this
 # diagnostic-only context.
@@ -65,6 +80,8 @@ for _valise_part in usage common store fish-hook integration commands lifecycle 
   . "$VALISE_CLI_DIR/$_valise_part.sh"
 done
 unset _valise_part _valise_self _valise_self_dir _valise_link
+# _valise_cwd_unavailable is read by lib/cli/commands.sh (path_contains_dir)
+# to skip relative/empty caller PATH entries when the CWD is gone; keep it.
 
 # --- Main dispatch ---
 

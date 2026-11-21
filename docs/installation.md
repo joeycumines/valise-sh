@@ -279,7 +279,12 @@ gap is still reported. Relative entries are interpreted from the directory
 where valise was invoked, not from `-C <dir>`'s project directory; valise
 records that directory before changing it, so `.local/bin` keeps its meaning
 for a caller that changes into a project with `-C`; an empty entry in a
-non-empty value denotes that invocation directory too.
+non-empty value denotes that invocation directory too. The invocation
+directory joins with exactly one separator, so invoking valise from `/` still
+matches `/` and `/usr/bin` rather than a POSIX implementation-defined `//`
+path. When the invocation directory is unavailable (for example it was
+deleted), relative and empty entries are skipped rather than resolved against
+the project directory.
 
 `VALISE_CALLER_PATH` is inherited by child processes. A wrapper that captured a
 value should unset it before invoking a nested valise run, so the nested run

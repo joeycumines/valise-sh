@@ -5,6 +5,34 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- The bash-login stage treats any invocation whose basename is `sh` or ends
+  in `-sh` as an `sh` invocation, so bash reached through a symlink such as
+  `sh-as-sh` (not just a literal `sh`/`-sh`) stays on its env-only stage
+  while reading the login file, matching real `sh -l -i` behavior.
+- `valise release use`/`release rollback` whose incoming release wants
+  `gui_env=off` now restore the outgoing bridge and reconcile stubs on a
+  failed switch exactly as the bridge-owning case does, instead of leaving
+  the outgoing bridge stranded or reconciling against a dangling active
+  link.
+- A failed release switch whose command ledger is not a regular file (for
+  example a symlink) now runs the same stub rollback as a reconcile failure:
+  the outgoing stubs are restored and the ledger is rewritten as an empty
+  regular file instead of being skipped or deleted, so command integration
+  stays active for later `release use`/`release rollback` runs.
+- A signal delivered while a failed release switch is rolling back is recorded
+  by masked INT/TERM traps inside the restore and honored only after every
+  restore step finished, so the process exits with the signal's status (130 or
+  143) instead of dying mid-restore with exit 1; a late signal can no longer
+  strand `.valise-outgoing.*` bridge backups or skip the stub restore.
+- Rollback distinguishes "outgoing release directory gone" (a dangling active
+  link) from "outgoing release directory unknown" (an unreadable link): it
+  clears the published stubs only in the first case and never deletes stubs on
+  an assumption, and it requires a readable `valise-release.conf` before
+  reconciling stubs so an unreadable manifest is reported instead of silently
+  deleting every owned stub.
+
 ## [0.4.1] - 2026-11-20
 
 0.4.1 hardens phase probing, release-activation transactions, POSIX startup
@@ -71,10 +99,43 @@ reloads, compiler export-ownership matching, and GUI environment capture.
   from the directory where valise was invoked, before `-C` changes to the
   project. A native bash login with inherited shell-version variables or with
   `verbose`/`xtrace` enabled still loads the interactive stage.
-- Activation rollback restores the previous-release record even if the active
-  link could not be rolled back, cleans up command stubs when no release was
-  active or its directory is gone, and keeps the rollback armed through a
-  second signal.
+- Activation rollback masks `INT`/`TERM` while it restores, so a second signal
+  during a rollback is recorded and honored only after every restore step
+  finished (the process then exits 130/143) instead of killing the restore
+  mid-way.
+- Activation rollback clears published command stubs while KEEPING
+  `commands.tsv` as an empty regular file when no release was active before or
+  the outgoing release directory is gone; deleting the ledger used to disable
+  stub publication for every later `release use`/`release rollback` and made
+  `doctor` report "installed without integration". An outgoing directory that
+  cannot be determined at all is reported, and stubs are never deleted on that
+  assumption.
+- Activation rollback restores the previous-release record only when the
+  active link was actually rolled back (or never moved), so a failed link
+  rollback no longer leaves `active=B` and `previous=B`; a symlinked
+  previous record is reported and removed instead of silently skipped.
+- Activation rollback requires a readable `valise-release.conf` on the outgoing
+  release before reconciling its stubs back, and `release_commands` fails
+  closed on an unreadable manifest, so an unreadable manifest can no longer
+  silently delete every owned stub.
+- The POSIX managed block identifies the running shell with shell-specific
+  builtin probes (`shopt`, `emulate`, `whence`) instead of inherited
+  `KSH_VERSION`/`ZSH_VERSION`/`BASH_VERSION`, so a native bash login that
+  inherits `KSH_VERSION`/`ZSH_VERSION` loads the bash plans, and ksh/dash/zsh
+  inheriting `BASH_VERSION` are not mistaken for bash. The bash-login stage
+  additionally excludes an `sh` invocation name and checks `shopt -q -o posix`
+  (falling back to exact `set +o` matching), so bash invoked as `sh` stays on
+  its env-only stage while reading the login file.
+- `valise doctor` detects the bash-login marker with the trusted awk pass
+  scoped to the managed block and the exact generated assignment line, instead
+  of an untrusted whole-file `grep` resolved from the caller's `PATH`.
+- `bin/valise` unsets `VALISE_CALLER_CWD` before recording it (a pre-exported
+  value no longer keeps its export attribute and leaks into child processes),
+  captures it with a sentinel so trailing newlines survive, and records an
+  unavailable marker when the CWD is gone so `--help`/`--version`/`-C` still
+  work; relative and empty caller PATH entries join the invocation directory
+  with exactly one separator (no leading `//` from `/`) and are skipped when
+  no caller directory is known.
 
 ## [0.4.0] - 2026-11-18
 

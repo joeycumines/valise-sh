@@ -22,14 +22,20 @@ _rc_pub=""
 
 # path_contains_dir <path-value> <dir>: succeed when <dir> names one entry of
 # <path-value>. Entries and the target are normalized, so a trailing slash or a
-# doubled separator (common in $TMPDIR-derived homes) is not a false gap. Empty
+# doubled separator (common in $TMPDIR-derived homes) is not a false gap. Both
+# the lexical and the physical (pwd -P) spelling of the target are compared, so
+# a symlinked command directory (macOS /tmp -> /private/tmp, a symlinked $HOME)
+# matches whether it is spelled through the link or the real path. Empty
 # entries denote the current directory; they are skipped when no caller CWD is
-# known (the directory valise runs in after -C is not the caller's).
-# Relative entries are resolved against VALISE_CALLER_CWD when set: bin/valise
-# records the caller's directory before -C changes it, so `.local/bin` means
-# the caller's `.local/bin`, and an empty entry means the caller's directory,
-# not the project's. Library-only callers (tests and embedded use) leave it
-# unset, and path_normalize then uses the current directory as before.
+# known (the directory valise runs in after -C is not the caller's, and a
+# deleted CWD must not abort unrelated commands). Relative entries are resolved
+# against VALISE_CALLER_CWD when set: bin/valise records the caller's physical
+# directory before -C changes it, so `.local/bin` means the caller's
+# `.local/bin`, and an empty entry means the caller's directory, not the
+# project's. The root directory joins with exactly one separator: a leading
+# "//" is implementation-defined in POSIX. Library-only callers (tests and
+# embedded use) leave it unset, and path_normalize then uses the current
+# directory as before.
 # Each path_normalize capture appends a sentinel (&& printf x): command
 # substitution strips trailing newlines, so without the sentinel an entry like
 # "/bin/dir<LF>" would normalize to "/bin/dir<LF>\n", lose its newlines in the
@@ -39,10 +45,24 @@ path_contains_dir() {
   # An explicitly empty PATH value has no entries at all, even though the
   # splitting loop below would otherwise see one empty (CWD) entry.
   [ -n "$_pcd_path" ] || { unset _pcd_path; return 1; }
+  # Compare both spellings: path_normalize is lexical, but VALISE_CALLER_CWD is
+  # physical (pwd -P), so a symlinked invocation directory (macOS /tmp ->
+  # /private/tmp) would otherwise never match the command directory spelled
+  # through $HOME or VALISE_BIN_DIR. Compute the physical form of the target
+  # once; candidates are compared against both spellings of it.
+  # Sentinel captures (&& printf x) keep trailing newlines inside the compared
+  # values, since command substitution strips them and a newline-bearing entry
+  # must not match a newline-free directory. The physical lookup uses the bare
+  # argument (no sentinel, no newline), since `cd` needs a real path.
   if ! _pcd_dir=$(path_normalize "$2" && printf x); then
-    unset _pcd_path _pcd_dir
+    unset _pcd_path _pcd_dir _pcd_dir_phys
     return 1
   fi
+  _pcd_dir_phys=$_pcd_dir
+  if _pcd_phys_dir=$(cd "$2" 2>/dev/null && pwd -P && printf x); then
+    _pcd_dir_phys=$_pcd_phys_dir
+  fi
+  unset _pcd_phys_dir
   # Split the path value with POSIX parameter stripping rather than IFS word
   # splitting: zsh does not split unquoted expansions by default, and `set --`
   # here would also clobber the caller's positional parameters. A trailing
@@ -57,19 +77,30 @@ path_contains_dir() {
     /*) : ;;
     *)
       # An empty entry denotes the caller's current directory when known.
-      if [ -n "${VALISE_CALLER_CWD:-}" ]; then
-        _pcd_candidate=$VALISE_CALLER_CWD/$_pcd_candidate
+      # Without a known caller CWD (library/embedded use, or a deleted
+      # directory at startup) the entry is skipped: the directory valise runs
+      # in after -C is not the caller's.
+      if [ -n "${VALISE_CALLER_CWD:-}" ] && [ "${_valise_cwd_unavailable:-0}" -eq 0 ]; then
+        if [ -n "$_pcd_candidate" ]; then
+          _pcd_candidate=${VALISE_CALLER_CWD%/}/$_pcd_candidate
+        else
+          _pcd_candidate=$VALISE_CALLER_CWD
+        fi
+      else
+        continue
       fi
       ;;
     esac
-    [ -n "$_pcd_candidate" ] || continue
     if _pcd_norm=$(path_normalize "$_pcd_candidate" && printf x) &&
-      [ "$_pcd_norm" = "$_pcd_dir" ]; then
-      unset _pcd_path _pcd_dir _pcd_rem _pcd_entry _pcd_candidate _pcd_norm
+      { [ "$_pcd_norm" = "$_pcd_dir" ] || [ "$_pcd_norm" = "$_pcd_dir_phys" ]; }; then
+      _pcd_norm=${_pcd_norm%x}
+      _pcd_dir=${_pcd_dir%x}
+      _pcd_dir_phys=${_pcd_dir_phys%x}
+      unset _pcd_path _pcd_dir _pcd_dir_phys _pcd_rem _pcd_entry _pcd_candidate _pcd_norm
       return 0
     fi
   done
-  unset _pcd_path _pcd_dir _pcd_rem _pcd_entry _pcd_candidate _pcd_norm
+  unset _pcd_path _pcd_dir _pcd_dir_phys _pcd_rem _pcd_entry _pcd_candidate _pcd_norm
   return 1
 }
 
@@ -126,8 +157,15 @@ command_name_valid() {
 
 # release_commands <release-dir>: print the commands a release publishes.
 # Fails, naming the entry, when an installed release lists a name the build
-# would have rejected, so no caller ever joins such a name to a path.
+# would have rejected, so no caller ever joins such a name to a path. A
+# valise-release.conf that exists but cannot be read is a hard failure, not an
+# empty list: callers that treat "zero commands" as "remove every owned stub"
+# (rollback) must never do so because the manifest was unreadable.
 release_commands() {
+  if [ -f "$1/valise-release.conf" ] && [ ! -r "$1/valise-release.conf" ]; then
+    printf 'valise: error: cannot read the release configuration: %s/valise-release.conf\n' "$1" >&2
+    return 1
+  fi
   _rcs_list=$(release_conf_value "$1" commands 2>/dev/null || :)
   _rcs_seen=" "
   _rcs_noglob=0
@@ -189,7 +227,14 @@ reconcile_commands() {
     die "cannot create command ledger staging file"
   _rcm_owned=
 
-  # Drop or keep each stub the ledger records.
+  # Drop or keep each stub the ledger records. A non-regular (e.g. symlinked)
+  # ledger cannot be read safely; report it instead of treating it as empty,
+  # which would silently delete every owned stub.
+  if [ -L "$_rcm_ledger" ]; then
+    die "command ledger must not be a symlink: $_rcm_ledger"
+  elif [ -e "$_rcm_ledger" ] && [ ! -f "$_rcm_ledger" ]; then
+    die "command ledger is not a regular file: $_rcm_ledger"
+  fi
   if [ -f "$_rcm_ledger" ]; then
     while IFS="$_rcm_tab" read -r _rcm_name _rcm_path _rcm_sha; do
       [ -n "$_rcm_name" ] || continue
@@ -215,8 +260,6 @@ reconcile_commands() {
         info "removed command: $_rcm_path"
       fi
     done <"$_rcm_ledger"
-  elif [ -e "$_rcm_ledger" ]; then
-    die "command ledger is not a regular file: $_rcm_ledger"
   fi
 
   # Write each wanted stub valise does not hold yet.
@@ -266,6 +309,49 @@ reconcile_commands() {
   fi
   unset _rcm_release _rcm_bin _rcm_ledger _rcm_want _rcm_tab _rcm_rm _rcm_mkdir _rcm_chmod _rcm_ln _rcm_mv \
     _rcm_cat _rcm_awk _rcm_owned _rcm_name _rcm_path _rcm_sha _rcm_keep
+}
+
+# clear_owned_commands: remove every stub the ledger records that still has the
+# content valise wrote, then atomically rewrite the ledger as an EMPTY regular
+# 0644 file instead of unlinking it. The ledger's presence is the signal that
+# command integration is active (release_activate reconciles only when it
+# exists, and doctor reports "installed without integration" when it does not),
+# so rollback of a release switch must keep the file and only clear the stubs
+# this activation published. Call with the store lock held.
+clear_owned_commands() {
+  _coc_ledger=${1:-$(commands_ledger_path)}
+  [ -e "$_coc_ledger" ] || [ -L "$_coc_ledger" ] || return 0
+  # A symlinked or non-regular ledger is an error state, not an empty ledger:
+  # reading it would follow the link and deleting owned stubs based on it
+  # could remove files another path owns. Report and fail so the caller keeps
+  # the ledger untouched instead of silently wiping stubs.
+  if [ -L "$_coc_ledger" ]; then
+    die "command ledger must not be a symlink: $_coc_ledger"
+  fi
+  [ -f "$_coc_ledger" ] || die "command ledger is not a regular file: $_coc_ledger"
+  _coc_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
+  _coc_tab=$(printf '\t')
+  while IFS="$_coc_tab" read -r _coc_name _coc_path _coc_sha; do
+    [ -n "$_coc_name" ] || continue
+    [ -e "$_coc_path" ] || [ -L "$_coc_path" ] || continue
+    if commands_file_is "$_coc_path" "$_coc_sha"; then
+      "$_coc_rm" -f "$_coc_path" || die "cannot remove command stub: $_coc_path"
+      info "removed command: $_coc_path"
+    else
+      info "warning: command stub was changed outside valise; leaving it: $_coc_path"
+    fi
+  done <"$_coc_ledger"
+  _coc_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  _coc_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+  _coc_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
+  _coc_cat=$(trusted_utility_path cat) || die "no trusted cat utility available"
+  "$_coc_mkdir" -p "$VALISE_XDG_STATE" || die "cannot create state directory: $VALISE_XDG_STATE"
+  _coc_tmp=$(trusted_mktemp_at "$VALISE_XDG_STATE" file "$VALISE_XDG_STATE/.commands.XXXXXX") ||
+    die "cannot create command ledger staging file"
+  : >"$_coc_tmp" || { "$_coc_rm" -f "$_coc_tmp" 2>/dev/null || :; die "cannot write command ledger"; }
+  "$_coc_chmod" 0644 "$_coc_tmp" || { "$_coc_rm" -f "$_coc_tmp" 2>/dev/null || :; die "cannot set command ledger mode"; }
+  "$_coc_mv" -f "$_coc_tmp" "$_coc_ledger" || { "$_coc_rm" -f "$_coc_tmp" 2>/dev/null || :; die "cannot publish command ledger"; }
+  unset _coc_ledger _coc_rm _coc_tab _coc_name _coc_path _coc_sha _coc_mkdir _coc_chmod _coc_mv _coc_cat _coc_tmp
 }
 
 # remove_owned_commands: remove every stub the ledger records that still has

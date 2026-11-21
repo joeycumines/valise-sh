@@ -395,13 +395,18 @@ run_lane() {
         zsh) _stage1_only="$_tmp_home/.zshenv" ;;
         bash) _stage1_only="$_tmp_home/.bashrc" ;;
         *)
-          # .zprofile is only written when zsh is installed or already present;
-          # without zsh the grep below would run on a missing file and pass
-          # vacuously. Fall back to .zshenv, which is written in that case.
+          # .zprofile/.zshenv are only written when zsh is installed or the
+          # file already exists; without zsh neither may exist, so never grep
+          # a missing file (that would pass vacuously). Prefer .zprofile,
+          # then .zshenv, and finally the $ENV shim, which every POSIX install
+          # writes and which carries both stages - the stage-2 assertion
+          # below still runs in every case.
           if [ -f "$_tmp_home/.zprofile" ]; then
             _stage1_only="$_tmp_home/.zprofile"
-          else
+          elif [ -f "$_tmp_home/.zshenv" ]; then
             _stage1_only="$_tmp_home/.zshenv"
+          else
+            _stage1_only="$_tmp_home/.config/valise/env.sh"
           fi
           ;;
       esac
@@ -418,12 +423,19 @@ run_lane() {
         fail "$_lane/$_shell_name: the bash login file does not carry the interactive stage"
       fi
     elif [ "$_stage1_only" = "$_stage2_file" ]; then
+      # The rc-stage file IS the only stage-1-only witness: nothing more to
+      # assert about a second file.
       :
-    elif [ ! -f "$_stage1_only" ]; then
-      # No stage-1-only witness file was installed in this lane; there is
-      # nothing to assert here (the original code's grep also passed
-      # vacuously). Skip rather than fail so zsh-less homes still pass.
-      :
+    elif [ ! -f "$_stage1_only" ] && [ -f "$_stage2_file" ]; then
+      # No stage-1-only witness file was installed in this lane, but the
+      # rc-stage file exists: its stage-2 presence is still asserted below
+      # instead of dropping the check silently.
+      if grep -q 'case \$- in \*i\*)' "$_stage2_file" 2>/dev/null; then
+        pass "$_lane/$_shell_name: the interactive stage lives in the rc-stage file"
+      else
+        fail "$_lane/$_shell_name: the interactive stage is missing from the rc-stage file"
+        grep -c 'case \$- in \*i\*)' "$_stage2_file" >&2 2>/dev/null || :
+      fi
     elif grep -q 'case \$- in \*i\*)' "$_stage1_only" 2>/dev/null; then
       fail "$_lane/$_shell_name: $_stage1_only carries the interactive stage"
     elif grep -q 'case \$- in \*i\*)' "$_stage2_file" 2>/dev/null; then
@@ -460,7 +472,8 @@ run_lane() {
         _shim="$_tmp_home/.config/valise/env.sh"
         if grep -qF "_valise_shim='$_shim'" "$_tmp_home/.profile" &&
           grep -q 'ENV=$_valise_shim; export ENV' "$_tmp_home/.profile" &&
-          ! grep -q 'case \$- in \*i\*)' "$_tmp_home/.zprofile" &&
+          { [ ! -e "$_tmp_home/.zprofile" ] ||
+            ! grep -q 'case \$- in \*i\*)' "$_tmp_home/.zprofile" 2>/dev/null; } &&
           [ -f "$_shim" ] &&
           grep -q '# BEGIN valise managed block' "$_shim" &&
           grep -q 'case \$- in \*i\*)' "$_shim"; then

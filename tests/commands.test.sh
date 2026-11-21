@@ -21,6 +21,7 @@ _fail=0
 
 pass() { _total=$((_total + 1)); _pass=$((_pass + 1)); printf '  PASS: %s\n' "$1"; }
 fail() { _total=$((_total + 1)); _fail=$((_fail + 1)); printf '  FAIL: %s\n' "$1" >&2; }
+skip() { _total=$((_total + 1)); printf '  SKIP: %s\n' "$1"; }
 
 _repo=$(cd "$(dirname "$0")/.." && pwd -P)
 _valise="$_repo/bin/valise"
@@ -337,14 +338,32 @@ else
 fi
 
 # The caller CWD is diagnostic context only: it must not leak into generated
-# content or env capture.
-_v_caller "$_bin" "$_proj" env export environment.d >"$_tmp/env-export-cwd.out" 2>&1 || :
-if ! grep -F 'VALISE_CALLER_CWD' "$_tmp/env-export-cwd.out" >/dev/null &&
-  ! grep -F "$_home" "$_tmp/env-export-cwd.out" >/dev/null; then
-  pass "the recorded caller directory does not leak into generated content"
+# content, env capture, or child processes. Run from inside $_home so the
+# recorded caller directory is a real value, check the exit status (a crash or
+# empty output must not pass vacuously), inspect a child process's environment,
+# and pre-export VALISE_CALLER_CWD to prove the export attribute is dropped.
+_cwd_leak_rc=0
+(cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_CALLER_CWD=/pre-exported-leak \
+  "$_valise" -C "$_proj" env export environment.d) >"$_tmp/env-export-cwd.out" 2>&1 || _cwd_leak_rc=$?
+_cwd_child_rc=0
+(cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_CALLER_CWD=/pre-exported-leak \
+  "$_valise" -C "$_proj" run -- /bin/sh -c 'env') >"$_tmp/env-child-cwd.out" 2>&1 || _cwd_child_rc=$?
+if [ "$_cwd_leak_rc" -eq 0 ] && [ "$_cwd_child_rc" -eq 0 ] &&
+   ! grep -F 'VALISE_CALLER_CWD' "$_tmp/env-export-cwd.out" >/dev/null &&
+   ! grep -F "$_home" "$_tmp/env-export-cwd.out" >/dev/null &&
+   ! grep -F 'VALISE_CALLER_CWD' "$_tmp/env-child-cwd.out" >/dev/null &&
+   ! grep -F '/pre-exported-leak' "$_tmp/env-child-cwd.out" >/dev/null &&
+   ! grep -F "$_home" "$_tmp/env-child-cwd.out" >/dev/null; then
+  pass "the recorded caller directory does not leak into generated content or child processes"
 else
-  fail "the recorded caller directory leaked into generated content"
-  cat "$_tmp/env-export-cwd.out" >&2
+  fail "the recorded caller directory leaked into generated content or a child process"
+  cat "$_tmp/env-export-cwd.out" "$_tmp/env-child-cwd.out" >&2
 fi
 
 # The caller PATH takes precedence: a real PATH that contains the command dir
@@ -488,10 +507,13 @@ else
   fail "a trailing newline in a caller PATH entry does not falsely match"
   cat "$_tmp/doctor-nl.out" "$_tmp/doctor-nl-only.out" >&2
 fi
-# IFS=: splitting must not break on whitespace inside an entry, and empty
-# entries must not match a directory that is not the caller's current directory.
-# For callers that invoke valise without recording a CWD (library/embedded use),
-# the project directory is used, so these remain false for the command dir.
+# Parameter-expansion splitting must not break on whitespace inside an entry.
+# Empty entries resolve to the caller's invocation directory when valise
+# records one (bin/valise always does), so "::$_bin", "$_bin:" and
+# "/usr/bin::$_bin" all match, while a value of only empty entries ("::") does
+# not match the command directory. Library-only callers that leave
+# VALISE_CALLER_CWD unset skip empty entries instead of resolving them against
+# the directory valise runs in after -C.
 _sp="$_tmp/dir with space"
 mkdir -p "$_sp"
 _v_caller "$_sp:/usr/bin:/bin" "$_proj" doctor >"$_tmp/doctor-space.out" 2>&1 || :
@@ -504,11 +526,40 @@ if grep -F "warn: command directory is not on PATH: $_bin" "$_tmp/doctor-space.o
    grep -F "ok: command directory is on PATH: $_bin" "$_tmp/doctor-trail.out" >/dev/null &&
    grep -F "ok: command directory is on PATH: $_bin" "$_tmp/doctor-double2.out" >/dev/null &&
    grep -F "warn: command directory is not on PATH: $_bin" "$_tmp/doctor-empty-only.out" >/dev/null; then
-  pass "whitespace entries are not split and empty entries are skipped"
+  pass "whitespace entries are not split and empty entries resolve to the caller directory"
 else
-  fail "whitespace entries are not split and empty entries are skipped"
+  fail "whitespace entries are not split and empty entries resolve to the caller directory"
   cat "$_tmp/doctor-space.out" "$_tmp/doctor-lead.out" "$_tmp/doctor-trail.out" \
     "$_tmp/doctor-double2.out" "$_tmp/doctor-empty-only.out" >&2
+fi
+
+# Invoked from the root directory, an empty or relative caller PATH entry must
+# join with exactly one separator: VALISE_CALLER_CWD=/ must not produce the
+# POSIX implementation-defined leading "//".
+if [ "$(id -u)" -eq 0 ] && [ -w / ]; then
+  _root_rc=0
+  (cd / && env -i HOME="$_home" PATH=/usr/bin:/bin \
+    XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+    XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+    VALISE_BIN_DIR=/ VALISE_CALLER_PATH=":" \
+    "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-root-empty.out" 2>&1 || _root_rc=$?
+  _root_rel_rc=0
+  (cd / && env -i HOME="$_home" PATH=/usr/bin:/bin \
+    XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+    XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+    VALISE_BIN_DIR=/usr/bin VALISE_CALLER_PATH="usr/bin" \
+    "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-root-rel.out" 2>&1 || _root_rel_rc=$?
+  if [ "$_root_rc" -eq 0 ] &&
+     grep -F "ok: command directory is on PATH: /" "$_tmp/doctor-root-empty.out" >/dev/null &&
+     [ "$_root_rel_rc" -eq 0 ] &&
+     grep -F "ok: command directory is on PATH: /usr/bin" "$_tmp/doctor-root-rel.out" >/dev/null; then
+    pass "an empty or relative caller PATH entry invoked from / joins without a leading //"
+  else
+    fail "a caller PATH entry invoked from / did not resolve without a leading //"
+    cat "$_tmp/doctor-root-empty.out" "$_tmp/doctor-root-rel.out" >&2
+  fi
+else
+  skip "caller PATH entries invoked from / (needs a writable / or non-root)"
 fi
 
 if [ "$(stat -c %a "$_home/.config/valise/active/bin/hello" 2>/dev/null ||
