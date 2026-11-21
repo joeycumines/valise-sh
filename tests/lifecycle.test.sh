@@ -80,7 +80,11 @@ _mode() {
 }
 
 _active_id() {
-  _ai=$(cd "$_home/.config/valise/active" 2>/dev/null && pwd -P) || return 1
+  _ai=$(cd "$_home/.config/valise/active" 2>/dev/null && pwd -P) || {
+    # A dangling active link cannot be cd'd into; fall back to the literal
+    # symlink target's basename, which is the release name it names.
+    _ai=$(readlink "$_home/.config/valise/active" 2>/dev/null) || return 1
+  }
   printf '%s\n' "${_ai##*/}"
 }
 
@@ -1292,6 +1296,245 @@ else
   fail "release_activate continued after failed outgoing bridge backup"
   printf 'bk_out=%s\n' "$_bk_out" >&2
   cat "$_tmp/bk.err" >&2
+fi
+
+# --- Review-08/09/10 regressions: signal-safe rollback, ledger-preserving
+#     stub cleanup, manifest fail-closed, previous-record consistency, and
+#     symlinked previous record ---
+
+# 6. A second signal during an inline rollback must not kill the restore: the
+#    INT/TERM traps are masked inside activate_txn_abort, so a TERM sent while
+#    the rollback runs is recorded and the process exits 143 only after every
+#    restore step finished (bridge back, no aside files stranded).
+_use_home sig-rollback
+_bridge_proj "$_tmp/bp-sig-a" "$_lc_mode" siga
+_v "$_tmp/bp-sig-a" apply >"$_tmp/sig-a.out" 2>&1 || :
+_id_sig_a=$(_active_id)
+# B has gui_env=off: its activation stages the removal of A's bridge, so the
+# rollback below has a real .valise-outgoing.* aside to move back and a real
+# staged-bridge cleanup to exercise while TERM is masked.
+_bridge_proj "$_tmp/bp-sig-b" off sigb
+_v "$_tmp/bp-sig-b" apply --no-integration >"$_tmp/sig-b.out" 2>&1 || :
+_id_sig_b=$(_active_id)
+_v "$_proj" release use "$_id_sig_a" >/dev/null 2>&1 || :
+_sig_bridge="$_home/$_lc_bridge_rel"
+_sig_bridge_dir=$(dirname "$_sig_bridge")
+_sig_before=$(cksum <"$_sig_bridge" 2>/dev/null || :)
+# Force reconcile_commands to fail so release use enters the inline
+# activate_txn_abort path: the command ledger is made read-only (0444), so the
+# forward reconcile's write dies. The ledger stays a regular file (a symlink is
+# an error state the forward path rejects earlier), and the bridge stays a
+# regular file too, so the rollback's aside rename never blocks. TERM is paced
+# on the outgoing aside appearing in the bridge directory, which only happens
+# once the rollback has begun moving the bridge back, so the signal provably
+# lands while the INT/TERM traps are masked. The kill targets the child PID
+# only, never this script's process group.
+_sig_ledger="$_home/.local/state/valise/commands.tsv"
+chmod 0444 "$_sig_ledger"
+env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+  XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/bash \
+  "$_valise" -C "$_proj" release use "$_id_sig_b" >"$_tmp/sig-use.out" 2>&1 &
+_sig_pid=$!
+_sig_sent=0
+_sig_i=0
+while [ "$_sig_i" -lt 5000 ]; do
+  _sig_n=$(_find_count "$_sig_bridge_dir" '.valise-outgoing.*')
+  if [ "$_sig_n" != ERROR ] && [ "$_sig_n" -gt 0 ]; then
+    if kill -TERM "$_sig_pid" 2>/dev/null; then _sig_sent=1; break; fi
+  fi
+  kill -0 "$_sig_pid" 2>/dev/null || break
+  _sig_i=$((_sig_i + 1))
+done
+[ "$_sig_sent" -eq 1 ] || kill -TERM "$_sig_pid" 2>/dev/null || :
+if wait "$_sig_pid" 2>/dev/null; then
+  _sig_rc=0
+else
+  _sig_rc=$?
+fi
+chmod 0644 "$_sig_ledger" 2>/dev/null || :
+_sig_after=$(cksum <"$_sig_bridge" 2>/dev/null || :)
+_sig_asides=$(_find_count "$_sig_bridge_dir" '.valise-outgoing.*')
+if [ "$_sig_rc" -eq 143 ] &&
+  [ "$_sig_sent" -eq 1 ] &&
+  [ "$(_active_id)" = "$_id_sig_a" ] &&
+  [ -f "$_sig_bridge" ] && [ ! -L "$_sig_bridge" ] &&
+  [ "$_sig_after" = "$_sig_before" ] &&
+  [ "$_sig_asides" = 0 ]; then
+  pass "a signal during rollback is masked until every restore step finishes (exit 143)"
+else
+  fail "a signal during rollback killed the restore (rc=$_sig_rc sent=$_sig_sent) or stranded state"
+  cat "$_tmp/sig-use.out" >&2
+  find "$_sig_bridge_dir" -name '.valise-outgoing.*' >&2 || :
+fi
+unset _sig_n
+
+# 7. Rollback when the outgoing active link is dangling must clear the stubs
+#    this activation published but KEEP commands.tsv as an empty regular file
+#    (its presence is the integration-active signal), so a later `release use`
+#    still publishes commands. The failure is forced AFTER the link moved
+#    (ledger symlink during the forward reconcile), so the abort restores the
+#    dangling link, clears A's stubs, and keeps the ledger.
+_use_home no-link-rollback
+# Install A with integration: it publishes the hello stub and owns a bridge.
+_bridge_proj "$_tmp/bp-nl-a" "$_lc_mode" nla
+_v "$_tmp/bp-nl-a" apply >"$_tmp/nl-a.out" 2>&1 || :
+_id_nl_a=$(_active_id)
+# Install B without integration (it becomes the current active release).
+_bridge_proj "$_tmp/bp-nl-b" off nlb
+_v "$_tmp/bp-nl-b" apply --no-integration >"$_tmp/nl-b.out" 2>&1 || :
+_id_nl_b=$(_active_id)
+# Make A active again; previous now records B.
+_v "$_proj" release use "$_id_nl_a" >/dev/null 2>&1 || :
+_nl_stub="$_home/.local/bin/hello"
+_nl_ledger="$_home/.local/state/valise/commands.tsv"
+# Point active at a dangling target (the "outgoing release is gone" state) and
+# drop the previous record, then switch to B with the forward reconcile forced
+# to fail (ledger as a symlink). Rollback must restore the dangling link,
+# clear A's stubs, KEEP the ledger as an empty file, and put the bridge back.
+ln -sfn "$_home/.local/share/valise/releases/does-not-exist" "$_home/.config/valise/active"
+rm -f "$(_state_previous)"
+mv "$_nl_ledger" "$_tmp/nl-saved.tsv"
+ln -s "$_tmp/nl-saved.tsv" "$_nl_ledger"
+if _v "$_proj" release use "$_id_nl_b" >"$_tmp/nl-use.out" 2>&1; then
+  nl_rc=0
+else
+  nl_rc=1
+fi
+rm -f "$_nl_ledger"
+mv "$_tmp/nl-saved.tsv" "$_nl_ledger"
+if [ "$nl_rc" -ne 0 ] &&
+  [ "$(_active_id 2>/dev/null || :)" = does-not-exist ] &&
+  [ -f "$_nl_ledger" ] && [ ! -s "$_nl_ledger" ] &&
+  [ ! -e "$_nl_stub" ] && [ ! -L "$_nl_stub" ]; then
+  pass "rollback with a dangling active link clears stubs but keeps an empty ledger"
+else
+  fail "rollback with a dangling active link deleted the ledger or left a stub"
+  cat "$_tmp/nl-use.out" >&2
+  ls -la "$_home/.config/valise/active" "$_nl_ledger" "$_nl_stub" >&2 2>/dev/null || :
+fi
+# A subsequent release use must still publish commands (ledger presence works).
+_v "$_proj" release use "$_id_nl_a" >"$_tmp/nl-use2.out" 2>&1 || :
+if [ -x "$_nl_stub" ] && [ -f "$_nl_ledger" ] && [ -s "$_nl_ledger" ]; then
+  pass "a release use after a stub-clearing rollback still publishes commands"
+else
+  fail "a release use after a stub-clearing rollback did not publish commands"
+  cat "$_tmp/nl-use2.out" >&2
+fi
+
+# 8. An outgoing release whose valise-release.conf is unreadable must not have
+#    its owned stubs silently deleted on rollback: rollback reports the
+#    unreadable manifest and leaves the stubs and ledger in place.
+if [ "$(id -u)" -eq 0 ]; then
+  skip "rollback with an unreadable outgoing manifest (chmod 000 is ineffective for uid 0)"
+else
+  _use_home unread-manifest
+  _bridge_proj "$_tmp/bp-um-a" "$_lc_mode" uma
+  _v "$_tmp/bp-um-a" apply >"$_tmp/um-a.out" 2>&1 || :
+  _id_um_a=$(_active_id)
+  _bridge_proj "$_tmp/bp-um-b" "$_lc_mode" umb
+  _v "$_tmp/bp-um-b" apply --no-integration >"$_tmp/um-b.out" 2>&1 || :
+  _id_um_b=$(_active_id)
+  _v "$_proj" release use "$_id_um_a" >/dev/null 2>&1 || :
+  _um_stub="$_home/.local/bin/hello"
+  _um_ledger="$_home/.local/state/valise/commands.tsv"
+  _um_manifest="$_home/.local/share/valise/releases/$_id_um_a/valise-release.conf"
+  chmod 000 "$_um_manifest"
+  # Fail the forward reconcile (ledger symlink) so rollback runs.
+  mv "$_um_ledger" "$_tmp/um-saved.tsv"
+  ln -s "$_tmp/um-saved.tsv" "$_um_ledger"
+  if _v "$_proj" release use "$_id_um_b" >"$_tmp/um-use.out" 2>&1; then
+    um_rc=0
+  else
+    um_rc=1
+  fi
+  rm -f "$_um_ledger"
+  mv "$_tmp/um-saved.tsv" "$_um_ledger"
+  chmod 644 "$_um_manifest"
+  if [ "$um_rc" -ne 0 ] &&
+    [ -x "$_um_stub" ] && [ -s "$_um_ledger" ] &&
+    grep -F 'cannot read the release configuration' "$_tmp/um-use.out" >/dev/null; then
+    pass "rollback with an unreadable outgoing manifest reports it and keeps the stubs"
+  else
+    fail "rollback with an unreadable outgoing manifest silently wiped stubs"
+    cat "$_tmp/um-use.out" >&2
+    ls -la "$_um_stub" "$_um_ledger" >&2 2>/dev/null || :
+  fi
+fi
+
+# 9. A failed active-link rollback must leave active and previous consistent:
+#    when the link cannot be moved back, previous must NOT be overwritten with
+#    the pre-activation value (that would leave active=B and previous=B).
+#    The link failure is forced by making the config dir read-only so
+#    switch_active_link's ln -sfn fails BEFORE the link moves; the forward
+#    reconcile then fails (ledger symlink), so the abort runs with the link
+#    still at A: _ra_rolled=1 and previous must be restored to its
+#    pre-activation value, leaving active=A and previous=outgoing (consistent).
+_use_home prev-consistency
+_bridge_proj "$_tmp/bp-pc-a" "$_lc_mode" pca
+_v "$_tmp/bp-pc-a" apply >"$_tmp/pc-a.out" 2>&1 || :
+_id_pc_a=$(_active_id)
+_bridge_proj "$_tmp/bp-pc-b" off pcb
+_v "$_tmp/bp-pc-b" apply --no-integration >"$_tmp/pc-b.out" 2>&1 || :
+_id_pc_b=$(_active_id)
+_v "$_proj" release use "$_id_pc_a" >/dev/null 2>&1 || :
+# previous now records the release that was active before this switch.
+_pc_prev_before=$(cat "$(_state_previous)" 2>/dev/null || :)
+if [ "$(id -u)" -eq 0 ]; then
+  skip "failed link rollback leaves active/previous consistent (needs non-root)"
+else
+  _pc_ledger="$_home/.local/state/valise/commands.tsv"
+  mv "$_pc_ledger" "$_tmp/pc-saved.tsv"
+  ln -s "$_tmp/pc-saved.tsv" "$_pc_ledger"
+  # gui_env of B is "off" while A owns a bridge, so the activation stages a
+  # bridge removal; the read-only config dir makes switch_active_link's
+  # ln -sfn fail BEFORE the link moves, so the abort sees the link still at A
+  # (_ra_rolled=1) and restores previous to _pc_prev_before.
+  chmod 555 "$_home/.config/valise"
+  if _v "$_proj" release use "$_id_pc_b" >"$_tmp/pc-use.out" 2>&1; then
+    pc_rc=0
+  else
+    pc_rc=1
+  fi
+  chmod 755 "$_home/.config/valise"
+  rm -f "$_pc_ledger"
+  mv "$_tmp/pc-saved.tsv" "$_pc_ledger"
+  _pc_active_now=$(_active_id 2>/dev/null || :)
+  _pc_prev_now=$(cat "$(_state_previous)" 2>/dev/null || :)
+  if [ "$pc_rc" -ne 0 ] && [ "$_pc_active_now" = "$_id_pc_a" ] &&
+    [ "$_pc_prev_now" = "$_pc_prev_before" ]; then
+    pass "a failed link rollback keeps active and previous consistent (active=A, previous=pre-switch value)"
+  else
+    fail "a failed link rollback corrupted previous (active=$_pc_active_now previous=$_pc_prev_now expected=$_pc_prev_before)"
+    cat "$_tmp/pc-use.out" >&2
+  fi
+fi
+
+# 10. A symlinked previous-release record is reported and removed by rollback
+#     so a regular record is restored, not silently skipped.
+_use_home symlink-prev
+_bridge_proj "$_tmp/bp-sp-a" "$_lc_mode" spa
+_v "$_tmp/bp-sp-a" apply >"$_tmp/sp-a.out" 2>&1 || :
+_id_sp_a=$(_active_id)
+_bridge_proj "$_tmp/bp-sp-b" "$_lc_mode" spb
+_v "$_tmp/bp-sp-b" apply --no-integration >"$_tmp/sp-b.out" 2>&1 || :
+_id_sp_b=$(_active_id)
+_v "$_proj" release use "$_id_sp_a" >/dev/null 2>&1 || :
+printf 'fixture\n' >"$_tmp/sp-fixture"
+rm -f "$(_state_previous)"
+ln -s "$_tmp/sp-fixture" "$(_state_previous)"
+if _v "$_proj" release rollback >"$_tmp/sp-rb.out" 2>&1; then
+  sp_rc=0
+else
+  sp_rc=1
+fi
+if [ "$sp_rc" -ne 0 ] &&
+  [ ! -L "$(_state_previous)" ] &&
+  grep -F 'previous-release record is a symlink' "$_tmp/sp-rb.out" >/dev/null; then
+  pass "release rollback reports and removes a symlinked previous record"
+else
+  fail "release rollback did not handle a symlinked previous record"
+  cat "$_tmp/sp-rb.out" >&2
+  ls -la "$(_state_previous)" >&2 2>/dev/null || :
 fi
 
 printf '\n=== install lifecycle summary ===\n'
