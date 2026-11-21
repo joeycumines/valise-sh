@@ -193,7 +193,7 @@ devtool_exec() {
     VALISE_TEST_ROOT="$_de_scratch" VALISE_PROJECT_ROOT="$_project_root" \
     VALISE_TEST_MODULE="${_dev_module:-}" VALISE_TEST_MODULE_DIR="${_dev_module_dir:-}" \
     VALISE_TEST_SHELL="${_dev_class:-}" \
-    "$_de_interp" "$_de_runner" "$@"
+    "$_de_interp" "$_de_runner" "$@" </dev/null
 }
 
 # --- env ---
