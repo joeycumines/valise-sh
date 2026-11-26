@@ -1,8 +1,10 @@
 # Installation and releases
 
-`bin/valise` is a `/bin/sh` CLI. It needs the standard POSIX utilities and a
-SHA-256 utility (`sha256sum`, `shasum`, or `sha256`); no command needs
-Python, Perl, or another runtime.
+`bin/valise` uses POSIX `/bin/sh` syntax. It needs the usual Unix utilities,
+including `awk`, `mktemp`, `readlink`, `stat`, and a SHA-256 utility
+(`sha256sum`, `shasum`, or `sha256`). It supports the BSD and GNU interfaces
+used on the tested platforms; the CLI itself does not require Python, Node,
+or a separate language runtime.
 
 ## Install the CLI
 
@@ -33,6 +35,13 @@ valise version
 The package is distributed as a local tarball rather than through the public
 npm registry. The package test checks the tarball contents, installs the
 packed CLI without a registry, and loads a module from the extracted package.
+
+The physical engine installation path must not contain TAB or LF characters;
+the CLI rejects those paths before sourcing its libraries. Project roots have
+the same restriction because the registry uses line- and tab-separated
+records. Invocation aliases, the caller's working directory, spaces, and glob
+characters are handled separately: a newline-bearing alias or caller directory
+can still invoke an engine and project whose physical roots meet this rule.
 
 ## Shell integration
 
@@ -69,10 +78,12 @@ directory before it changes the active release. The command directory is
 checked only when the release publishes commands or a command ledger exists.
 An unpaired marker, a startup path that is not a regular file, a directory
 install cannot write, a command directory it cannot write, or a Fish hook
-path that is a symlink or a directory stops the install with nothing changed. If a later step fails
-anyway, install puts the previous active release back (or removes the active
-link when there was none) and names the files it had already written. Those
-files load whichever release is active, so they need no repair.
+path that is a symlink or a directory stops the install before activation.
+An invalid command ledger or previous-release record also stops activation.
+If a later step fails, install restores the saved activation state and names
+the startup files it had already written. Those files load whichever release
+is active. If recovery itself fails, the error names the preserved recovery
+directory; see [activation recovery](#activation-recovery).
 
 Install also warns about lines outside a managed block that load valise by
 hand: a reference to `valise/active`, a 0.1 `installed-modules.` list, or a
@@ -84,7 +95,8 @@ any other POSIX shell, and loads the release in two stages. Stage 1 sources
 `plans/<class>.sh` — the env plan, a silent convergent projection of the
 environment — at every startup file, guarded by `_valise_profile_loaded`,
 which records the active release id: the same shell with the same release is
-a no-op, a different release reloads, and a fresh nested shell always re-runs
+a no-op unless PATH changed or a login repair is pending, a different release
+reloads, and a fresh nested shell always re-runs
 the env plan, so a new login or tmux pane repairs PATH after `path_helper`.
 `VALISE_RELOAD=1` forces a reload in the same shell. The guard is set only
 after a plan loads successfully, so a shell that started while the release
@@ -97,18 +109,24 @@ or `scp` stays silent; it carries its own release-id guard, so a login that
 reads several startup files runs it once. Stage 2 is written only into the
 shell's rc-stage file (`~/.bashrc`, `~/.zshrc`, or the `$ENV` shim), and into
 the one file a login bash reads (`~/.bash_profile`, else `~/.bash_login`, else
-`~/.profile`), placed last, because a login bash never reads `~/.bashrc`. It is
+`~/.profile`), placed last, because a login bash never reads `~/.bashrc`. The
+`.profile` stage checks the actual interpreter and enables stage 2 only for
+native Bash. Bash invoked as `sh` reads its env stage there, then reads the
+interactive stage through `$ENV`. A custom name such as `sh-as-sh` does not
+put Bash into `sh` mode. It is
 never written into `~/.zshenv` or `~/.zprofile`: an interactive zsh already has
 `i` in `$-` while it reads `~/.zshenv`, so an interactive stage there would run before your own
 `.zshrc` and the guard would then suppress the correct, later run. Whenever a
 plan is re-sourced over one this process already loaded — a release switch, or
-a module that moved between phases — the block exports `VALISE_RELOAD=1` for
+a module that moved between phases — the block sets `VALISE_RELOAD=1` for
 that source and restores your value afterwards. The compiled plan clears only
 the exports valise itself installed, so a release switch inside a live shell
-does not report the plan's own earlier exports as a conflict, and a function
-you defined that happens to collide with a module export is still reported
-rather than silently replaced. On a login shell the block arms a one-shot
-repair pass that runs stage 1 again at the second startup file: that is what
+does not report the plan's own earlier exports as a conflict. A function you
+defined before valise owned its name is preserved and reported as a conflict;
+redefining an already-owned function does not relinquish valise's ownership,
+so reloading that provider replaces it. On a shell whose `$-` includes the
+login flag, the block arms a one-shot repair pass at the next startup file:
+that is what
 restores the compiled PATH order after macOS `/etc/zprofile` runs `path_helper`
 following `~/.zshenv`.
 
@@ -154,8 +172,8 @@ If verification fails, the hook loads no release code and reports
 `active release authentication failed`. Fish continues starting even if a
 `conf.d` hook fails, so this does not abort the interactive shell.
 
-The Fish hook is several hundred lines while the POSIX block is about twenty.
-The difference is deliberate. The POSIX block sources a plan and trusts the
+The Fish hook carries release verification and rollback machinery. The POSIX
+block sources a plan and trusts the
 release on disk, as any startup file does. The Fish hook does more because
 it must not trust release code before that code is verified, and Fish gives a
 sourced file the caller's global functions and variables. The hook therefore
@@ -169,6 +187,13 @@ can live in the release, because a tampered release would carry tampered
 checks. `valise apply` compares the generated hook with the installed one
 byte for byte and reports `Fish hook current` without rewriting an identical
 hook.
+
+If protected caller state cannot be authenticated or restored, Fish terminates
+with status `125` instead of continuing in the damaged state. Ordinary release
+authentication failures and recoverable module failures still return normally.
+Fish's own distributed functions are recognized from the running interpreter's
+physical installation prefix as well as the standard system locations;
+changing `__fish_data_dir` or `fish_function_path` does not establish ownership.
 
 To write integration by hand, print it once and paste or save it:
 
@@ -258,9 +283,10 @@ switching releases never rewrites a stub; install and `valise release use`
 add the stubs the new release needs and remove the ones it no longer has.
 
 valise records each stub it writes, with its SHA-256, in
-`$XDG_STATE_HOME/valise/commands.tsv` before writing the stub, so an
-interrupted install never leaves a stub valise does not know about. It only
-touches files listed there, and it refuses a release whose `commands=` holds
+`$XDG_STATE_HOME/valise/commands.tsv` before writing the stub. During activation
+it also journals the staging file before publishing its hard link, so recovery
+can distinguish its own new stub from a colliding file, even with identical
+bytes. It only touches files it can verify as owned, and it refuses a release whose `commands=` holds
 a name the build would have rejected:
 
 - A file valise did not write is never replaced. Install reports that the
@@ -284,7 +310,11 @@ directory joins with exactly one separator, so invoking valise from `/` still
 matches `/` and `/usr/bin` rather than a POSIX implementation-defined `//`
 path. When the invocation directory is unavailable (for example it was
 deleted), relative and empty entries are skipped rather than resolved against
-the project directory.
+the project directory. Existing directories are compared by physical location,
+so symlink aliases and trailing separators match, while `link/..` follows
+filesystem semantics instead of a lexical guess. If a directory cannot be
+searched, only an identical path spelling matches. Whitespace, glob characters,
+and trailing newlines in the invocation directory or a PATH entry are retained.
 
 `VALISE_CALLER_PATH` is inherited by child processes. A wrapper that captured a
 value should unset it before invoking a nested valise run, so the nested run
@@ -320,6 +350,20 @@ ledger (`commands.tsv`), and the list of startup files install created
 (`startup-created`). Uninstall uses the same locations, including any XDG
 overrides.
 
+Valise acquires the store lock by creating its directory atomically. An
+existing lock is never reclaimed automatically, even when its recorded PID
+appears to have exited: a PID check followed by deletion cannot prove that
+another process has not acquired the lock in between. The error names the
+lock and its recorded PID when readable. Normal exits and handled `INT`/`TERM`
+signals remove the lock owned by that invocation.
+
+After an unhandled crash or `SIGKILL`, first stop every valise operation using
+the same state directory and confirm that no process is still using that
+store. Inspect any `.transaction.*` recovery directory as described below,
+then remove only the lock directory named in the diagnostic before retrying.
+Do not remove a lock while another valise process may be running, and do not
+delete the surrounding state directory or its recovery copies.
+
 ## Managing installed releases
 
 `valise release list` shows the installed releases and marks the active one.
@@ -329,6 +373,55 @@ records the one it replaced in `$XDG_STATE_HOME/valise/previous`;
 `valise release rollback` verifies that release and makes it active again, so
 two rollbacks in a row return to where they started. Both move the command
 stubs to the new active release when install published them.
+
+### Activation recovery
+
+`install`, `release use`, and `release rollback` share one transaction. With
+the store lock held, valise validates the active pointer, previous record, and
+command ledger, prepares the incoming GUI bridge, and snapshots the previous
+record, ledger, verified owned stubs, and owned bridges. Recovery copies live in a private `0700`
+directory under `$XDG_STATE_HOME/valise/.transaction.*`. A symlinked,
+unreadable, or malformed ownership record fails before activation; valise
+neither follows it nor rewrites it as an empty record.
+
+Recovery journals use tab-separated path fields. A command-directory setting
+or physical GUI bridge path containing TAB or LF is rejected before activation;
+spaces and glob characters remain supported. The active-link target is stored
+separately as raw bytes, so restoring a literal target preserves its newlines.
+
+A command failure, `SIGINT`, or `SIGTERM` before commit restores the literal
+active-link target, previous record, ledger, owned stubs, and owned bridges.
+The prior ledger's presence, bytes, and mode are restored, including an empty
+ledger that enables future command integration. An initially absent ledger
+stays absent after a failed first install. Recovery uses saved bytes rather
+than reading the outgoing release again, so a missing or unreadable outgoing
+manifest cannot erase the stub set. A dangling outgoing link is restored
+exactly; valise does not guess which files to delete from its missing target.
+
+Signals are recorded while operations finish and while recovery runs. Short
+allocation and cleanup workers ignore INT and TERM while the supervising
+process records them, including delivery to the whole process group. A second
+signal does not interrupt restoration; the process exits with the recorded
+signal's status (`130` for INT, `143` for TERM) after cleanup. During recovery,
+command stubs and bridge files whose ownership checks no longer match are
+preserved and reported; concurrent edits may prevent exact restoration. If the
+active link cannot be restored, valise leaves the current bridge, stubs, and
+previous record in place and retains the recovery copies instead of publishing
+old bridge bytes under a new active release.
+
+A recovery or cleanup failure exits nonzero and names each retained recovery
+location. Those copies may contain private environment values: keep their
+permissions intact, resolve the reported filesystem problem, and inspect the
+saved `state`, `active-target`, and the available `previous`, `commands.tsv`,
+`stubs.tsv`, `published.tsv`, and `bridges.tsv` before manually restoring state.
+Some files are absent when that state did not exist before activation. The journal is diagnostic
+recovery material, not an automatically replayed crash log. `SIGKILL`, power
+loss, and concurrent edits by programs that ignore the store lock are outside
+the automatic recovery contract. Once activation commits, a failure
+to delete a recovery copy is reported without rolling back the committed release.
+
+Startup files already written during install remain in place and continue to
+follow the active pointer; a newly installed release may remain in the store.
 
 `valise apply --dry-run` builds the project and prints what install would
 do: whether the release is installed or active already, and for each startup
@@ -406,8 +499,9 @@ The bridge is a file, not an effect: the session picks it up at its own start.
 
 systemd also documents that its environment generators run again on a manager
 configuration reload, and that a reload reaches services started afterwards
-while running processes keep their environment. That reload behaviour was not
-exercised here; the verified mechanism is the user-manager start above.
+while running processes keep their environment. This reload behaviour was not
+exercised here, nor was user-manager startup; the tests verify rendered bridge
+bytes.
 
 The `environment.d` file writes a literal `$` as `$$`, because systemd's
 environment generator expands `$VAR` in each value - even inside double quotes.
@@ -434,9 +528,12 @@ shell runs; that is a convenience, not a privilege boundary, because the modules
 are your own code.
 
 A bridge publish follows the integration record and precedes the end of the
-install. When it fails, the outgoing release, its previous-release record, and
-its bridge are restored. `gui_env=off` removes every valise-owned bridge as one
-set: when a removal fails, every bridge file is left as it was.
+install. A failure before commit triggers [activation recovery](#activation-recovery)
+for the outgoing release, its previous record, owned stubs, and owned bridges.
+Recovery failures retain snapshots and report their paths. `gui_env=off` removes
+owned bridges as one set: failures before commit trigger restoration, while
+backup-cleanup failures after commit leave the removal committed and make the
+command exit nonzero.
 
 A later startup file that changed `PATH` (a user rc file that resets it, or
 macOS `path_helper`) re-runs the env plan in that shell, so module bodies run

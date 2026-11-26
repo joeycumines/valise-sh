@@ -349,9 +349,9 @@ fi
 _missing=
 for _shell in bash zsh ksh; do
   case "$_shell" in
-    bash) _bin=/bin/bash ;;
-    zsh) _bin=/bin/zsh ;;
-    ksh) _bin=/bin/ksh ;;
+    bash) _bin=$(command -v bash 2>/dev/null || :) ;;
+    zsh) _bin=$(command -v zsh 2>/dev/null || :) ;;
+    ksh) _bin=$(command -v ksh 2>/dev/null || :) ;;
   esac
   if [ ! -x "$_bin" ]; then
     if [ "$_require_tooling" -eq 1 ]; then
@@ -509,7 +509,7 @@ if SHELL=/bin/bash HOME="$_int_home" XDG_DATA_HOME="$_int_home/.local/share" \
   XDG_CONFIG_HOME="$_int_home/.config" XDG_STATE_HOME="$_int_home/.local/state" \
   "$_link" init >"$_test_root/init-auto.out" 2>&1 &&
   grep -F '# BEGIN valise managed block' "$_test_root/init-auto.out" >/dev/null 2>&1 &&
-  grep -F 'BASH_VERSION' "$_test_root/init-auto.out" >/dev/null 2>&1; then
+  cmp -s "$_int_home/.profile" "$_test_root/init-auto.out"; then
   pass "init prints the POSIX managed block by default"
 else
   fail "init prints the POSIX managed block by default"
@@ -525,9 +525,9 @@ done
 
 for _shell in bash zsh ksh; do
   case "$_shell" in
-    bash) _bin=/bin/bash ;;
-    zsh) _bin=/bin/zsh ;;
-    ksh) _bin=/bin/ksh ;;
+    bash) _bin=$(command -v bash 2>/dev/null || :) ;;
+    zsh) _bin=$(command -v zsh 2>/dev/null || :) ;;
+    ksh) _bin=$(command -v ksh 2>/dev/null || :) ;;
   esac
   if [ ! -x "$_bin" ]; then
     if [ "$_require_tooling" -eq 1 ]; then
@@ -544,17 +544,18 @@ for _shell in bash zsh ksh; do
     cat "$_test_root/profile-$_shell.err" >&2
   fi
 done
-if [ ! -x /bin/dash ]; then
+_dash_bin=$(command -v dash 2>/dev/null || :)
+if [ -z "$_dash_bin" ] || [ ! -x "$_dash_bin" ]; then
   if [ "$_require_tooling" -eq 1 ]; then
-    fail "profile snippet loads nothing in dash (/bin/dash unavailable)"
+    fail "profile snippet loads nothing in dash (dash unavailable)"
   else
-    skip "profile snippet loads nothing in dash (/bin/dash unavailable)"
+    skip "profile snippet loads nothing in dash (dash unavailable)"
   fi
 elif HOME="$_int_home" XDG_CONFIG_HOME="$_int_home/.config" \
-  /bin/dash -c '. "$HOME/.profile"' \
+  "$_dash_bin" -c '. "$HOME/.profile"' \
   >"$_test_root/profile-dash-source.out" 2>"$_test_root/profile-dash-source.err"; then
   if HOME="$_int_home" XDG_CONFIG_HOME="$_int_home/.config" \
-    /bin/dash -c '. "$HOME/.profile"; command -v root_ready >/dev/null 2>&1 || command -v bash_plan_ready >/dev/null 2>&1' \
+    "$_dash_bin" -c '. "$HOME/.profile"; command -v root_ready >/dev/null 2>&1 || command -v bash_plan_ready >/dev/null 2>&1' \
     >"$_test_root/profile-dash.out" 2>"$_test_root/profile-dash.err"; then
     fail "profile snippet loads nothing in dash"
   else

@@ -4,8 +4,9 @@ valise builds your shell profile from modules. Each module is a metadata file
 and a shell body; valise reads the metadata as data, compiles a static,
 phase-aware startup plan for each shell, and installs the result as a sealed,
 verified release. sh, dash, BusyBox ash, bash, zsh, and ksh load the compiled
-POSIX plans; Fish has a native loader. The managed block is two-stage: the
-env plan runs at every startup entry point. It is silent, idempotent, and
+POSIX plans; Fish has a native loader. The managed block is two-stage: its
+load guard selects when to evaluate the env plan at a startup entry point.
+It is silent, idempotent, and
 convergent: it repairs PATH clobbered by macOS path_helper in fresh login
 shells. The interactive plan runs only in interactive shells. GUI sessions
 that never read a startup file get the env plan through `gui_env` (environment.d
@@ -126,3 +127,9 @@ is a visible skip locally and a failure when `CI=true` or
 `GITHUB_ACTIONS=true`; `make VALISE_REQUIRE_TOOLING=1 check` requires them
 locally. Machine-local settings go in an untracked `config.mk` (see
 `config.mk.example`). Lima VM lanes run only when the instances exist.
+
+Release CI has separate Linux and native macOS jobs. Linux requires the full
+shell matrix, including BusyBox ash; macOS covers the native shells with
+system Bash 3.2 and BSD utilities. Both jobs retain their logs. See the
+[release checklist](docs/release-policy.md#release-checklist) for the gates
+required before publishing.

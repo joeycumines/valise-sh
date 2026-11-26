@@ -5,137 +5,126 @@ module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 
 ## [Unreleased]
 
-### Fixed
-
-- The bash-login stage treats any invocation whose basename is `sh` or ends
-  in `-sh` as an `sh` invocation, so bash reached through a symlink such as
-  `sh-as-sh` (not just a literal `sh`/`-sh`) stays on its env-only stage
-  while reading the login file, matching real `sh -l -i` behavior.
-- `valise release use`/`release rollback` whose incoming release wants
-  `gui_env=off` now restore the outgoing bridge and reconcile stubs on a
-  failed switch exactly as the bridge-owning case does, instead of leaving
-  the outgoing bridge stranded or reconciling against a dangling active
-  link.
-- A failed release switch whose command ledger is not a regular file (for
-  example a symlink) now runs the same stub rollback as a reconcile failure:
-  the outgoing stubs are restored and the ledger is rewritten as an empty
-  regular file instead of being skipped or deleted, so command integration
-  stays active for later `release use`/`release rollback` runs.
-- A signal delivered while a failed release switch is rolling back is recorded
-  by masked INT/TERM traps inside the restore and honored only after every
-  restore step finished, so the process exits with the signal's status (130 or
-  143) instead of dying mid-restore with exit 1; a late signal can no longer
-  strand `.valise-outgoing.*` bridge backups or skip the stub restore.
-- Rollback distinguishes "outgoing release directory gone" (a dangling active
-  link) from "outgoing release directory unknown" (an unreadable link): it
-  clears the published stubs only in the first case and never deletes stubs on
-  an assumption, and it requires a readable `valise-release.conf` before
-  reconciling stubs so an unreadable manifest is reported instead of silently
-  deleting every owned stub.
-
-## [0.4.1] - 2026-11-20
-
-0.4.1 hardens phase probing, release-activation transactions, POSIX startup
-reloads, compiler export-ownership matching, and GUI environment capture.
+Planned version: **0.4.1**. This release hardens activation recovery, shell
+startup and compiled plans, environment capture, and compatibility checks.
 
 ### Added
 
-- `VALISE_CALLER_PATH` lets a caller that sanitizes `PATH` before invoking
-  valise supply the original for PATH-gap diagnostics. It is consulted by the
-  install and doctor warnings, never for command lookup or generated profile
-  content; an explicitly empty value means the caller's PATH is empty. PATH
-  entries are normalized before matching, so a trailing slash or doubled
-  separator is not reported as a gap.
+- `VALISE_CALLER_PATH` supplies the original PATH for install and doctor
+  diagnostics when a wrapper invokes valise with a sanitized PATH. It never
+  participates in command lookup or generated profile content. An explicitly
+  empty value reports a PATH gap; relative and empty entries use the physical
+  invocation directory recorded before `-C`.
+- A native macOS CI job complements the Linux strict gate. Both retain test
+  logs; macOS covers system Bash 3.2 and BSD utilities, while Linux also
+  requires BusyBox ash. Native zsh is included in the POSIX parser contract.
 
 ### Fixed
 
-- `valise compile` and `valise build` now abort when interactive-phase probing
-  cannot allocate or inspect its scratch files (for example under an unwritable
-  or missing `TMPDIR`), instead of publishing a release without interactive
-  plans.
-- `valise release use` and `valise release rollback` arm transaction rollback
-  before moving outgoing GUI bridges aside, pre-validate the active link and
-  previous-release record, and abort before switching if backing up an owned
-  predecessor bridge fails. Fatal errors and signals during activation now
-  restore outgoing bridges and clean up temporary files.
-- Activation and install rollback resolve relative active symlinks to their
-  canonical release directory before reconciling command stubs, preventing
-  rollback from deleting outgoing stubs.
-- `remove_gui_env_bridge` separates pre-commit rename failures from post-commit
-  backup deletion failures, so a failed delete of an already-committed aside
-  file no longer triggers a release rollback after an earlier backup was
-  removed.
-- Bridge ownership detection requires a regular non-symlink file before
-  reading, preventing a foreign FIFO at the bridge path from blocking
-  activation or installation.
-- The POSIX managed block invalidates `_valise_interactive_loaded` before
-  entering another release (including through env-only startup files) and
-  before re-running stage 2, so rolling back after a partially failed or
-  env-only switch restores the previous release's interactive definitions.
-- The runtime `$ENV` stanza and `valise doctor` require the shim path to be a
-  regular non-symlink file carrying the exact managed block header, so startup
-  never adopts a foreign file or symlink that `valise install` refused.
-- A fresh zsh-default home without `.bash_profile`, `.bash_login`, or
-  `.bashrc` now writes a `bash-login` stage to `.profile` so `bash --login -i`
-  loads interactive modules without changing `sh`/`ksh` startup ordering.
-- Compiled plans compare `_valise_plan_owned` tokens byte-for-byte instead of
-  using shell `case` patterns, so Bash `shopt -s nocasematch` cannot conflate
-  case-distinct provider names across releases.
-- `env_export_capture` preserves the caller's `PATH` as input to both baseline
-  and target runs so PATH-dependent exports (such as `valise_editor_defaults`
-  and `command -v` probes) match an installed env plan while `PATH` remains
-  excluded from bridge output.
-- `environment.d` export rejects TAB, DEL, and all Unicode noncharacters by
-  variable name so systemd does not corrupt or abort on published values,
-  while `launchd` continues to preserve UTF-8, TAB, and DEL.
-- `valise_path_remove` validates all arguments before modifying `PATH`, so a
-  mixed valid/invalid call fails nonzero and leaves `PATH` untouched.
-- Qualified [docs/architecture.md](docs/architecture.md) and
-  [docs/module-abi.md](docs/module-abi.md) to state the exact env
-  re-evaluation triggers and pre-ownership caller-function protection scope.
-- Guarded the `/bin/ksh` probe in `tests/project-ux.test.sh` when `ksh` is
-  absent locally.
-- PATH-gap diagnostics resolve relative and empty `VALISE_CALLER_PATH` entries
-  from the directory where valise was invoked, before `-C` changes to the
-  project. A native bash login with inherited shell-version variables or with
-  `verbose`/`xtrace` enabled still loads the interactive stage.
-- Activation rollback masks `INT`/`TERM` while it restores, so a second signal
-  during a rollback is recorded and honored only after every restore step
-  finished (the process then exits 130/143) instead of killing the restore
-  mid-way.
-- Activation rollback clears published command stubs while KEEPING
-  `commands.tsv` as an empty regular file when no release was active before or
-  the outgoing release directory is gone; deleting the ledger used to disable
-  stub publication for every later `release use`/`release rollback` and made
-  `doctor` report "installed without integration". An outgoing directory that
-  cannot be determined at all is reported, and stubs are never deleted on that
-  assumption.
-- Activation rollback restores the previous-release record only when the
-  active link was actually rolled back (or never moved), so a failed link
-  rollback no longer leaves `active=B` and `previous=B`; a symlinked
-  previous record is reported and removed instead of silently skipped.
-- Activation rollback requires a readable `valise-release.conf` on the outgoing
-  release before reconciling its stubs back, and `release_commands` fails
-  closed on an unreadable manifest, so an unreadable manifest can no longer
-  silently delete every owned stub.
-- The POSIX managed block identifies the running shell with shell-specific
-  builtin probes (`shopt`, `emulate`, `whence`) instead of inherited
-  `KSH_VERSION`/`ZSH_VERSION`/`BASH_VERSION`, so a native bash login that
-  inherits `KSH_VERSION`/`ZSH_VERSION` loads the bash plans, and ksh/dash/zsh
-  inheriting `BASH_VERSION` are not mistaken for bash. The bash-login stage
-  additionally excludes an `sh` invocation name and checks `shopt -q -o posix`
-  (falling back to exact `set +o` matching), so bash invoked as `sh` stays on
-  its env-only stage while reading the login file.
-- `valise doctor` detects the bash-login marker with the trusted awk pass
-  scoped to the managed block and the exact generated assignment line, instead
-  of an untrusted whole-file `grep` resolved from the caller's `PATH`.
-- `bin/valise` unsets `VALISE_CALLER_CWD` before recording it (a pre-exported
-  value no longer keeps its export attribute and leaks into child processes),
-  captures it with a sentinel so trailing newlines survive, and records an
-  unavailable marker when the CWD is gone so `--help`/`--version`/`-C` still
-  work; relative and empty caller PATH entries join the invocation directory
-  with exactly one separator (no leading `//` from `/`) and are skipped when
-  no caller directory is known.
+- Phase probing distinguishes a genuinely empty phase from allocation,
+  compilation, inspection, or malformed compiler-output failures. A private
+  scratch directory and signal-aware cleanup prevent a failed probe from
+  silently publishing a release without interactive plans or leaking scratch.
+- Install and release activation share one recovery transaction. Before the
+  active link moves, the transaction snapshots the previous record, command
+  ledger, verified owned stubs, and owned GUI bridges. Recovery restores saved
+  bytes and modes instead of re-reading an outgoing manifest that may have
+  disappeared or become unreadable.
+- Activation validates the active link and ownership records before mutation.
+  Symlinked, non-regular, unreadable, and malformed records fail closed without
+  being followed or silently replaced. Relative and dangling active targets
+  are restored literally. A prior empty command ledger stays present; a
+  failed first install restores the ledger's prior absence.
+- Stub publication journals its staging inode before creating the public hard
+  link. Rollback removes only a verified new publication, restores deleted
+  outgoing stubs, and preserves user edits and identical foreign collisions.
+  Unterminated final ledger records are consumed consistently.
+- INT and TERM are recorded through mutation bookkeeping and recovery; a
+  second signal cannot terminate restoration midway. The final status is 130
+  or 143 as appropriate. The central exit handler performs transaction,
+  scratch, and lock cleanup without recursively aborting itself.
+- Critical allocation and recovery workers also withstand process-group
+  signals. Temporary pathnames are assigned to their cleanup owner before a
+  pending signal is honored; a utility cannot create a lock or scratch file
+  and lose its ownership record when it is interrupted immediately afterward.
+- Existing store locks are never reclaimed automatically. The previous
+  dead-PID check followed by deletion allowed simultaneous reclaimers to
+  delete each other's new lock and enter the store concurrently. A leftover
+  lock now requires explicit recovery after all users of that store stop;
+  the diagnostic names the lock and its recorded PID when readable.
+- Recovery failures preserve private snapshots and report their locations.
+  When the active link cannot be restored, old bridge bytes are not published
+  under the incoming active release. Post-commit cleanup failures report a
+  nonzero result without rolling back a committed activation.
+- GUI bridge removal distinguishes failure before commit from failure to
+  remove a committed backup. Both bridge directions, including `gui_env=off`,
+  participate in activation recovery. Ownership checks refuse symlinks and
+  non-regular files before reading, so a foreign FIFO cannot block startup
+  integration.
+- The POSIX managed block identifies the running interpreter using isolated
+  builtin probes, with external lookup disabled. Inherited shell-version
+  variables and lookalike `shopt`, `emulate`, `whence`, and `builtin` commands
+  no longer select another shell's plans.
+- A fresh non-Bash-default home receives a Bash login stage in `.profile`
+  without requiring `.bashrc`. Actual Bash-as-`sh` reads the env stage there
+  and interactive setup through `$ENV`; a native Bash executable named
+  `sh-as-sh`, `SH`, or another custom name still loads its interactive stage
+  from the login file. Option checks and invocation-name comparisons remain
+  correct with `nocasematch`, `verbose`, or `xtrace` enabled.
+- Interactive success markers are invalidated before a release switch and
+  before retrying stage 2. Returning to a release after a partial failure or
+  an env-only intermediate release restores its interactive definitions.
+- Runtime `$ENV` adoption and doctor require a readable regular non-symlink
+  shim with the exact managed header. Doctor detects the Bash login marker
+  inside its managed block using trusted awk, and reports invalid command
+  ledgers as failures rather than disabled integration.
+- Compiled module dispatch, dependency availability, platform matching, and
+  export ownership use byte-exact identities even with Bash `nocasematch`.
+  An external executable or alias cannot satisfy a promised function export.
+  Native zsh cleans all declared exports created by a failed module and
+  preserves pre-existing caller definitions.
+- Environment capture preserves explicit empty caller inputs and uses the
+  caller's PATH in both baseline and target evaluations. Binary environment
+  records retain their NUL boundaries through comparison and exclusion;
+  newline-bearing excluded values cannot fabricate variables or reject
+  unrelated valid exports.
+- Selected bridge values are checked against the Unicode scalar limits of
+  UTF-8, including overlong forms, surrogates, obsolete five/six-byte forms,
+  and code points above U+10FFFF. Diagnostics name the offending variable and
+  failures emit no partial bridge. `environment.d` additionally rejects TAB,
+  DEL, and all Unicode noncharacters; launchd retains XML-compatible UTF-8,
+  TAB, and DEL. Capture allocation, scanning, and cleanup failures fail closed.
+- `valise run` preserves stdin in clean and `--keep-env` modes for every
+  supported interpreter; only the automated test runner receives EOF.
+- Native Fish recognizes its own distributed functions in relocated
+  installations without trusting mutable Fish path variables. Unrecoverable
+  caller-state corruption now terminates the Fish process with status 125;
+  `exit` inside a sourced Fish file previously allowed the caller to continue.
+- CLI bootstrap resolves package symlinks through fixed trusted `readlink`
+  paths and preserves invocation-path newlines in the generated Fish callback.
+  Bootstrap and `-C` directory selection ignore `CDPATH`. Physical engine and
+  project roots containing TAB or LF are rejected before their line-oriented
+  consumers can silently resolve a different pathname.
+- PATH diagnostics compare physical directories, preserving symlink/`..`
+  semantics and accepting different aliases for the same location. They
+  preserve trailing newlines, ignore inherited `CDPATH`, join `/` with one
+  separator, and skip relative entries when the invocation directory is
+  unavailable. Diagnostic CWD state is never exported to child processes.
+- `valise_path_remove` validates every argument before modifying PATH, so a
+  mixed valid/invalid call fails without partially applying removals.
+- Reserved-word validation patterns parse under Bash 3.2 as well as newer
+  POSIX shells. Tests discover supported interpreters from their controlled
+  PATH, and strict-tooling requirements survive the test runner's environment
+  quarantine.
+- File digests are computed from stdin, so SHA-256 utility filename escaping
+  cannot introduce a backslash into a command ledger or release digest.
+
+### Documentation
+
+- Documented the transaction's recovery scope, retained recovery material,
+  commit boundary, and failure limits; clarified env re-evaluation triggers,
+  caller function ownership, capture exclusions, and the explicit npm package
+  allowlist.
 
 ## [0.4.0] - 2026-11-18
 
@@ -627,8 +616,7 @@ for startup state, environment capture, and release transactions.
 - The editor-defaults test is independent of host-installed editors by
   supplying a temporary test `vi` executable.
 
-[Unreleased]: https://github.com/joeycumines/valise-sh/compare/v0.4.1...HEAD
-[0.4.1]: https://github.com/joeycumines/valise-sh/compare/v0.4.0...v0.4.1
+[Unreleased]: https://github.com/joeycumines/valise-sh/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/joeycumines/valise-sh/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/joeycumines/valise-sh/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/joeycumines/valise-sh/compare/v0.1.0...v0.2.0

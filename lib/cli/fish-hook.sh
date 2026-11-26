@@ -5,13 +5,21 @@
 
 print_fish_integration() {
   _fish_active_literal=$(fish_quote "$VALISE_ACTIVE_LINK") || return 1
-  _fish_cli_dir=$(cd "$(path_parent "$_valise_cli_path")" 2>/dev/null && pwd -P) || return 1
-  _fish_cli_path="$_fish_cli_dir/${_valise_cli_path##*/}"
+  # bin/valise records an absolute entry path before -C. Resolve its parent
+  # without losing pathname newlines, while retaining the package symlink's
+  # basename so later upgrades still use the same entry point.
+  _fish_cli_dir=${_valise_cli_path%/*}
+  _fish_cli_dir=$(CDPATH= cd -P "${_fish_cli_dir:-/}" 2>/dev/null && pwd -P && printf x) || return 1
+  _fish_cli_dir=${_fish_cli_dir%x}
+  _fish_cli_dir=${_fish_cli_dir%?}
+  _fish_cli_path="${_fish_cli_dir%/}/${_valise_cli_path##*/}"
   _fish_cli_literal=$(fish_quote "$_fish_cli_path") || return 1
   _fish_source_tree_mode=${_fish_source_tree_mode:-0}
   printf '%s\n' \
     "# valise Fish integration. Do not edit." \
     "# This hook loads the active valise release for Fish sessions." \
+    "# Fish exit only stops a sourced file. Fatal integrity errors instead" \
+    "# exec a literal /bin/sh exit so damaged caller state cannot continue." \
     "begin" \
     "set -l _valise_fish_source_tree_mode $_fish_source_tree_mode" \
     "set -l _valise_fish_previous_root ''" \
@@ -25,7 +33,7 @@ print_fish_integration() {
     "else if builtin set -q HOME; and test -n \"\$HOME\"" \
     "  set _valise_fish_persistence_config_home \"\$HOME/.config\"" \
     "else" \
-    "  builtin exit 125" \
+    "  exec /bin/sh -c 'exit 125'" \
     "end" \
     "set -l _valise_fish_persistence_durable_file \"\$_valise_fish_persistence_config_home/fish/fish_variables\"" \
     "set -g _valise_fish_persistence_path_physical_helper __valise_fish_path_(builtin random)" \
@@ -73,7 +81,7 @@ print_fish_integration() {
     "  return 0" \
     "end" \
     "if not \$_valise_fish_persistence_path_physical_helper \"\$_valise_fish_persistence_durable_file\"" \
-    "  builtin exit 125" \
+    "  exec /bin/sh -c 'exit 125'" \
     "end" \
     "# Capture an absolute, writable, searchable temp parent before untrusted source." \
     "set -l _valise_fish_persistence_tmp_parent /tmp" \
@@ -82,7 +90,7 @@ print_fish_integration() {
     "end" \
     "set _valise_fish_persistence_tmp_parent (builtin path resolve -- \"\$_valise_fish_persistence_tmp_parent\" 2>/dev/null)" \
     "if test (builtin count \$_valise_fish_persistence_tmp_parent) -ne 1; or not test -d \"\$_valise_fish_persistence_tmp_parent\"; or not test -w \"\$_valise_fish_persistence_tmp_parent\"; or not test -x \"\$_valise_fish_persistence_tmp_parent\"" \
-    "  builtin exit 125" \
+    "  exec /bin/sh -c 'exit 125'" \
     "end" \
     "# Capture persistent SHELL_PROJECT_ROOT scopes before clearing activation state." \
     "set -l _valise_fish_scratch_names _valise_fish_root_global_set _valise_fish_root_global_exported _valise_fish_root_global_values _valise_fish_root_universal_set _valise_fish_root_universal_exported _valise_fish_root_universal_values VALISE_MODULE_ROOT XDG_CONFIG_HOME TMPDIR HOME" \
@@ -218,12 +226,12 @@ print_fish_integration() {
     "    set _valise_fish_root_universal_set 1" \
     "    builtin set -q -Ux SHELL_PROJECT_ROOT; and set _valise_fish_root_universal_exported 1" \
     "    if builtin test \$_valise_fish_root_global_set -eq 1" \
-    "      builtin set -e -g SHELL_PROJECT_ROOT; or builtin exit 125" \
+    "      builtin set -e -g SHELL_PROJECT_ROOT; or exec /bin/sh -c 'exit 125'" \
     "      set _valise_fish_root_universal_values \$SHELL_PROJECT_ROOT" \
     "      if builtin test \$_valise_fish_root_global_exported -eq 1" \
-    "        builtin set -gx SHELL_PROJECT_ROOT \$_valise_fish_root_global_values; or builtin exit 125" \
+    "        builtin set -gx SHELL_PROJECT_ROOT \$_valise_fish_root_global_values; or exec /bin/sh -c 'exit 125'" \
     "      else" \
-    "        builtin set -g SHELL_PROJECT_ROOT \$_valise_fish_root_global_values; or builtin exit 125" \
+    "        builtin set -g SHELL_PROJECT_ROOT \$_valise_fish_root_global_values; or exec /bin/sh -c 'exit 125'" \
     "      end" \
     "    else" \
     "      set _valise_fish_root_universal_values \$SHELL_PROJECT_ROOT" \
@@ -465,7 +473,7 @@ print_fish_integration() {
     "  for _valise_fish_scratch_name in \$_valise_fish_scratch_names" \
     "    if not builtin functions -q \$_valise_fish_scratch_restore_helper; or not builtin test (builtin functions \$_valise_fish_scratch_restore_helper | string collect) = \"\$_valise_fish_scratch_helper_definition\"" \
     "      builtin printf '%s\\n' 'trusted scratch restore helper was modified' >&2" \
-    "      builtin exit 125" \
+    "      exec /bin/sh -c 'exit 125'" \
     "    end" \
     "    \$_valise_fish_scratch_restore_helper \"\$_valise_fish_scratch_name\" \"\$_valise_fish_scratch_prefix\"; or return 125" \
     "  end" \
@@ -565,8 +573,8 @@ print_fish_integration() {
     "end" \
     "# Clear handshake and readiness in both persistent scopes before activation." \
     "for _valise_fish_state_name in VALISE_FISH_READY _sp_fish_loader_bootstrap_status _sp_fish_loader_bootstrap_mode _sp_fish_loader_bootstrap_seeds _sp_fish_loader_expected_source _sp_fish_metadata_expected_source VALISE_MODULE_ROOT" \
-    "  if builtin set -q -g \"\$_valise_fish_state_name\"; and not builtin set -e -g \"\$_valise_fish_state_name\"; builtin exit 125; end" \
-    "  if builtin set -q -U \"\$_valise_fish_state_name\"; and not builtin set -e -U \"\$_valise_fish_state_name\"; builtin exit 125; end" \
+    "  if builtin set -q -g \"\$_valise_fish_state_name\"; and not builtin set -e -g \"\$_valise_fish_state_name\"; exec /bin/sh -c 'exit 125'; end" \
+    "  if builtin set -q -U \"\$_valise_fish_state_name\"; and not builtin set -e -U \"\$_valise_fish_state_name\"; exec /bin/sh -c 'exit 125'; end" \
     "end" \
     "# Cleanup only functions whose exact current source matches an authenticated ownership ledger." \
     "# Installed ledgers are accepted only for complete, authenticated release roots; source-tree mode is intentionally broader because it is an unauthenticated development surface." \
@@ -645,8 +653,8 @@ print_fish_integration() {
     "  end" \
     "  if builtin test \$_valise_fish_ledger_invalid -ne 0" \
     "    for _valise_fish_ledger_name in _sp_fish_loader_owned_exports _sp_fish_loader_owned_sources _sp_fish_legacy_owned_exports _sp_fish_legacy_owned_sources _sp_fish_metadata_owned_exports _sp_fish_metadata_owned_sources _sp_fish_entrypoint_owned_exports _sp_fish_entrypoint_owned_sources" \
-    "      if builtin set -q -g \"\$_valise_fish_ledger_name\"; and not builtin set -e -g \"\$_valise_fish_ledger_name\"; builtin exit 125; end" \
-    "      if builtin set -q -U \"\$_valise_fish_ledger_name\"; and not builtin set -e -U \"\$_valise_fish_ledger_name\"; builtin exit 125; end" \
+    "      if builtin set -q -g \"\$_valise_fish_ledger_name\"; and not builtin set -e -g \"\$_valise_fish_ledger_name\"; exec /bin/sh -c 'exit 125'; end" \
+    "      if builtin set -q -U \"\$_valise_fish_ledger_name\"; and not builtin set -e -U \"\$_valise_fish_ledger_name\"; exec /bin/sh -c 'exit 125'; end" \
     "    end" \
     "    builtin printf '%s\n' 'valise Fish integration: ownership ledger is not authenticated' >&2" \
     "    return 125" \
@@ -669,15 +677,15 @@ print_fish_integration() {
     "        set -l _valise_fish_owned_sources \$\$_valise_fish_source_ledger_name" \
     "        set -l _valise_fish_owned_source \$_valise_fish_owned_sources[\$_valise_fish_owned_index]" \
     "        if test -n \"\$_valise_fish_owned_source\"; and builtin functions -q \"\$_valise_fish_owned_function\"; and builtin test (builtin functions --details \"\$_valise_fish_owned_function\") = \"\$_valise_fish_owned_source\"" \
-    "          builtin functions -e \"\$_valise_fish_owned_function\"; or builtin exit 125" \
+    "          builtin functions -e \"\$_valise_fish_owned_function\"; or exec /bin/sh -c 'exit 125'" \
     "        end" \
     "        set _valise_fish_owned_index (builtin math \$_valise_fish_owned_index + 1)" \
     "      end" \
     "    end" \
-    "    if builtin set -q -g \"\$_valise_fish_ledger_name\"; and not builtin set -e -g \"\$_valise_fish_ledger_name\"; builtin exit 125; end" \
-    "    if builtin set -q -U \"\$_valise_fish_ledger_name\"; and not builtin set -e -U \"\$_valise_fish_ledger_name\"; builtin exit 125; end" \
-    "    if builtin set -q -g \"\$_valise_fish_source_ledger_name\"; and not builtin set -e -g \"\$_valise_fish_source_ledger_name\"; builtin exit 125; end" \
-    "    if builtin set -q -U \"\$_valise_fish_source_ledger_name\"; and not builtin set -e -U \"\$_valise_fish_source_ledger_name\"; builtin exit 125; end" \
+    "    if builtin set -q -g \"\$_valise_fish_ledger_name\"; and not builtin set -e -g \"\$_valise_fish_ledger_name\"; exec /bin/sh -c 'exit 125'; end" \
+    "    if builtin set -q -U \"\$_valise_fish_ledger_name\"; and not builtin set -e -U \"\$_valise_fish_ledger_name\"; exec /bin/sh -c 'exit 125'; end" \
+    "    if builtin set -q -g \"\$_valise_fish_source_ledger_name\"; and not builtin set -e -g \"\$_valise_fish_source_ledger_name\"; exec /bin/sh -c 'exit 125'; end" \
+    "    if builtin set -q -U \"\$_valise_fish_source_ledger_name\"; and not builtin set -e -U \"\$_valise_fish_source_ledger_name\"; exec /bin/sh -c 'exit 125'; end" \
     "  end" \
     "  return 0" \
     "end" \
@@ -688,7 +696,7 @@ print_fish_integration() {
     "end" \
     "if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
     "  builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
-    "  builtin exit 125" \
+    "  exec /bin/sh -c 'exit 125'" \
     "end" \
     "\$_valise_fish_owned_cleanup \"\$_valise_fish_active_root\" \"\$_valise_fish_source_tree_mode\"" \
     "set -l _valise_fish_owned_cleanup_status \$status" \
@@ -703,14 +711,14 @@ print_fish_integration() {
     "  end" \
     "  if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
     "    builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
-    "    builtin exit 125" \
+    "    exec /bin/sh -c 'exit 125'" \
     "  end" \
     "  \$_valise_fish_owned_cleanup" \
     "  if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
     "    builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
-    "    builtin exit 125" \
+    "    exec /bin/sh -c 'exit 125'" \
     "  end" \
-    "  \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "  \$_valise_fish_root_restore_helper; or exec /bin/sh -c 'exit 125'" \
     "  return 1" \
     "end" \
     "if test \"\$_valise_fish_source_tree_mode\" != 1" \
@@ -719,14 +727,14 @@ print_fish_integration() {
     "    printf '%s\\n' 'valise Fish integration: active release authentication failed' >&2" \
     "    if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
     "      builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
-    "      builtin exit 125" \
+    "      exec /bin/sh -c 'exit 125'" \
     "    end" \
     "    \$_valise_fish_owned_cleanup" \
     "    if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
     "      builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
-    "      builtin exit 125" \
+    "      exec /bin/sh -c 'exit 125'" \
     "    end" \
-    "    \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "    \$_valise_fish_root_restore_helper; or exec /bin/sh -c 'exit 125'" \
     "    return 1" \
     "  end" \
     "end" \
@@ -737,6 +745,22 @@ print_fish_integration() {
     "    set -l _entrypoint_expected_root \$argv[2]" \
     "    set -l _entrypoint_source_tree_mode \$argv[3]" \
     "    set -l _entrypoint_previous_root \$argv[4]" \
+    "    # Capture the running Fish installation before any release code runs." \
+    "    # Mutable __fish_data_dir/fish_function_path never establish ownership." \
+    "    set -l _entrypoint_runtime_directories" \
+    "    set -l _entrypoint_runtime_config ''" \
+    "    set -l _entrypoint_executable (builtin status fish-path)" \
+    "    if builtin test (builtin count \$_entrypoint_executable) -eq 1; and builtin string match -q '/*' -- \"\$_entrypoint_executable\"" \
+    "      set _entrypoint_executable (builtin path resolve -- \"\$_entrypoint_executable\" 2>/dev/null)" \
+    "      if builtin test (builtin count \$_entrypoint_executable) -eq 1; and builtin test -x \"\$_entrypoint_executable\"" \
+    "        set -l _entrypoint_binary_directory (builtin path dirname -- \"\$_entrypoint_executable\")" \
+    "        if builtin test (builtin path basename -- \"\$_entrypoint_binary_directory\") = bin" \
+    "          set -l _entrypoint_runtime_prefix (builtin path dirname -- \"\$_entrypoint_binary_directory\")" \
+    "          set _entrypoint_runtime_directories (builtin path resolve -- \"\$_entrypoint_runtime_prefix/share/fish/functions\" \"\$_entrypoint_runtime_prefix/share/fish/completions\" 2>/dev/null)" \
+    "          set _entrypoint_runtime_config (builtin path resolve -- \"\$_entrypoint_runtime_prefix/share/fish/config.fish\" 2>/dev/null)" \
+    "        end" \
+    "      end" \
+    "    end" \
     "    set -l _entrypoint_transaction_name (builtin status function)" \
     "    set -l _entrypoint_before (builtin functions --all --names)" \
     "    set -l _entrypoint_critical_names contains test string source path functions set printf echo math count eval cd pwd" \
@@ -880,8 +904,8 @@ print_fish_integration() {
     "      end" \
     "      if test \$_entrypoint_protected_changed -ne 0" \
     "        for _entrypoint_protected_name in \$_entrypoint_forbidden_names \$_entrypoint_loader_names" \
-    "          if builtin set -q -g \"\$_entrypoint_protected_name\"; and not builtin set -e -g \"\$_entrypoint_protected_name\"; builtin exit 125; end" \
-    "          if builtin set -q -U \"\$_entrypoint_protected_name\"; and not builtin set -e -U \"\$_entrypoint_protected_name\"; builtin exit 125; end" \
+    "          if builtin set -q -g \"\$_entrypoint_protected_name\"; and not builtin set -e -g \"\$_entrypoint_protected_name\"; exec /bin/sh -c 'exit 125'; end" \
+    "          if builtin set -q -U \"\$_entrypoint_protected_name\"; and not builtin set -e -U \"\$_entrypoint_protected_name\"; exec /bin/sh -c 'exit 125'; end" \
     "        end" \
     "        test \$_entrypoint_status -ne 0; or set _entrypoint_status 1" \
     "      end" \
@@ -894,23 +918,23 @@ print_fish_integration() {
     "    if test \$_entrypoint_status -ne 0; or test (builtin count \$_entrypoint_replaced) -ne 0" \
     "      for _entrypoint_function in \$_entrypoint_created" \
     "        if builtin functions -q \"\$_entrypoint_function\"" \
-    "          builtin functions -e \"\$_entrypoint_function\"; or builtin exit 125" \
+    "          builtin functions -e \"\$_entrypoint_function\"; or exec /bin/sh -c 'exit 125'" \
     "        end" \
     "      end" \
     "      if test (builtin count \$_entrypoint_replaced) -ne 0" \
     "        builtin printf '%s\\n' 'valise Fish integration: exact caller-function restoration is unavailable' >&2" \
-    "        builtin exit 125" \
+    "        exec /bin/sh -c 'exit 125'" \
     "      end" \
     "      # A nested source can rewrite the handshake or the provenance anchors and" \
     "      # then return straight out of this transaction, past the adapter's own" \
     "      # checks. Clear the handshake and readiness and re-pin the anchors to" \
     "      # this root's runtime so nothing the failed source wrote survives." \
     "      for _entrypoint_state_name in VALISE_FISH_READY _sp_fish_loader_bootstrap_mode _sp_fish_loader_bootstrap_seeds _sp_fish_loader_bootstrap_status _sp_fish_loader_expected_source _sp_fish_metadata_expected_source" \
-    "        if builtin set -q -g \"\$_entrypoint_state_name\"; and not builtin set -e -g \"\$_entrypoint_state_name\"; builtin exit 125; end" \
-    "        if builtin set -q -U \"\$_entrypoint_state_name\"; and not builtin set -e -U \"\$_entrypoint_state_name\"; builtin exit 125; end" \
+    "        if builtin set -q -g \"\$_entrypoint_state_name\"; and not builtin set -e -g \"\$_entrypoint_state_name\"; exec /bin/sh -c 'exit 125'; end" \
+    "        if builtin set -q -U \"\$_entrypoint_state_name\"; and not builtin set -e -U \"\$_entrypoint_state_name\"; exec /bin/sh -c 'exit 125'; end" \
     "      end" \
-    "      builtin set -g _sp_fish_loader_expected_source \"\$_entrypoint_expected_root/runtime/fish/loader.fish\"; or builtin exit 125" \
-    "      builtin set -g _sp_fish_metadata_expected_source \"\$_entrypoint_expected_root/runtime/fish/metadata.fish\"; or builtin exit 125" \
+    "      builtin set -g _sp_fish_loader_expected_source \"\$_entrypoint_expected_root/runtime/fish/loader.fish\"; or exec /bin/sh -c 'exit 125'" \
+    "      builtin set -g _sp_fish_metadata_expected_source \"\$_entrypoint_expected_root/runtime/fish/metadata.fish\"; or exec /bin/sh -c 'exit 125'" \
     "      if test (builtin count \$_entrypoint_replaced) -ne 0; and test \$_entrypoint_status -eq 0" \
     "        set _entrypoint_status 1" \
     "      end" \
@@ -929,22 +953,33 @@ print_fish_integration() {
     "    for _entrypoint_function in \$_entrypoint_created" \
     "      if not builtin functions -q \"\$_entrypoint_function\"" \
     "        builtin printf '%s\\n' 'valise Fish integration: created entrypoint function disappeared before ownership publication' >&2" \
-    "        builtin exit 125" \
+    "        exec /bin/sh -c 'exit 125'" \
     "      end" \
     "      set -l _entrypoint_source (builtin functions --details \"\$_entrypoint_function\")" \
     "      if test -z \"\$_entrypoint_source\"" \
     "        builtin printf '%s\\n' 'valise Fish integration: created entrypoint function has no authenticated source' >&2" \
-    "        builtin exit 125" \
+    "        exec /bin/sh -c 'exit 125'" \
     "      end" \
     "      switch \"\$_entrypoint_source\"" \
     "        case '/usr/share/fish/*' '/usr/local/share/fish/*' '/opt/local/share/fish/*' '/opt/homebrew/share/fish/*' 'embedded:completions/*' 'embedded:functions/*' 'autoloaded:*'" \
     "          continue" \
     "      end" \
+    "      if builtin test -f \"\$_entrypoint_source\"" \
+    "        set -l _entrypoint_source_path (builtin path resolve -- \"\$_entrypoint_source\" 2>/dev/null)" \
+    "        if builtin test (builtin count \$_entrypoint_source_path) -eq 1" \
+    "          if builtin contains -- (builtin path dirname -- \"\$_entrypoint_source_path\") \$_entrypoint_runtime_directories" \
+    "            continue" \
+    "          end" \
+    "          if builtin test (builtin count \$_entrypoint_runtime_config) -eq 1; and builtin test \"\$_entrypoint_source_path\" = \"\$_entrypoint_runtime_config\"" \
+    "            continue" \
+    "          end" \
+    "        end" \
+    "      end" \
     "      set -a _entrypoint_owned_exports \"\$_entrypoint_function\"" \
     "      set -a _entrypoint_owned_sources \"\$_entrypoint_source\"" \
     "    end" \
-    "    builtin set -g _sp_fish_entrypoint_owned_exports \$_entrypoint_owned_exports; or builtin exit 125" \
-    "    builtin set -g _sp_fish_entrypoint_owned_sources \$_entrypoint_owned_sources; or builtin exit 125" \
+    "    builtin set -g _sp_fish_entrypoint_owned_exports \$_entrypoint_owned_exports; or exec /bin/sh -c 'exit 125'" \
+    "    builtin set -g _sp_fish_entrypoint_owned_sources \$_entrypoint_owned_sources; or exec /bin/sh -c 'exit 125'" \
     "    return 0" \
     "  end" \
     "    builtin set -gx SHELL_PROJECT_ROOT \"\$_valise_fish_active_root\"" \
@@ -954,22 +989,22 @@ print_fish_integration() {
     "    if test \$_valise_fish_entrypoint_status -ne 0" \
     "      if not builtin functions -q \$_valise_fish_owned_cleanup; or not builtin test (builtin functions \$_valise_fish_owned_cleanup | string collect) = \"\$_valise_fish_owned_cleanup_definition\"" \
     "        builtin printf '%s\\n' 'trusted ownership cleanup helper was modified' >&2" \
-    "        builtin exit 125" \
+    "        exec /bin/sh -c 'exit 125'" \
     "      end" \
     "      \$_valise_fish_owned_cleanup" \
     "      if not builtin functions -q \$_valise_fish_root_restore_helper; or not builtin test (builtin functions \$_valise_fish_root_restore_helper | string collect) = \"\$_valise_fish_root_helper_definition\"" \
     "        builtin printf '%s\\n' 'trusted root restore helper was modified' >&2" \
-    "        builtin exit 125" \
+    "        exec /bin/sh -c 'exit 125'" \
     "      end" \
-    "      \$_valise_fish_root_restore_helper; or builtin exit 125" \
+    "      \$_valise_fish_root_restore_helper; or exec /bin/sh -c 'exit 125'" \
     "      return \$_valise_fish_entrypoint_status" \
     "    end" \
     "    if not builtin functions -q \$_valise_fish_success_cleanup_helper; or not builtin test (builtin functions \$_valise_fish_success_cleanup_helper | string collect) = \"\$_valise_fish_success_cleanup_helper_definition\"" \
     "      builtin printf '%s\\n' 'trusted success cleanup helper was modified' >&2" \
-    "      builtin exit 125" \
+    "      exec /bin/sh -c 'exit 125'" \
     "    end" \
-    "    \$_valise_fish_publish_active_helper; or builtin exit 125" \
-    "    \$_valise_fish_success_cleanup_helper; or builtin exit 125" \
+    "    \$_valise_fish_publish_active_helper; or exec /bin/sh -c 'exit 125'" \
+    "    \$_valise_fish_success_cleanup_helper; or exec /bin/sh -c 'exit 125'" \
     "    return \$_valise_fish_entrypoint_status" \
     "else" \
     "  # The release has no Fish runtime because its bundle has no Fish roots." \
@@ -979,8 +1014,8 @@ print_fish_integration() {
     "end" \
     "if not builtin functions -q \$_valise_fish_success_cleanup_helper; or not builtin test (builtin functions \$_valise_fish_success_cleanup_helper | string collect) = \"\$_valise_fish_success_cleanup_helper_definition\"" \
     "  builtin printf '%s\\n' 'trusted success cleanup helper was modified' >&2" \
-    "  builtin exit 125" \
+    "  exec /bin/sh -c 'exit 125'" \
     "end" \
-    "\$_valise_fish_success_cleanup_helper; or builtin exit 125" \
+    "\$_valise_fish_success_cleanup_helper; or exec /bin/sh -c 'exit 125'" \
     "end"
 }

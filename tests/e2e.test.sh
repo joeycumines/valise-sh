@@ -174,10 +174,10 @@ expected_exports_for() {
   printf 'expect %s\nabsent %s\n' "$_eef_expect" "$_eef_absent"
 }
 
-# The plan class the managed block selects in a shell: the first of
-# KSH_VERSION, ZSH_VERSION and BASH_VERSION that is set, else sh. A shell
-# binary named sh may be another shell (macOS /bin/sh is bash), so the class
-# is asked of the shell itself.
+# An independent test oracle for the shell implementation. Query version
+# variables only in a clean environment, where none can be inherited from
+# another shell. Production startup uses builtin probes instead. A binary named
+# sh may be Bash (macOS), so the invocation name alone is not the class.
 _class_probe='if [ -n "${KSH_VERSION-}" ]; then echo ksh; elif [ -n "${ZSH_VERSION-}" ]; then echo zsh; elif [ -n "${BASH_VERSION-}" ]; then echo bash; else echo sh; fi'
 
 # A POSIX probe that sources a startup file and reports each name as
@@ -222,6 +222,33 @@ _home_env() {
     XDG_STATE_HOME="$_he_home/.local/state" \
     PATH="$REPO_ROOT/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \
     "$@"
+}
+
+# A locally available Fish may live outside the CLI's intentionally fixed
+# trusted locations. Such an installation supports the documented manual hook
+# workflow, even though install must not discover it through arbitrary PATH.
+# Keep that runtime coverage while reporting the missing automatic-install
+# coverage explicitly. Strict CI requires automatic integration; neither it nor
+# a host with a trusted Fish may conceal a missing hook with this fallback.
+_prepare_fish_hook() {
+  _e2e_fish_manual=0
+  _e2e_hook="$2/.config/fish/conf.d/valise.fish"
+  [ ! -L "$_e2e_hook" ] || return 1
+  [ ! -f "$_e2e_hook" ] || return 0
+  [ ! -e "$_e2e_hook" ] || return 1
+  tooling_required && return 1
+  if ( . "$REPO_ROOT/lib/cli/common.sh"; trusted_utility_path fish ) >/dev/null 2>&1; then
+    return 1
+  fi
+  skip "$1: automatic Fish hook installation (no Fish in CLI trusted locations; testing documented manual integration)"
+  mkdir -p "$2/.config/fish/conf.d" || return 1
+  if ! _home_env "$2" "$VALISE" init fish >"$_e2e_hook.tmp" 2>"$2/manual-fish.err"; then
+    cat "$2/manual-fish.err" >&2
+    rm -f "$_e2e_hook.tmp"
+    return 1
+  fi
+  mv "$_e2e_hook.tmp" "$_e2e_hook" || return 1
+  _e2e_fish_manual=1
 }
 
 # _probe_term: a usable TERM for a child shell. Fish treats an unset or
@@ -269,14 +296,24 @@ run_lane() {
   fi
 
   _snippet="$_tmp_home/$(startup_file_for "$_shell_name")"
+  if [ "$_shell_name" = fish ] && ! _prepare_fish_hook "$_lane/$_shell_name" "$_tmp_home"; then
+    fail "$_lane/$_shell_name: automatic Fish integration missing or manual hook generation failed"
+    _cleanup_home "$_tmp_home"
+    return 0
+  fi
   if [ -f "$_snippet" ]; then
-    pass "$_lane/$_shell_name: shell integration written to $(startup_file_for "$_shell_name")"
+    if [ "$_shell_name" = fish ] && [ "$_e2e_fish_manual" -eq 1 ]; then
+      pass "$_lane/$_shell_name: valise init fish generated the manual startup hook"
+    else
+      pass "$_lane/$_shell_name: shell integration written to $(startup_file_for "$_shell_name")"
+    fi
   else
     fail "$_lane/$_shell_name: shell integration missing: $_snippet"
   fi
 
   _class=$_shell_name
-  [ "$_shell_name" = fish ] || _class=$("$_shell_path" -c "$_class_probe" 2>/dev/null) || _class=$_shell_name
+  [ "$_shell_name" = fish ] || _class=$(env -i HOME="$_tmp_home" PATH=/usr/bin:/bin \
+    "$_shell_path" -f -c "$_class_probe" 2>/dev/null) || _class=$_shell_name
   # The bundle's interactive-phase modules (aliases, completions, ksh
   # features) ship in plans/<class>-interactive.sh and must load only in an
   # interactive shell; the env plan must not contain them. The sh lane runs
@@ -776,7 +813,7 @@ run_lima_lane() {
     # through ssh, which would break the quoting of a -c script. A guest
     # login may print a banner first, so the class is the last line.
     _lima_class_q=$(printf '%s' "$_class_probe" | sed "s/'/'\\\\''/g")
-    _lima_class=$(printf '%s\n' "$_lima_run -c '$_lima_class_q'" | limactl shell "$_instance" /bin/sh -s 2>/dev/null | tail -n 1) || _lima_class=sh
+    _lima_class=$(printf '%s\n' "env -i PATH=/usr/bin:/bin $_lima_run -f -c '$_lima_class_q'" | limactl shell "$_instance" /bin/sh -s 2>/dev/null | tail -n 1) || _lima_class=sh
   fi
   _expected=$(expected_exports_for "$_lima_class" "$_lima_os" 0)
   _expect_line=$(printf '%s\n' "$_expected" | sed -n 1p)
@@ -928,6 +965,8 @@ run_composition_lane() {
   _compose_fish=$(command -v fish 2>/dev/null || echo "")
   if [ -z "$_compose_fish" ]; then
     skip "compose/fish: fish not available"
+  elif ! _prepare_fish_hook compose/fish "$_tmp_home"; then
+    fail "compose/fish: automatic Fish integration missing or manual hook generation failed"
   elif _home_env "$_tmp_home" _COMPOSE_VALISE="$VALISE" "$_compose_fish" \
     -c 'builtin functions -q e2e_fish_loaded; or exit 1; builtin test "$VALISE_FISH_READY" = 1; or exit 1; "$_COMPOSE_VALISE" release verify >/dev/null 2>&1; or exit 1; exit 0' \
     >"$_tmp_home/compose-fish.out" 2>&1; then

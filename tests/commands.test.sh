@@ -337,29 +337,109 @@ else
   cat "$_tmp/doctor-empty-cwd.out" "$_tmp/doctor-empty-cwd-neg.out" >&2
 fi
 
+# A pathname can end in more than one LF. Preserve those bytes when recording
+# the invocation directory, and distinguish the newline-free sibling. A shell
+# case compares the whole diagnostic literally; grep would split the pattern
+# at each embedded newline and could pass on an unrelated fragment.
+_cwd_plain="$_tmp/caller"
+_cwd_nl=$(printf '%s\n\nx' "$_cwd_plain")
+_cwd_nl=${_cwd_nl%x}
+mkdir -p "$_cwd_plain/bin" "$_cwd_nl/bin"
+_cwd_positive=$(cd "$_cwd_nl" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  _valise_cwd=/inherited _valise_cwd_unavailable=1 \
+  VALISE_BIN_DIR="$_cwd_nl/bin" VALISE_CALLER_PATH=bin \
+  "$_valise" -C "$_proj" doctor 2>&1) || :
+_cwd_negative=$(cd "$_cwd_nl" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR="$_cwd_plain/bin" VALISE_CALLER_PATH=bin \
+  "$_valise" -C "$_proj" doctor 2>&1) || :
+if case "$_cwd_positive" in *"ok: command directory is on PATH: $_cwd_nl/bin"*) true ;; *) false ;; esac &&
+  case "$_cwd_negative" in *"warn: command directory is not on PATH: $_cwd_plain/bin"*) true ;; *) false ;; esac; then
+  pass "caller CWD capture preserves trailing newlines and ignores inherited private state"
+else
+  fail "caller CWD capture changed trailing newlines or trusted inherited private state"
+  printf '%s\n' "$_cwd_positive" "$_cwd_negative" >&2
+fi
+
+# Resolve symlinks before '..', as the filesystem does. Lexically deleting
+# link/.. would turn the negative control into a false match. Two different
+# symlinks naming the same directory must also compare equal.
+_phys_root="$_tmp/path-identity"
+mkdir -p "$_phys_root/lexical/bin" "$_phys_root/physical/deep" "$_phys_root/physical/bin"
+ln -s "$_phys_root/physical/deep" "$_phys_root/lexical/link"
+ln -s "$_phys_root/physical/bin" "$_phys_root/alias-one"
+ln -s "$_phys_root/physical/bin" "$_phys_root/alias-two"
+for _phys_case in negative positive aliases; do
+  case "$_phys_case" in
+  negative) _phys_path="$_phys_root/lexical/link/../bin"; _phys_target="$_phys_root/lexical/bin"; _phys_expect='warn: command directory is not on PATH' ;;
+  positive) _phys_path="$_phys_root/lexical/link/../bin"; _phys_target="$_phys_root/physical/bin"; _phys_expect='ok: command directory is on PATH' ;;
+  aliases) _phys_path="$_phys_root/alias-one"; _phys_target="$_phys_root/alias-two"; _phys_expect='ok: command directory is on PATH' ;;
+  esac
+  env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+    XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+    VALISE_BIN_DIR="$_phys_target" VALISE_CALLER_PATH="$_phys_path" \
+    "$_valise" -C "$_proj" doctor >"$_tmp/doctor-physical-$_phys_case.out" 2>&1 || :
+  if grep -Fx "  $_phys_expect: $_phys_target" "$_tmp/doctor-physical-$_phys_case.out" >/dev/null; then
+    pass "PATH diagnostics use directory identity across symlinks ($_phys_case)"
+  else
+    fail "PATH diagnostics misidentified a directory across symlinks ($_phys_case)"
+    cat "$_tmp/doctor-physical-$_phys_case.out" >&2
+  fi
+done
+
+# A deleted invocation directory must not abort informational commands, and
+# relative or empty caller PATH entries must not be rebound to -C's project.
+_deleted_cwd="$_tmp/deleted-cwd"
+mkdir -p "$_deleted_cwd"
+_deleted_rc=0
+(
+  cd "$_deleted_cwd"
+  rmdir "$_deleted_cwd"
+  env -i HOME="$_home" PATH=/usr/bin:/bin "$_valise" --help >"$_tmp/deleted-help.out" 2>"$_tmp/deleted-help.err" &&
+    env -i HOME="$_home" PATH=/usr/bin:/bin "$_valise" --version >"$_tmp/deleted-version.out" 2>"$_tmp/deleted-version.err" &&
+    env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+      XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+      VALISE_BIN_DIR="$_proj" VALISE_CALLER_PATH=.: \
+      "$_valise" -C "$_proj" doctor >"$_tmp/deleted-doctor.out" 2>&1
+) || _deleted_rc=$?
+if [ "$_deleted_rc" -eq 0 ] && [ ! -e "$_deleted_cwd" ] && [ -s "$_tmp/deleted-help.out" ] &&
+  grep -Fx '0.4.1' "$_tmp/deleted-version.out" >/dev/null &&
+  grep -Fx "  warn: command directory is not on PATH: $_proj" "$_tmp/deleted-doctor.out" >/dev/null; then
+  pass "a deleted invocation directory permits help/version/-C and skips relative PATH entries"
+else
+  fail "a deleted invocation directory aborted a command or rebound relative PATH entries to -C"
+  cat "$_tmp/deleted-help.err" "$_tmp/deleted-version.err" "$_tmp/deleted-doctor.out" >&2 2>/dev/null || :
+fi
+
 # The caller CWD is diagnostic context only: it must not leak into generated
 # content, env capture, or child processes. Run from inside $_home so the
 # recorded caller directory is a real value, check the exit status (a crash or
 # empty output must not pass vacuously), inspect a child process's environment,
-# and pre-export VALISE_CALLER_CWD to prove the export attribute is dropped.
+# and pre-export the diagnostic variables to prove their export attributes are
+# dropped. --keep-env is necessary: the default quarantine would hide a leak.
+# HOME and an explicit witness prove that the inline script actually ran.
 _cwd_leak_rc=0
 (cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
   XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
   XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
-  VALISE_CALLER_CWD=/pre-exported-leak \
+  VALISE_CALLER_CWD=/pre-exported-leak _valise_cwd=/pre-exported-leak _valise_cwd_unavailable=1 \
   "$_valise" -C "$_proj" env export environment.d) >"$_tmp/env-export-cwd.out" 2>&1 || _cwd_leak_rc=$?
 _cwd_child_rc=0
 (cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
   XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
   XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
-  VALISE_CALLER_CWD=/pre-exported-leak \
-  "$_valise" -C "$_proj" run -- /bin/sh -c 'env') >"$_tmp/env-child-cwd.out" 2>&1 || _cwd_child_rc=$?
+  VALISE_CALLER_CWD=/pre-exported-leak _valise_cwd=/pre-exported-leak _valise_cwd_unavailable=1 \
+  "$_valise" -C "$_proj" run --keep-env -- 'env; printf "ENV_PROBE=ran\n"') >"$_tmp/env-child-cwd.out" 2>&1 || _cwd_child_rc=$?
 if [ "$_cwd_leak_rc" -eq 0 ] && [ "$_cwd_child_rc" -eq 0 ] &&
    ! grep -F 'VALISE_CALLER_CWD' "$_tmp/env-export-cwd.out" >/dev/null &&
    ! grep -F "$_home" "$_tmp/env-export-cwd.out" >/dev/null &&
-   ! grep -F 'VALISE_CALLER_CWD' "$_tmp/env-child-cwd.out" >/dev/null &&
-   ! grep -F '/pre-exported-leak' "$_tmp/env-child-cwd.out" >/dev/null &&
-   ! grep -F "$_home" "$_tmp/env-child-cwd.out" >/dev/null; then
+   grep -Fx "HOME=$_home" "$_tmp/env-child-cwd.out" >/dev/null &&
+   grep -Fx 'ENV_PROBE=ran' "$_tmp/env-child-cwd.out" >/dev/null &&
+   ! grep -E '^(VALISE_CALLER_CWD|_valise_cwd|_valise_cwd_unavailable)=' "$_tmp/env-child-cwd.out" >/dev/null &&
+   ! grep -F '/pre-exported-leak' "$_tmp/env-child-cwd.out" >/dev/null; then
   pass "the recorded caller directory does not leak into generated content or child processes"
 else
   fail "the recorded caller directory leaked into generated content or a child process"
@@ -536,30 +616,27 @@ fi
 # Invoked from the root directory, an empty or relative caller PATH entry must
 # join with exactly one separator: VALISE_CALLER_CWD=/ must not produce the
 # POSIX implementation-defined leading "//".
-if [ "$(id -u)" -eq 0 ] && [ -w / ]; then
-  _root_rc=0
-  (cd / && env -i HOME="$_home" PATH=/usr/bin:/bin \
-    XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
-    XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
-    VALISE_BIN_DIR=/ VALISE_CALLER_PATH=":" \
-    "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-root-empty.out" 2>&1 || _root_rc=$?
-  _root_rel_rc=0
-  (cd / && env -i HOME="$_home" PATH=/usr/bin:/bin \
-    XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
-    XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
-    VALISE_BIN_DIR=/usr/bin VALISE_CALLER_PATH="usr/bin" \
-    "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-root-rel.out" 2>&1 || _root_rel_rc=$?
-  if [ "$_root_rc" -eq 0 ] &&
-     grep -F "ok: command directory is on PATH: /" "$_tmp/doctor-root-empty.out" >/dev/null &&
-     [ "$_root_rel_rc" -eq 0 ] &&
-     grep -F "ok: command directory is on PATH: /usr/bin" "$_tmp/doctor-root-rel.out" >/dev/null; then
-    pass "an empty or relative caller PATH entry invoked from / joins without a leading //"
-  else
-    fail "a caller PATH entry invoked from / did not resolve without a leading //"
-    cat "$_tmp/doctor-root-empty.out" "$_tmp/doctor-root-rel.out" >&2
-  fi
+# Doctor only reads these paths; this check does not require root or a writable /.
+_root_rc=0
+(cd / && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR=/ VALISE_CALLER_PATH=":" \
+  "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-root-empty.out" 2>&1 || _root_rc=$?
+_root_rel_rc=0
+(cd / && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR=/usr/bin VALISE_CALLER_PATH="usr/bin" \
+  "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-root-rel.out" 2>&1 || _root_rel_rc=$?
+if [ "$_root_rc" -eq 0 ] &&
+   grep -F "ok: command directory is on PATH: /" "$_tmp/doctor-root-empty.out" >/dev/null &&
+   [ "$_root_rel_rc" -eq 0 ] &&
+   grep -F "ok: command directory is on PATH: /usr/bin" "$_tmp/doctor-root-rel.out" >/dev/null; then
+  pass "an empty or relative caller PATH entry invoked from / joins without a leading //"
 else
-  skip "caller PATH entries invoked from / (needs a writable / or non-root)"
+  fail "a caller PATH entry invoked from / did not resolve without a leading //"
+  cat "$_tmp/doctor-root-empty.out" "$_tmp/doctor-root-rel.out" >&2
 fi
 
 if [ "$(stat -c %a "$_home/.config/valise/active/bin/hello" 2>/dev/null ||

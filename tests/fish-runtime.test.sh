@@ -212,6 +212,97 @@ _meta "$_fixture/module.d/nested_platform.meta" nested_platform fish "$_opposite
 _body "$_fixture/modules/fish/nested_platform.fish" 'set -g nested_platform_sourced 1; function nested_platform_loaded; end'
 
 _engine=$(CDPATH= cd "$(dirname "$0")/.." && pwd -P)
+# A Fish executable outside the CLI's trusted locations is a valid runtime for
+# this suite. Exercise documented manual integration locally when automatic
+# discovery is unavailable, while strict CI still requires automatic install.
+_prepare_fish_hook() {
+  _manual_fish_hook=0
+  _pfh_home=$1
+  _pfh_hook="$_pfh_home/.config/fish/conf.d/valise.fish"
+  if [ -f "$_pfh_hook" ] && [ ! -L "$_pfh_hook" ]; then return 0; fi
+  if [ -e "$_pfh_hook" ] || [ -L "$_pfh_hook" ]; then return 1; fi
+  for _pfh_flag in "${VALISE_REQUIRE_TOOLING:-}" "${CI:-}" "${GITHUB_ACTIONS:-}"; do
+    case "$_pfh_flag" in 1|true|TRUE|yes|YES) return 1 ;; esac
+  done
+  if ( . "$_engine/lib/cli/common.sh"; trusted_utility_path fish ) >/dev/null 2>&1; then return 1; fi
+  printf '%s\n' 'SKIP: automatic Fish hook installation (no Fish in CLI trusted locations; testing documented manual integration)'
+  mkdir -p "$_pfh_home/.config/fish/conf.d"
+  /usr/bin/env -i HOME="$_pfh_home" PATH="${PATH:-/usr/bin:/bin}" \
+    XDG_CONFIG_HOME="$_pfh_home/.config" XDG_DATA_HOME="$_pfh_home/.local/share" XDG_STATE_HOME="$_pfh_home/.local/state" \
+    "$_engine/bin/valise" init fish >"$_pfh_hook.tmp" || return 1
+  mv "$_pfh_hook.tmp" "$_pfh_hook" || return 1
+  _manual_fish_hook=1
+}
+
+# Prove actual runtime provenance before the larger transaction fixtures. A
+# caller-controlled prefix with the same share/fish/functions/cd.fish suffix
+# must remain untrusted even when both mutable Fish path variables name it.
+_runtime_poison="$_test_root/fake-prefix/share/fish/functions"
+mkdir -p "$_runtime_poison"
+printf '%s\n' 'function cd; builtin printf "caller-cd-ran\\n"; return 1; end' >"$_runtime_poison/cd.fish"
+cat >"$_test_root/runtime-provenance.fish" <<EOF
+builtin source '$_engine/lib/fish/metadata.fish'
+builtin set -gx SHELL_PROJECT_ROOT '$_fixture'
+function runtime_bootstrap
+    builtin set -g _sp_fish_loader_bootstrap_mode strict
+    builtin set -g _sp_fish_loader_bootstrap_seeds after_cd
+    builtin source '$_engine/lib/fish/loader.fish'
+    builtin test "\$_sp_fish_loader_bootstrap_status" -eq 0
+end
+runtime_bootstrap; or exit 11
+builtin functions -q after_cd_loaded; or exit 12
+builtin set -l saved_data_dir \$__fish_data_dir
+builtin set -l saved_function_path \$fish_function_path
+builtin set -g __fish_data_dir '$_test_root/fake-prefix/share/fish'
+builtin set -g fish_function_path '$_runtime_poison' \$fish_function_path
+builtin source '$_runtime_poison/cd.fish'
+runtime_bootstrap; and exit 13
+builtin test (builtin functions --details cd) = '$_runtime_poison/cd.fish'; or exit 14
+builtin functions -e cd
+builtin set -g __fish_data_dir \$saved_data_dir
+builtin set -g fish_function_path \$saved_function_path
+runtime_bootstrap; or exit 15
+builtin functions -q after_cd_loaded; or exit 16
+builtin printf '%s\\n' runtime-provenance-ok
+EOF
+if ! /usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin}" \
+  "$_fish" "$_test_root/runtime-provenance.fish" >"$_test_root/runtime-provenance.out" 2>"$_test_root/runtime-provenance.err" ||
+  [ "$(cat "$_test_root/runtime-provenance.out")" != runtime-provenance-ok ] ||
+  ! grep -F 'caller shadowed critical Fish builtin: cd' "$_test_root/runtime-provenance.err" >/dev/null; then
+  cat "$_test_root/runtime-provenance.out" "$_test_root/runtime-provenance.err" >&2
+  printf '%s\n' 'FAIL: Fish runtime provenance accepted a forged prefix or rejected the real runtime' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS: native Fish runtime accepts its own prefix and rejects a forged caller prefix'
+
+# A module cannot make a native cd mutation disappear by replacing the new
+# provenance helper too. Classification must use its saved pre-body result.
+_meta "$_fixture/module.d/runtime_provenance_attack.meta" runtime_provenance_attack fish any read-only '' modules/fish/runtime_provenance_attack.fish
+_body "$_fixture/modules/fish/runtime_provenance_attack.fish" 'set -l helper (builtin string join "" _sp_fish_loader_is_runtime_ function_source); function $helper; return 1; end; set -l helper (builtin string join "" c d); function $helper; return 0; end; return 7'
+cat >"$_test_root/runtime-provenance-attack.fish" <<EOF
+builtin source '$_engine/lib/fish/metadata.fish'
+builtin set -gx SHELL_PROJECT_ROOT '$_fixture'
+builtin set -g _sp_fish_loader_bootstrap_mode strict
+builtin set -g _sp_fish_loader_bootstrap_seeds runtime_provenance_attack
+function attack_source_boundary
+    builtin source '$_engine/lib/fish/loader.fish'
+    builtin printf 'continued-after-native-source\\n'
+end
+attack_source_boundary
+builtin printf 'continued-after-native-function\\n'
+exit 0
+EOF
+_runtime_attack_status=0
+/usr/bin/env -i TERM=xterm HOME="$_test_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin}" \
+  "$_fish" "$_test_root/runtime-provenance-attack.fish" >"$_test_root/runtime-provenance-attack.out" 2>"$_test_root/runtime-provenance-attack.err" || _runtime_attack_status=$?
+if [ "$_runtime_attack_status" -ne 125 ] || [ -s "$_test_root/runtime-provenance-attack.out" ] ||
+  ! grep -F 'embedded Fish function was mutated: cd' "$_test_root/runtime-provenance-attack.err" >/dev/null; then
+  cat "$_test_root/runtime-provenance-attack.out" "$_test_root/runtime-provenance-attack.err" >&2
+  printf 'FAIL: combined runtime helper/cd mutation escaped the saved provenance check (status %s)\n' "$_runtime_attack_status" >&2
+  exit 1
+fi
+printf '%s\n' 'PASS: native Fish rollback detects a cd mutation after the provenance helper is replaced'
+
 # An absent universal store is a valid empty before-image. Rollback must still
 # restore global state and must not treat the first Fish process in a home as
 # an integrity failure.
@@ -396,7 +487,7 @@ if ! (cd "$_built_root/project/build/release" && /usr/bin/env -i TERM=xterm HOME
   printf '%s\n' 'FAIL: built release did not install for the Fish hook test' >&2
   exit 1
 fi
-if [ ! -f "$_built_root/home/.config/fish/conf.d/valise.fish" ]; then
+if ! _prepare_fish_hook "$_built_root/home"; then
   printf '%s\n' 'FAIL: built release install wrote no Fish hook' >&2
   exit 1
 fi
@@ -984,6 +1075,19 @@ _entrypoint_switch_a="$_test_root/entrypoint-switch-a"
 _entrypoint_switch_b="$_test_root/entrypoint-switch-b"
 mkdir -p "$_entrypoint_switch_a/runtime/fish" "$_entrypoint_switch_b/runtime/fish"
 printf '%s\n' 'function entrypoint_release_a_only; echo release-a; end; complete -C "sudo " >/dev/null 2>&1; complete -C "git " >/dev/null 2>&1; complete -C "tar " >/dev/null 2>&1; builtin source /usr/share/fish/completions/sudo.fish 2>/dev/null; set -gx VALISE_FISH_READY 1; return 0' >"$_entrypoint_switch_a/runtime/fish/profile.fish"
+# A release may forge Fish's mutable data prefix. Its lookalike source remains
+# release-owned, so the next activation removes it; runtime provenance was
+# captured from the interpreter before this entrypoint executed.
+mkdir -p "$_entrypoint_switch_a/fake-prefix/share/fish/functions"
+printf '%s\n' 'function entrypoint_fake_runtime; echo release-owned; end' \
+  >"$_entrypoint_switch_a/fake-prefix/share/fish/functions/entrypoint_fake_runtime.fish"
+{
+  printf "builtin set -g __fish_data_dir '%s/fake-prefix/share/fish'\n" "$_entrypoint_switch_a"
+  printf '%s\n' 'builtin set -g fish_function_path "$__fish_data_dir/functions" $fish_function_path' \
+    'builtin source "$__fish_data_dir/functions/entrypoint_fake_runtime.fish"'
+  cat "$_entrypoint_switch_a/runtime/fish/profile.fish"
+} >"$_entrypoint_switch_a/runtime/fish/profile.new"
+mv "$_entrypoint_switch_a/runtime/fish/profile.new" "$_entrypoint_switch_a/runtime/fish/profile.fish"
 printf '%s\n' 'function entrypoint_release_b_only; echo release-b; end; set -gx VALISE_FISH_READY 1; return 0' >"$_entrypoint_switch_b/runtime/fish/profile.fish"
 _entrypoint_switch_home="$_test_root/entrypoint-switch-home"
 mkdir -p "$_entrypoint_switch_home/.config/valise"
@@ -1004,6 +1108,8 @@ or exit 1
 functions -q entrypoint_release_a_only; or exit 1
 builtin set -q _sp_fish_entrypoint_owned_exports; or exit 1
 builtin contains -- entrypoint_release_a_only \$_sp_fish_entrypoint_owned_exports; or exit 1
+builtin functions -q entrypoint_fake_runtime; or exit 1
+builtin contains -- entrypoint_fake_runtime \$_sp_fish_entrypoint_owned_exports; or exit 1
 # Fish 3 lists autoloadable system functions in functions --all --names, so an
 # introspection-grown baseline would publish them as entrypoint-owned with an
 # unauthenticatable source. Every ledger entry must resolve inside this release.
@@ -1018,6 +1124,7 @@ command ln -s "$_entrypoint_switch_b" "$_entrypoint_switch_home/.config/valise/a
 builtin source '$_test_root/valise-init-fish-entrypoint-switch-b.fish'
 or exit 1
 functions -q entrypoint_release_a_only; and exit 1
+functions -q entrypoint_fake_runtime; and exit 1
 functions -q entrypoint_release_b_only; or exit 1
 builtin contains -- entrypoint_release_b_only \$_sp_fish_entrypoint_owned_exports; or exit 1
 set -l _entrypoint_switch_root_b (builtin path resolve -- '$_entrypoint_switch_b')
@@ -1093,11 +1200,12 @@ builtin set -Ux _valise_fish_root_global_set preexisting-universal
 builtin set -gx _valise_fish_scratch_state__valise_fish_root_global_set_global_present preexisting-state-global
 builtin set -Ux _valise_fish_scratch_state__valise_fish_root_global_set_global_present preexisting-state-universal
 builtin source '$_test_root/valise-init-fish-hostile-good-entrypoint.fish'
-set -l _hostile_good_status \$status
-builtin test \$_hostile_good_status -eq 125; or exit 1
+builtin printf 'continued-after-compromised-helpers\\n'
 exit 0
 EOF
-if ! /usr/bin/env -i TERM=xterm HOME="$_hostile_good_entry_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_hostile_good_entry_program" >"$_test_root/init-hostile-good-entrypoint.stdout" 2>"$_test_root/init-hostile-good-entrypoint.stderr"; then
+_hostile_good_status=0
+/usr/bin/env -i TERM=xterm HOME="$_hostile_good_entry_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_hostile_good_entry_program" >"$_test_root/init-hostile-good-entrypoint.stdout" 2>"$_test_root/init-hostile-good-entrypoint.stderr" || _hostile_good_status=$?
+if [ "$_hostile_good_status" -ne 125 ] || [ -s "$_test_root/init-hostile-good-entrypoint.stdout" ]; then
   cat "$_test_root/init-hostile-good-entrypoint.stdout" >&2
   cat "$_test_root/init-hostile-good-entrypoint.stderr" >&2
   exit 1
@@ -1175,12 +1283,17 @@ function caller_owned_entrypoint
   echo caller-entrypoint
 end
 builtin set -gx SHELL_PROJECT_ROOT caller-entrypoint-root
-builtin source '$_test_root/valise-init-fish-entrypoint-replace.fish'
-set -l _entrypoint_replace_status \$status
-builtin test \$_entrypoint_replace_status -eq 125; or exit 1
+function replace_source_boundary
+    builtin source '$_test_root/valise-init-fish-entrypoint-replace.fish'
+    builtin printf 'continued-after-entrypoint-source\\n'
+end
+replace_source_boundary
+builtin printf 'continued-after-entrypoint-function\\n'
 exit 0
 EOF
-if ! /usr/bin/env -i TERM=xterm HOME="$_entrypoint_replace_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_entrypoint_replace_program" >"$_test_root/init-entrypoint-replace.stdout" 2>"$_test_root/init-entrypoint-replace.stderr"; then
+_entrypoint_replace_status=0
+/usr/bin/env -i TERM=xterm HOME="$_entrypoint_replace_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin}" "$_fish" "$_entrypoint_replace_program" >"$_test_root/init-entrypoint-replace.stdout" 2>"$_test_root/init-entrypoint-replace.stderr" || _entrypoint_replace_status=$?
+if [ "$_entrypoint_replace_status" -ne 125 ] || [ -s "$_test_root/init-entrypoint-replace.stdout" ]; then
   cat "$_test_root/init-entrypoint-replace.stdout" >&2
   cat "$_test_root/init-entrypoint-replace.stderr" >&2
   exit 1
@@ -1429,13 +1542,15 @@ if [ "$_metadata_cd_bad_status" -ne 125 ]; then
 fi
 _metadata_cd_clean_program="$_test_root/metadata-cd-clean.fish"
 cat >"$_metadata_cd_clean_program" <<EOF
+builtin set -l native_cd_source (builtin functions --details cd)
+builtin set -l native_cd_definition (builtin functions cd | builtin string collect)
 builtin source '$_test_root/valise-init-fish-metadata-cd-clean.fish'
 or exit 1
 functions -q cd; or exit 1
-# Fish 4 embeds cd; Fish 3 loads it from the installation function path. Both
-# are the trusted definition the loader accepts, so assert that accepted set
-# rather than one version's spelling.
-builtin contains -- (builtin functions --details cd) embedded:functions/cd.fish /usr/share/fish/functions/cd.fish /usr/local/share/fish/functions/cd.fish /opt/local/share/fish/functions/cd.fish /opt/homebrew/share/fish/functions/cd.fish; or exit 1
+# A successful activation keeps this interpreter's native wrapper byte for
+# byte, whether it is embedded or read from a relocated installation.
+builtin test (builtin functions --details cd) = "\$native_cd_source"; or exit 1
+builtin test (builtin functions cd | builtin string collect) = "\$native_cd_definition"; or exit 1
 exit 0
 EOF
 if ! /usr/bin/env -i TERM=xterm HOME="$_metadata_cd_home" TMPDIR="${TMPDIR:-/tmp}" PATH="${PATH:-/usr/bin:/bin:/usr/local/bin}" "$_fish" "$_metadata_cd_clean_program" >"$_test_root/metadata-cd-clean.stdout" 2>"$_test_root/metadata-cd-clean.stderr"; then
@@ -1862,15 +1977,12 @@ functions -q helper_success_private; or exit 1
 # completion file) are not module state and must never enter the ledger.
 bootstrap strict fish_system_sourced
 or exit 1
-for _system_owned_source in \$_sp_fish_loader_owned_sources
-    builtin string match -q '/usr/share/fish/*' -- "\$_system_owned_source"; and exit 1
-    builtin string match -q '/usr/local/share/fish/*' -- "\$_system_owned_source"; and exit 1
-    builtin string match -q '/opt/local/share/fish/*' -- "\$_system_owned_source"; and exit 1
-    builtin string match -q '/opt/homebrew/share/fish/*' -- "\$_system_owned_source"; and exit 1
-    builtin string match -q 'embedded:completions/*' -- "\$_system_owned_source"; and exit 1
-    builtin string match -q 'embedded:functions/*' -- "\$_system_owned_source"; and exit 1
-    builtin string match -q 'autoloaded:*' -- "\$_system_owned_source"; and exit 1
-end
+# This fixture owns exactly its one export. Autoloaded runtime functions must
+# stay outside the ledger even when Fish is installed under a private prefix.
+builtin test (builtin count \$_sp_fish_loader_owned_exports) -eq 1; or exit 1
+builtin test "\$_sp_fish_loader_owned_exports[1]" = fish_system_sourced_loaded; or exit 1
+builtin test (builtin count \$_sp_fish_loader_owned_sources) -eq 1; or exit 1
+builtin test (builtin path resolve -- "\$_sp_fish_loader_owned_sources[1]") = (builtin path resolve -- '$_fixture/modules/fish/fish_system_sourced.fish'); or exit 1
 bootstrap strict partial_b
 and exit 1
 if builtin set -q _sp_fish_loader_owned_exports
@@ -2173,7 +2285,8 @@ printf 'variant\tdescription\texcluded\ndefault\tEverything\t\nlean\tNo provider
 
 (cd "$_fr_project" && _fr_env "$_engine/bin/valise" apply) >"$_fr_root/apply.out" 2>"$_fr_root/apply.err" || _fr_fail 'valise apply failed for a Fish bundle'
 _fr_hook="$_fr_home/.config/fish/conf.d/valise.fish"
-[ -f "$_fr_hook" ] || _fr_fail 'valise apply wrote no Fish hook'
+_prepare_fish_hook "$_fr_home" || _fr_fail 'valise apply wrote no Fish hook'
+_fr_manual_hook=$_manual_fish_hook
 _fr_active=$(cd "$_fr_home/.config/valise/active" && pwd -P) || _fr_fail 'valise apply left no active release'
 for _fr_file in runtime/fish/profile.fish runtime/fish/loader.fish runtime/fish/metadata.fish layers/acme/modules/fish/contrib_acme_tool.fish; do
   [ -f "$_fr_active/$_fr_file" ] || _fr_fail "the active release lacks $_fr_file"
@@ -2187,7 +2300,11 @@ _fr_env "$_fish" -l -c 'functions -q profile_main_loaded; or exit 11; test "$(co
 
 _fr_inode=$(ls -i "$_fr_hook" | awk '{print $1}')
 (cd "$_fr_project" && _fr_env "$_engine/bin/valise" apply) >"$_fr_root/reapply.out" 2>"$_fr_root/reapply.err" || _fr_fail 'a second valise apply failed'
-grep -F "Fish hook current: $_fr_hook" "$_fr_root/reapply.out" "$_fr_root/reapply.err" >/dev/null || _fr_fail 'a second apply did not report the Fish hook as current'
+if [ "$_fr_manual_hook" -eq 0 ]; then
+  grep -F "Fish hook current: $_fr_hook" "$_fr_root/reapply.out" "$_fr_root/reapply.err" >/dev/null || _fr_fail 'a second apply did not report the Fish hook as current'
+else
+  printf '%s\n' 'SKIP: automatic Fish hook current diagnostic (using documented manual integration)'
+fi
 [ "$(ls -i "$_fr_hook" | awk '{print $1}')" = "$_fr_inode" ] || _fr_fail 'a second apply replaced an identical Fish hook'
 
 _fr_env "$_fish" -l -c 'source "$HOME/.config/fish/conf.d/valise.fish"; or exit 21; test "$(contrib_acme_tool)" = acme; or exit 22; for _h in (functions --all --names); string match -q "__valise_fish_*" -- $_h; and exit 23; end; exit 0' \

@@ -16,11 +16,51 @@ _mm_tmp=""
 _rr_tmp=""
 _mv_path=""
 _cleanup_failed=0
+_pending_signal=
+_signals_deferred=0
+_exit_running=0
+_transaction_active=0
+_transaction_dir=
+
+# The parent records INT/TERM while a critical child finishes. Ignoring these
+# signals in the complete child process also protects utilities from terminal
+# process-group signals, which otherwise can hide a successful mkdir or stop a
+# recovery copy midway. Functions may be passed too; their state is private to
+# this worker, so callers propagate its status explicitly.
+run_ignoring_int_term() {
+  (
+    trap - EXIT
+    trap '' INT TERM
+    "$@"
+  ) <&0 &
+  _rigt_pid=$!
+  while :; do
+    _rigt_status=0
+    wait "$_rigt_pid" || _rigt_status=$?
+    # No retained child status means this is no longer our waitable process;
+    # its numeric PID may already have been reused. Never poll that PID again.
+    [ "$_rigt_status" -ne 127 ] || break
+    # A caught signal may interrupt wait even though the protected child is
+    # still running. Dash can return the enclosing EXIT trap's original status
+    # here, so checking only 128+signal is insufficient. Wait until this child
+    # is gone, then collect its remembered status once more.
+    kill -0 "$_rigt_pid" 2>/dev/null && continue
+    _rigt_final=0
+    wait "$_rigt_pid" || _rigt_final=$?
+    [ "$_rigt_final" -eq 127 ] || _rigt_status=$_rigt_final
+    break
+  done
+  return "$_rigt_status"
+}
+
 acquire_lock() {
+  # A signal between mkdir and the PID write must not strand an ownerless
+  # lock. The process records a signal, finishes ownership bookkeeping, then
+  # exits through the same cleanup path as an ordinary acquisition failure.
+  _lock_signals_before=$_signals_deferred
+  _signals_deferred=1
   _lock_cat_path=$(trusted_utility_path cat) || die "no trusted cat utility available"
   _lock_mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
-  _lock_rm_path=$(trusted_utility_path rm) || die "no trusted rm utility available"
-  _lock_kill_path=$(trusted_utility_path kill) || die "no trusted kill utility available"
 
   # Reentrant ownership is valid only for a real lock directory and a real,
   # non-symlink pid file containing this process's exact PID.
@@ -29,7 +69,12 @@ acquire_lock() {
     _existing_pid=$("$_lock_cat_path" "$VALISE_LOCK_DIR/pid" 2>/dev/null || :)
     case "$_existing_pid" in
       ''|*[!0-9]*) : ;;
-      "$$") _lock_owned=1; return 0 ;;
+      "$$")
+        _lock_owned=1
+        _signals_deferred=$_lock_signals_before
+        [ -z "$_pending_signal" ] || exit "$_pending_signal"
+        return 0
+        ;;
     esac
   fi
 
@@ -38,25 +83,21 @@ acquire_lock() {
   if [ ! -d "$_lock_parent" ]; then
     "$_lock_mkdir_path" -p "$_lock_parent" 2>/dev/null || die "cannot create lock parent: $_lock_parent"
   fi
-  if ! "$_lock_mkdir_path" -m 700 "$VALISE_LOCK_DIR" 2>/dev/null; then
-    # Check for stale lock using only the trusted utility paths. An invalid or
-    # unreadable lock is fail-closed rather than treated as stale.
+  if run_ignoring_int_term "$_lock_mkdir_path" -m 700 "$VALISE_LOCK_DIR" 2>/dev/null; then
+    _lock_owned=1
+  else
+    # Never reclaim a pre-existing lock automatically. A dead-PID check and
+    # removal are separate operations: two reclaimers can both observe the old
+    # PID, and the slower one can then delete the faster one's new live lock.
+    # A failed kill -0 can also mean permission denied. Reading the record is
+    # useful for diagnostics, but cannot authorize deleting another lock.
     if [ -d "$VALISE_LOCK_DIR" ] && [ ! -L "$VALISE_LOCK_DIR" ] &&
        [ -f "$VALISE_LOCK_DIR/pid" ] && [ ! -L "$VALISE_LOCK_DIR/pid" ]; then
       _lock_pid=$("$_lock_cat_path" "$VALISE_LOCK_DIR/pid" 2>/dev/null || :)
       case "$_lock_pid" in
         ''|*[!0-9]*) die "another valise process is running (unreadable lock)" ;;
       esac
-      if ! "$_lock_kill_path" -0 "$_lock_pid" 2>/dev/null; then
-        info "removing stale lock (pid $_lock_pid)"
-        "$_lock_rm_path" -rf "$VALISE_LOCK_DIR" 2>/dev/null || die "failed to remove stale lock"
-        if [ -e "$VALISE_LOCK_DIR" ] || [ -L "$VALISE_LOCK_DIR" ]; then
-          die "failed to remove stale lock"
-        fi
-        "$_lock_mkdir_path" -m 700 "$VALISE_LOCK_DIR" 2>/dev/null || die "failed to acquire lock after stale cleanup"
-      else
-        die "another valise process is running (pid $_lock_pid)"
-      fi
+      die "lock already exists (recorded pid $_lock_pid): $VALISE_LOCK_DIR; retry after the owner finishes, or confirm no valise process is using this store before removing the stale lock"
     else
       die "failed to acquire lock: $VALISE_LOCK_DIR"
     fi
@@ -67,6 +108,8 @@ acquire_lock() {
   _lock_pid=$("$_lock_cat_path" "$VALISE_LOCK_DIR/pid" 2>/dev/null || :)
   [ "$_lock_pid" = "$$" ] || die "failed to verify lock ownership"
   _lock_owned=1
+  _signals_deferred=$_lock_signals_before
+  [ -z "$_pending_signal" ] || exit "$_pending_signal"
 }
 
 remove_tree() {
@@ -96,150 +139,105 @@ EOF
 }
 
 release_lock() {
-  _release_rm_path=$(trusted_utility_path rm 2>/dev/null || :)
-  _release_rmdir_path=$(trusted_utility_path rmdir 2>/dev/null || :)
-  if [ -n "$_publish_tmp" ]; then
-    remove_tree "$_publish_tmp" || _cleanup_failed=1
-    _publish_tmp=""
-  fi
-  if [ -n "$_manifest_rows" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_manifest_rows" 2>/dev/null || :
-    if [ -e "$_manifest_rows" ] || [ -L "$_manifest_rows" ]; then _cleanup_failed=1; fi
-    _manifest_rows=""
-  fi
-  if [ -n "$_manifest_parse" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_manifest_parse" 2>/dev/null || :
-    if [ -e "$_manifest_parse" ] || [ -L "$_manifest_parse" ]; then _cleanup_failed=1; fi
-    _manifest_parse=""
-  fi
-  if [ -n "${_pm_tmp:-}" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_pm_tmp" 2>/dev/null || :
-    if [ -e "$_pm_tmp" ] || [ -L "$_pm_tmp" ]; then _cleanup_failed=1; fi
-    _pm_tmp=""
-  fi
-  if [ -n "${_rr_tmp:-}" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_rr_tmp" 2>/dev/null || :
-    if [ -e "$_rr_tmp" ] || [ -L "$_rr_tmp" ]; then _cleanup_failed=1; fi
-    _rr_tmp=""
-  fi
-  if [ -n "${_pi_tmp:-}" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_pi_tmp" 2>/dev/null || :
-    if [ -e "$_pi_tmp" ] || [ -L "$_pi_tmp" ]; then _cleanup_failed=1; fi
-    _pi_tmp=""
-  fi
-  if [ -n "${_eb_registry_tmp:-}" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_eb_registry_tmp" 2>/dev/null || :
-    if [ -e "$_eb_registry_tmp" ] || [ -L "$_eb_registry_tmp" ]; then _cleanup_failed=1; fi
-    _eb_registry_tmp=""
-  fi
-  if [ -n "${_doctor_cand_file:-}" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_doctor_cand_file" 2>/dev/null || :
-    if [ -e "$_doctor_cand_file" ] || [ -L "$_doctor_cand_file" ]; then _cleanup_failed=1; fi
-    _doctor_cand_file=""
-  fi
-  if [ -n "${_module_list_tmp:-}" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_module_list_tmp" 2>/dev/null || :
-    if [ -e "$_module_list_tmp" ] || [ -L "$_module_list_tmp" ]; then _cleanup_failed=1; fi
-    _module_list_tmp=""
-  fi
-  if [ -n "${_rg_tmp:-}" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_rg_tmp" 2>/dev/null || :
-    if [ -e "$_rg_tmp" ] || [ -L "$_rg_tmp" ]; then _cleanup_failed=1; fi
-    _rg_tmp=""
-  fi
-  if [ -n "${_publish_previous:-}" ]; then
-    # A publication that failed after moving the previous output aside left
-    # it here; the error already named the output, so keep the tree for the
-    # user rather than deleting the only copy.
-    printf 'valise: previous output kept at %s\n' "$_publish_previous/tree" >&2
-    _publish_previous=""
-  fi
-  if [ -n "${_dev_tmp:-}" ]; then
-    remove_tree "$_dev_tmp" || _cleanup_failed=1
-    _dev_tmp=""
-  fi
-  if [ -n "$_stage" ]; then
-    remove_tree "$_stage" || _cleanup_failed=1
-    _stage=""
-  fi
-  if [ -n "$_hook_tmp" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_hook_tmp" 2>/dev/null || :
-    if [ -e "$_hook_tmp" ] || [ -L "$_hook_tmp" ]; then _cleanup_failed=1; fi
-    _hook_tmp=""
-  fi
-  for _release_tmp in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}" "${_prev_tmp:-}" "${_dry_tmp:-}" \
-    "${_un_tmp:-}" "${_gui_stage:-}" "${_rii_tmp:-}" "${_ra_reconcile_err:-}"; do
-    [ -n "$_release_tmp" ] || continue
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_release_tmp" 2>/dev/null || :
-    if [ -e "$_release_tmp" ] || [ -L "$_release_tmp" ]; then _cleanup_failed=1; fi
+  _release_signals_before=$_signals_deferred
+  _signals_deferred=1
+  _release_rm_path=$(trap '' INT TERM; trusted_utility_path rm 2>/dev/null || :)
+  _release_rmdir_path=$(trap '' INT TERM; trusted_utility_path rmdir 2>/dev/null || :)
+  for _release_tree in "${_publish_tmp:-}" "${_dev_tmp:-}" "${_stage:-}"; do
+    [ -n "$_release_tree" ] || continue
+    if ! run_ignoring_int_term remove_tree "$_release_tree"; then
+      printf 'valise: error: temporary directory preserved at %s\n' "$_release_tree" >&2
+      _cleanup_failed=1
+    fi
   done
-  _rc_tmp=""
-  _rc_stub=""
-  _rc_pub=""
-  _prev_tmp=""
-  _dry_tmp=""
-  _un_tmp=""
-  _gui_stage=""
-  _rii_tmp=""
-  _ra_reconcile_err=""
-  if [ -n "$_mm_tmp" ]; then
-    [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$_mm_tmp" 2>/dev/null || :
-    if [ -e "$_mm_tmp" ] || [ -L "$_mm_tmp" ]; then _cleanup_failed=1; fi
-    _mm_tmp=""
+  _publish_tmp= _dev_tmp= _stage=
+  if [ -n "${_publish_previous:-}" ]; then
+    # Before the predecessor rename this is only an empty allocation. Keep a
+    # real predecessor, but clean an aside interrupted before it held one.
+    if [ -e "$_publish_previous/tree" ] || [ -L "$_publish_previous/tree" ]; then
+      printf 'valise: previous output kept at %s\n' "$_publish_previous/tree" >&2
+    elif ! run_ignoring_int_term remove_tree "$_publish_previous"; then
+      printf 'valise: error: temporary directory preserved at %s\n' "$_publish_previous" >&2
+      _cleanup_failed=1
+    fi
+    _publish_previous=
   fi
-  [ "$_lock_owned" -eq 1 ] || { [ "$_cleanup_failed" -eq 0 ]; return; }
-  [ -n "$_release_rm_path" ] && "$_release_rm_path" -f "$VALISE_LOCK_DIR/pid" 2>/dev/null || :
-  if [ -e "$VALISE_LOCK_DIR/pid" ] || [ -L "$VALISE_LOCK_DIR/pid" ]; then _cleanup_failed=1; fi
-  [ -n "$_release_rmdir_path" ] && "$_release_rmdir_path" "$VALISE_LOCK_DIR" 2>/dev/null || :
-  if [ -e "$VALISE_LOCK_DIR" ] || [ -L "$VALISE_LOCK_DIR" ]; then _cleanup_failed=1; fi
-  _lock_owned=0
+  for _release_tmp in "${_manifest_rows:-}" "${_manifest_parse:-}" "${_pm_tmp:-}" "${_rr_tmp:-}" \
+    "${_pi_tmp:-}" "${_eb_registry_tmp:-}" "${_doctor_cand_file:-}" "${_module_list_tmp:-}" \
+    "${_rg_tmp:-}" "${_hook_tmp:-}" "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}" \
+    "${_prev_tmp:-}" "${_dry_tmp:-}" "${_un_tmp:-}" "${_gui_stage:-}" "${_rii_tmp:-}" \
+    "${_transaction_restore_tmp:-}" "${_mm_tmp:-}" "${_prune_sort:-}" "${_prune_sorted:-}"; do
+    [ -n "$_release_tmp" ] || continue
+    [ -n "$_release_rm_path" ] && run_ignoring_int_term "$_release_rm_path" -f "$_release_tmp" 2>/dev/null || :
+    if [ -e "$_release_tmp" ] || [ -L "$_release_tmp" ]; then
+      printf 'valise: error: temporary file preserved at %s\n' "$_release_tmp" >&2
+      _cleanup_failed=1
+    fi
+  done
+  _manifest_rows= _manifest_parse= _pm_tmp= _rr_tmp= _pi_tmp= _eb_registry_tmp=
+  _doctor_cand_file= _module_list_tmp= _rg_tmp= _hook_tmp= _rc_tmp= _rc_stub= _rc_pub=
+  _prev_tmp= _dry_tmp= _un_tmp= _gui_stage= _rii_tmp= _transaction_restore_tmp= _mm_tmp= _prune_sort= _prune_sorted=
+  if [ "$_lock_owned" -eq 1 ]; then
+    [ -n "$_release_rm_path" ] && run_ignoring_int_term "$_release_rm_path" -f "$VALISE_LOCK_DIR/pid" 2>/dev/null || :
+    [ -n "$_release_rmdir_path" ] && run_ignoring_int_term "$_release_rmdir_path" "$VALISE_LOCK_DIR" 2>/dev/null || :
+    if [ -e "$VALISE_LOCK_DIR" ] || [ -L "$VALISE_LOCK_DIR" ]; then
+      printf 'valise: error: lock cleanup failed: %s\n' "$VALISE_LOCK_DIR" >&2
+      _cleanup_failed=1
+    fi
+    _lock_owned=0
+  fi
+  _signals_deferred=$_release_signals_before
+  if [ "$_exit_running" -eq 0 ] && [ -n "$_pending_signal" ]; then exit "$_pending_signal"; fi
   [ "$_cleanup_failed" -eq 0 ]
 }
 
+# Signal handlers only request an exit while a transaction or cleanup is in
+# progress. A second signal changes the final status but never re-enters restore.
 _handle_int() {
-  trap - INT
-  [ "${_activate_txn:-0}" -ne 1 ] || activate_txn_abort
-  [ "${_install_txn:-0}" -ne 1 ] || install_txn_abort
-  release_lock
-  exit 130
+  _pending_signal=130
+  [ "$_signals_deferred" -eq 1 ] || exit 130
 }
 
 _handle_term() {
-  trap - TERM
-  [ "${_activate_txn:-0}" -ne 1 ] || activate_txn_abort
-  [ "${_install_txn:-0}" -ne 1 ] || install_txn_abort
-  release_lock
-  exit 143
+  _pending_signal=143
+  [ "$_signals_deferred" -eq 1 ] || exit 143
 }
 
-trap '_exit_status=$?; [ "${_activate_txn:-0}" -ne 1 ] || activate_txn_abort; [ "${_install_txn:-0}" -ne 1 ] || install_txn_abort; release_lock; if [ "$_exit_status" -eq 0 ] && [ "$_cleanup_failed" -ne 0 ]; then _exit_status=1; fi; exit "$_exit_status"' EXIT
+_handle_exit() {
+  _exit_status=$1
+  [ "$_exit_running" -eq 0 ] || return
+  _exit_running=1
+  _signals_deferred=1
+  [ "${_transaction_active:-0}" -ne 1 ] || transaction_abort
+  [ -z "${_transaction_dir:-}" ] || transaction_cleanup || :
+  release_lock || _cleanup_failed=1
+  if [ "$_exit_status" -eq 0 ] && [ "$_cleanup_failed" -ne 0 ]; then _exit_status=1; fi
+  trap - EXIT
+  exit "${_pending_signal:-$_exit_status}"
+}
+
+trap '_handle_exit "$?"' EXIT
 trap '_handle_int' INT
 trap '_handle_term' TERM
 
 switch_active_link() {
+  [ "${_transaction_active:-0}" -eq 1 ] || die "active switch requires an activation transaction"
   _ln_path=$(trusted_utility_path ln) || die "no trusted ln utility available"
-  _readlink_path=$(trusted_utility_path readlink) || die "no trusted readlink utility available"
   if [ -e "$VALISE_ACTIVE_LINK" ] && [ ! -L "$VALISE_ACTIVE_LINK" ]; then
     die "active path exists and is not a symlink: $VALISE_ACTIVE_LINK"
   fi
-  # ln -sfn replaces the destination symlink. The -n flag prevents following a
-  # destination that is a symlink to a directory. If the swap fails after the
-  # old link was removed, restore the prior target so the pointer is never
-  # left missing.
-  _switch_old_target=
-  if [ -L "$VALISE_ACTIVE_LINK" ]; then
-    _switch_old_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
-  fi
-  if ! "$_ln_path" -sfn "$1" "$VALISE_ACTIVE_LINK"; then
-    if [ -n "$_switch_old_target" ]; then
-      "$_ln_path" -sfn "$_switch_old_target" "$VALISE_ACTIVE_LINK" 2>/dev/null || :
-    fi
-    die "failed to update active symlink"
-  fi
-  [ -L "$VALISE_ACTIVE_LINK" ] || die "active symlink was not created"
-  [ "$($_readlink_path "$VALISE_ACTIVE_LINK" 2>/dev/null)" = "$1" ] || die "active symlink target mismatch"
-  note_switch "$_switch_old_target" "$1"
-  unset _switch_old_target
+  # -n prevents following a symlink to a directory. The transaction already
+  # owns the exact outgoing target, so every failure uses the central restore
+  # path rather than a separate, incomplete link-only rollback here.
+  "$_ln_path" -sfn "$1" "$VALISE_ACTIVE_LINK" || die "failed to update active symlink"
+  _switch_target=$(readlink_target "$VALISE_ACTIVE_LINK" && printf '.') || die "cannot verify active symlink"
+  _switch_target=${_switch_target%.}
+  _switch_nl='
+'
+  _switch_target=${_switch_target%"$_switch_nl"}
+  [ -L "$VALISE_ACTIVE_LINK" ] && [ "$_switch_target" = "$1" ] || die "active symlink target mismatch"
+  note_switch "$_transaction_old_target" "$1"
+  unset _switch_target _switch_nl
 }
 
 source_path_is_physical() {
@@ -277,12 +275,32 @@ validate_manifest() {
   ' "$1"
 }
 
+# Validate a template's parent before creating anything, and validate the
+# returned pathname's parent again afterward. A rejected relative or escaping
+# template must not create an untracked file before failing validation.
+temp_parent_is_safe() {
+  case $1 in /*) ;; *) return 1 ;; esac
+  case $2 in /*) ;; *) return 1 ;; esac
+  _tps_parent=${1%/*}
+  [ -n "$_tps_parent" ] || _tps_parent=/
+  _tps_root=$(cd -P "$2" 2>/dev/null && pwd -P && printf '.') || return 1
+  _tps_dir=$(cd -P "$_tps_parent" 2>/dev/null && pwd -P && printf '.') || return 1
+  _tps_nl='
+'
+  _tps_root=${_tps_root%.}
+  _tps_root=${_tps_root%"$_tps_nl"}
+  _tps_dir=${_tps_dir%.}
+  _tps_dir=${_tps_dir%"$_tps_nl"}
+  case ${_tps_dir%/}/ in
+    "${_tps_root%/}/"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 temp_path_is_safe() {
   _temp_candidate=$1
   _temp_kind=$2
   _temp_root=${3:-${TMPDIR:-/tmp}}
-  case "$_temp_root" in /*) ;; *) return 1 ;; esac
-  case "$_temp_candidate" in /*) ;; *) return 1 ;; esac
   [ -e "$_temp_candidate" ] || return 1
   [ ! -L "$_temp_candidate" ] || return 1
   case "$_temp_kind" in
@@ -290,21 +308,15 @@ temp_path_is_safe() {
     dir) [ -d "$_temp_candidate" ] || return 1 ;;
     *) return 1 ;;
   esac
-  _temp_root_canonical=$(cd "$_temp_root" 2>/dev/null && pwd -P) || return 1
-  _temp_parent=${_temp_candidate%/*}
-  [ "$_temp_parent" != "$_temp_candidate" ] || _temp_parent=/
-  _temp_parent_canonical=$(cd "$_temp_parent" 2>/dev/null && pwd -P) || return 1
-  case "$_temp_parent_canonical/" in
-    "$_temp_root_canonical/"*) ;;
-    *) return 1 ;;
-  esac
-  return 0
+  temp_parent_is_safe "$_temp_candidate" "$_temp_root"
 }
 
 trusted_mktemp_at() {
   _temp_root=$1
   _temp_kind=$2
   _temp_template=$3
+  case $_temp_kind in file|dir) ;; *) return 1 ;; esac
+  temp_parent_is_safe "$_temp_template" "$_temp_root" || return 1
   _mktemp_path=$(trusted_utility_path mktemp) || return 1
   case "$_temp_kind" in
     file) _temp_candidate=$("$_mktemp_path" "$_temp_template") || return 1 ;;
@@ -317,6 +329,33 @@ trusted_mktemp_at() {
 
 trusted_mktemp() {
   trusted_mktemp_at "${TMPDIR:-/tmp}" "$@"
+}
+
+# trusted_mktemp_assign <internal-var> <file|dir> <template> [allowed-root]
+# Allocate and register the result in the owning shell before honoring a
+# pending signal. The destination must already belong to that shell's EXIT
+# cleanup. Protect the entire command substitution: protecting only mktemp
+# still lets its enclosing shell die before it prints the allocated pathname.
+trusted_mktemp_assign() {
+  case ${1:-} in
+    ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*|_tmac_*) return 1 ;;
+  esac
+  _tmac_name=$1
+  _tmac_signals_before=$_signals_deferred
+  _signals_deferred=1
+  _tmac_status=0
+  _tmac_value=$(
+    trap - EXIT
+    trap '' INT TERM
+    trusted_mktemp_at "${4:-${TMPDIR:-/tmp}}" "$2" "$3"
+  ) || _tmac_status=$?
+  # Only the validated variable name becomes shell syntax. The pathname is
+  # expanded from a literal variable reference in an assignment, never eval'd.
+  eval "$_tmac_name=\$_tmac_value"
+  _signals_deferred=$_tmac_signals_before
+  unset _tmac_name _tmac_value _tmac_signals_before
+  if [ "$_signals_deferred" -eq 0 ] && [ -n "$_pending_signal" ]; then exit "$_pending_signal"; fi
+  return "$_tmac_status"
 }
 
 prepare_manifest_rows() {
@@ -333,7 +372,7 @@ prepare_manifest_rows() {
   # publication. Parsing is performed from a second file that only adds a
   # final newline, so an unterminated source row is still consumed by POSIX
   # read without changing the bytes whose digest defines the release.
-  _manifest_rows=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-manifest.XXXXXX") || return 1
+  trusted_mktemp_assign _manifest_rows file "${TMPDIR:-/tmp}/valise-manifest.XXXXXX" || return 1
   _cat_path=$(trusted_utility_path cat) || {
     "$_cleanup_rm_path" -f "$_manifest_rows" 2>/dev/null || :
     _manifest_rows=""
@@ -344,7 +383,7 @@ prepare_manifest_rows() {
     _manifest_rows=""
     return 1
   }
-  _manifest_parse=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-manifest-parse.XXXXXX") || {
+  trusted_mktemp_assign _manifest_parse file "${TMPDIR:-/tmp}/valise-manifest-parse.XXXXXX" || {
     "$_cleanup_rm_path" -f "$_manifest_rows" 2>/dev/null || :
     _manifest_rows=""
     return 1
@@ -589,7 +628,7 @@ cmd_release() {
       _prune_active=$_prune_active_id
       # Collect the candidate releases with their modification times. The
       # active release is excluded here and kept unconditionally below.
-      _prune_sort=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-prune.XXXXXX") ||
+      trusted_mktemp_assign _prune_sort file "${TMPDIR:-/tmp}/valise-prune.XXXXXX" ||
         die "cannot create prune staging file"
       for _prune_rel in "$VALISE_RELEASES_DIR"/*/; do
         [ -d "$_prune_rel" ] || continue
@@ -601,7 +640,7 @@ cmd_release() {
         printf '%s\t%s\n' "$_prune_mtime" "$_prune_name" >>"$_prune_sort"
       done
       _prune_sort_path=$(trusted_utility_path sort) || die "no trusted sort utility available"
-      _prune_sorted=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-prune-sorted.XXXXXX") ||
+      trusted_mktemp_assign _prune_sorted file "${TMPDIR:-/tmp}/valise-prune-sorted.XXXXXX" ||
         die "cannot create prune ordering file"
       # Newest first; equal timestamps fall back to the release name so the
       # ordering is deterministic.
@@ -685,6 +724,10 @@ cmd_install() {
     esac
   done
 
+  # Manifest and bridge staging allocations also need signal-safe assignment
+  # bookkeeping, before transaction_begin has an active state to restore.
+  _signals_deferred=1
+
   _manifest_source=$(locate_manifest) ||
     die "cannot find manifest.tsv in the current directory (run valise install from a release tree built by valise build)"
   _manifest_root=$(cd "$(path_parent "$_manifest_source")" && pwd -P) || die "cannot resolve manifest source root"
@@ -722,6 +765,7 @@ cmd_install() {
   _target_dir="$VALISE_RELEASES_DIR/$_release_id"
 
   acquire_lock
+  transaction_preflight
   _mkdir_path=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
   _chmod_path=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
   "$_mkdir_path" -p "$VALISE_XDG_CONFIG" "$VALISE_XDG_STATE" || die "cannot create valise configuration directories"
@@ -750,7 +794,7 @@ cmd_install() {
     "$_mkdir_path" -p "$VALISE_RELEASES_DIR" "$VALISE_XDG_CONFIG" "$VALISE_XDG_STATE"
 
     # Stage into temp directory first
-    _stage=$(trusted_mktemp dir "${TMPDIR:-/tmp}/valise-install.XXXXXX") || die "cannot create staging directory"
+    trusted_mktemp_assign _stage dir "${TMPDIR:-/tmp}/valise-install.XXXXXX" || die "cannot create staging directory"
     _cp_path=$(trusted_utility_path cp) || die "no trusted cp utility available"
     "$_cp_path" -p "$_manifest" "$_stage/.valise-manifest" || die "failed to stage release manifest"
     "$_chmod_path" 0444 "$_stage/.valise-manifest" || die "failed to seal release manifest"
@@ -791,6 +835,7 @@ cmd_install() {
       "$_mkdir_path" -p "$_dest_parent"
       "$_cp_path" -p "$_src_path" "$_dest_path" || die "failed to copy $_src"
       "$_chmod_path" "$_imode" "$_dest_path" || die "failed to seal $_dest"
+      transaction_checkpoint
     done < "${_manifest_parse:-$_manifest_rows}"
 
     # Verify staged files against manifest digests
@@ -840,12 +885,14 @@ cmd_install() {
     _stage=""
     info "release $_release_id installed"
   fi
+  transaction_checkpoint
 
   # Prepare the GUI env bridge BEFORE the active link moves, so a capture or
   # render failure aborts with the previous release still active and its own
   # bridge intact, instead of switching to a release whose env the GUI session
   # will never see.
   _install_bridge=0
+  _gui_action=none
   if [ "$_install_integration" -eq 1 ] && [ -n "${HOME:-}" ] && [ "$(cli_os_name)" != unknown ]; then
     case "$(gui_env_mode "$_target_dir")" in
     off | systemd | launchd) _install_bridge=1 ;;
@@ -854,18 +901,16 @@ cmd_install() {
       gui_env_bridge_stage "$_target_dir" || die "cannot prepare the GUI environment bridge"
     fi
   fi
+  transaction_checkpoint
 
-  # Update active symlink atomically without clobbering a non-symlink path.
-  if [ ! -L "$VALISE_ACTIVE_LINK" ] || [ "$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null)" != "$_target_dir" ]; then
-    if [ -e "$VALISE_ACTIVE_LINK" ] && [ ! -L "$VALISE_ACTIVE_LINK" ]; then
-      die "active path exists and is not a symlink: $VALISE_ACTIVE_LINK"
-    fi
-    # From here a failure puts the previous active release back.
-    install_txn_begin
-    _install_txn=1
+  # Snapshot every state component before changing the link or integration,
+  # including repeat installs whose active target already matches.
+  transaction_begin install "$_install_integration" "$_install_bridge"
+  if [ "$_transaction_had_link" -eq 0 ] || [ "$_transaction_old_target" != "$_target_dir" ]; then
     switch_active_link "$_target_dir"
     info "active release set to $_release_id"
   fi
+  transaction_checkpoint
 
   # Deploy the Fish conf.d hook when Fish is available. The hook loads the
   # release's Fish runtime when it has one and does nothing otherwise.
@@ -882,7 +927,7 @@ cmd_install() {
     # Use the platform mktemp in the destination directory. Its exclusive
     # creation makes a pre-created predictable symlink unable to redirect the
     # shell redirection below into an attacker-selected victim.
-    _hook_tmp=$(trusted_mktemp_at "$_fish_conf_dir" file "$_fish_conf_dir/.valise-hook.XXXXXX") || die "cannot create Fish hook staging file"
+    trusted_mktemp_assign _hook_tmp file "$_fish_conf_dir/.valise-hook.XXXXXX" "$_fish_conf_dir" || die "cannot create Fish hook staging file"
     [ -f "$_hook_tmp" ] && [ ! -L "$_hook_tmp" ] || die "Fish hook staging path is unsafe"
     print_fish_integration >"$_hook_tmp" || die "cannot write Fish hook"
     _chmod_path=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
@@ -917,19 +962,25 @@ cmd_install() {
 
   if [ "$_install_integration" -eq 1 ]; then
     write_posix_integration
+    transaction_checkpoint
+    _transaction_commands_started=1
     reconcile_commands "$_target_dir"
+    transaction_checkpoint
     # The integration record is written BEFORE the bridge, so the bridge publish
     # is the LAST fallible step: a failure in it rolls the active link back and
     # then nothing further can leave the link and the bridge describing
     # different releases. The record only means "an integration exists", which
     # is true even if the bridge itself could not be published.
     record_integration_installed
+    transaction_checkpoint
     if [ "$_install_bridge" -eq 1 ]; then
+      _transaction_bridge_started=1
       gui_env_bridge_publish || die "cannot publish the GUI environment bridge"
+      transaction_checkpoint
     fi
   fi
 
-  _install_txn=0
+  transaction_commit
   release_lock
   info "installation complete"
   if [ "$_install_integration" -eq 1 ]; then
@@ -1005,7 +1056,7 @@ cmd_make_manifest() {
   _mm_links=$("$_mm_find_path" "$_mm_root" -type l -print) || die "cannot scan manifest tree: $_mm_root"
   [ -z "$_mm_links" ] || die "manifest tree must not contain symlinks: $_mm_root"
   _mm_list=$("$_mm_find_path" "$_mm_root" -type f -print) || die "cannot list manifest tree: $_mm_root"
-  _mm_tmp=$(trusted_mktemp_at "$_mm_out_dir" file "$_mm_out_dir/.valise-manifest.XXXXXX") || die "cannot stage manifest"
+  trusted_mktemp_assign _mm_tmp file "$_mm_out_dir/.valise-manifest.XXXXXX" "$_mm_out_dir" || die "cannot stage manifest"
   _mm_tab=$(printf '\t')
   _mm_nl='
 '

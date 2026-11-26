@@ -20,89 +20,53 @@ _rc_pub=""
 # printed the value would need a subshell, which strips trailing newlines.
 # See path_contains_dir below.
 
-# path_contains_dir <path-value> <dir>: succeed when <dir> names one entry of
-# <path-value>. Entries and the target are normalized, so a trailing slash or a
-# doubled separator (common in $TMPDIR-derived homes) is not a false gap. Both
-# the lexical and the physical (pwd -P) spelling of the target are compared, so
-# a symlinked command directory (macOS /tmp -> /private/tmp, a symlinked $HOME)
-# matches whether it is spelled through the link or the real path. Empty
-# entries denote the current directory; they are skipped when no caller CWD is
-# known (the directory valise runs in after -C is not the caller's, and a
-# deleted CWD must not abort unrelated commands). Relative entries are resolved
-# against VALISE_CALLER_CWD when set: bin/valise records the caller's physical
-# directory before -C changes it, so `.local/bin` means the caller's
-# `.local/bin`, and an empty entry means the caller's directory, not the
-# project's. The root directory joins with exactly one separator: a leading
-# "//" is implementation-defined in POSIX. Library-only callers (tests and
-# embedded use) leave it unset, and path_normalize then uses the current
-# directory as before.
-# Each path_normalize capture appends a sentinel (&& printf x): command
-# substitution strips trailing newlines, so without the sentinel an entry like
-# "/bin/dir<LF>" would normalize to "/bin/dir<LF>\n", lose its newlines in the
-# capture, and falsely match "/bin/dir".
-path_contains_dir() {
-  _pcd_path=$1
-  # An explicitly empty PATH value has no entries at all, even though the
-  # splitting loop below would otherwise see one empty (CWD) entry.
-  [ -n "$_pcd_path" ] || { unset _pcd_path; return 1; }
-  # Compare both spellings: path_normalize is lexical, but VALISE_CALLER_CWD is
-  # physical (pwd -P), so a symlinked invocation directory (macOS /tmp ->
-  # /private/tmp) would otherwise never match the command directory spelled
-  # through $HOME or VALISE_BIN_DIR. Compute the physical form of the target
-  # once; candidates are compared against both spellings of it.
-  # Sentinel captures (&& printf x) keep trailing newlines inside the compared
-  # values, since command substitution strips them and a newline-bearing entry
-  # must not match a newline-free directory. The physical lookup uses the bare
-  # argument (no sentinel, no newline), since `cd` needs a real path.
-  if ! _pcd_dir=$(path_normalize "$2" && printf x); then
-    unset _pcd_path _pcd_dir _pcd_dir_phys
-    return 1
-  fi
-  _pcd_dir_phys=$_pcd_dir
-  if _pcd_phys_dir=$(cd "$2" 2>/dev/null && pwd -P && printf x); then
-    _pcd_dir_phys=$_pcd_phys_dir
-  fi
-  unset _pcd_phys_dir
-  # Split the path value with POSIX parameter stripping rather than IFS word
-  # splitting: zsh does not split unquoted expansions by default, and `set --`
-  # here would also clobber the caller's positional parameters. A trailing
-  # colon is a final empty entry; it matches the caller's directory when known
-  # and is otherwise skipped.
-  _pcd_rem=${_pcd_path}:
+# path_contains_dir <path-value> <dir>: compare PATH entries with the actual
+# directory they reach. Resolve symlinks BEFORE "..": lexical normalization
+# would make /a/link/../bin match /a/bin even when link points outside /a.
+# Physical resolution also accepts distinct symlink aliases for the same dir.
+# If a directory cannot be searched, only an identical path spelling matches.
+#
+# Relative and empty entries use the invocation directory captured before -C.
+# Without that context they are skipped, never interpreted in the project.
+# An explicitly empty PATH has no entries for this diagnostic; ':' contains
+# two current-directory entries. Command lookup does not use this helper.
+#
+# Run in a subshell so cd, CDPATH, and scratch variables cannot alter the caller.
+# Sentinel captures preserve every trailing newline in directory names. PATH
+# is split with parameter expansion, without word splitting or glob expansion.
+path_contains_dir() (
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  _pcd_dir=$2
+  CDPATH=
+  # A relative target is a library caller's argument; protect it from cd's
+  # option parsing. The CLI passes its already absolute command directory.
+  case $_pcd_dir in /*) ;; *) _pcd_dir=./$_pcd_dir ;; esac
+  _pcd_dir_phys=$(cd -P "$_pcd_dir" 2>/dev/null && pwd -P && printf x) || _pcd_dir_phys=
+  _pcd_rem=$1:
   while [ -n "$_pcd_rem" ]; do
-    _pcd_entry=${_pcd_rem%%:*}
+    _pcd_candidate=${_pcd_rem%%:*}
     _pcd_rem=${_pcd_rem#*:}
-    _pcd_candidate=$_pcd_entry
-    case "$_pcd_candidate" in
-    /*) : ;;
-    *)
-      # An empty entry denotes the caller's current directory when known.
-      # Without a known caller CWD (library/embedded use, or a deleted
-      # directory at startup) the entry is skipped: the directory valise runs
-      # in after -C is not the caller's.
-      if [ -n "${VALISE_CALLER_CWD:-}" ] && [ "${_valise_cwd_unavailable:-0}" -eq 0 ]; then
+    case $_pcd_candidate in
+      /*) ;;
+      *)
+        [ -n "${VALISE_CALLER_CWD:-}" ] &&
+          [ "${_valise_cwd_unavailable:-0}" = 0 ] || continue
         if [ -n "$_pcd_candidate" ]; then
           _pcd_candidate=${VALISE_CALLER_CWD%/}/$_pcd_candidate
         else
           _pcd_candidate=$VALISE_CALLER_CWD
         fi
-      else
-        continue
-      fi
-      ;;
+        ;;
     esac
-    if _pcd_norm=$(path_normalize "$_pcd_candidate" && printf x) &&
-      { [ "$_pcd_norm" = "$_pcd_dir" ] || [ "$_pcd_norm" = "$_pcd_dir_phys" ]; }; then
-      _pcd_norm=${_pcd_norm%x}
-      _pcd_dir=${_pcd_dir%x}
-      _pcd_dir_phys=${_pcd_dir_phys%x}
-      unset _pcd_path _pcd_dir _pcd_dir_phys _pcd_rem _pcd_entry _pcd_candidate _pcd_norm
+    [ "$_pcd_candidate" != "$_pcd_dir" ] || return 0
+    if [ -n "$_pcd_dir_phys" ] &&
+      _pcd_phys=$(cd -P "$_pcd_candidate" 2>/dev/null && pwd -P && printf x) &&
+      [ "$_pcd_phys" = "$_pcd_dir_phys" ]; then
       return 0
     fi
   done
-  unset _pcd_path _pcd_dir _pcd_dir_phys _pcd_rem _pcd_entry _pcd_candidate _pcd_norm
   return 1
-}
+)
 
 # commands_bin_dir: the directory stubs are written to.
 commands_bin_dir() {
@@ -122,20 +86,6 @@ commands_stub() {
     '# valise command stub; managed by valise; do not edit.' \
     "exec $_cs_target \"\$@\""
   unset _cs_target
-}
-
-# commands_stub_digest <name>: print the SHA-256 of the stub for one command.
-commands_stub_digest() {
-  _csd_tmp=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-stub.XXXXXX") || return 1
-  if commands_stub "$1" >"$_csd_tmp"; then
-    file_sha256 "$_csd_tmp"
-    _csd_status=$?
-  else
-    _csd_status=1
-  fi
-  _csd_rm=$(trusted_utility_path rm) || return 1
-  "$_csd_rm" -f "$_csd_tmp" || _csd_status=1
-  return "$_csd_status"
 }
 
 # commands_file_is <path> <sha256>: succeed when path is a regular file, not a
@@ -158,15 +108,35 @@ command_name_valid() {
 # release_commands <release-dir>: print the commands a release publishes.
 # Fails, naming the entry, when an installed release lists a name the build
 # would have rejected, so no caller ever joins such a name to a path. A
-# valise-release.conf that exists but cannot be read is a hard failure, not an
-# empty list: callers that treat "zero commands" as "remove every owned stub"
-# (rollback) must never do so because the manifest was unreadable.
+# missing optional commands key means zero commands. An unreadable or malformed
+# configuration is a hard failure, never an empty command list.
 release_commands() {
-  if [ -f "$1/valise-release.conf" ] && [ ! -r "$1/valise-release.conf" ]; then
+  if [ ! -f "$1/valise-release.conf" ] || [ -L "$1/valise-release.conf" ] ||
+    [ ! -r "$1/valise-release.conf" ]; then
     printf 'valise: error: cannot read the release configuration: %s/valise-release.conf\n' "$1" >&2
     return 1
   fi
-  _rcs_list=$(release_conf_value "$1" commands 2>/dev/null || :)
+  _rcs_awk=$(trusted_utility_path awk) || return 1
+  # Read the complete file: release_conf_value deliberately returns nonzero
+  # for an absent key and stops at the first match, so it cannot distinguish
+  # this optional key from an I/O failure or validate later records.
+  if ! _rcs_list=$(LC_ALL=C "$_rcs_awk" '
+    /^[[:space:]]*(#|$)/ { next }
+    /^[A-Za-z_][A-Za-z0-9_]*=/ {
+      key = $0; sub(/=.*/, "", key)
+      if (seen[key]++) {
+        printf "valise: error: duplicate key in release configuration: %s\n", key > "/dev/stderr"
+        bad = 1
+      }
+      if (key == "commands") commands = substr($0, length(key) + 2)
+      next
+    }
+    { printf "valise: error: malformed release configuration record at line %d\n", NR > "/dev/stderr"; bad = 1 }
+    END { if (bad) exit 1; print commands }
+  ' "$1/valise-release.conf"); then
+    printf 'valise: error: cannot read commands from the release configuration: %s/valise-release.conf\n' "$1" >&2
+    return 1
+  fi
   _rcs_seen=" "
   _rcs_noglob=0
   case $- in *f*) _rcs_noglob=1 ;; esac
@@ -186,12 +156,164 @@ release_commands() {
   [ "$_rcs_noglob" -eq 1 ] || set +f
   _rcs_seen=${_rcs_seen# }
   printf '%s\n' "${_rcs_seen% }"
-  unset _rcs_list _rcs_seen _rcs_noglob _rcs_name
+  unset _rcs_awk _rcs_list _rcs_seen _rcs_noglob _rcs_name
+}
+
+# The ledger is an ownership record, never an indirection. Validate both its
+# type and its complete contents before using any row as a deletion authority.
+commands_ledger_validate() {
+  _clv_path=$1
+  [ -e "$_clv_path" ] || [ -L "$_clv_path" ] || return 0
+  if [ -L "$_clv_path" ]; then
+    printf 'valise: error: command ledger must not be a symlink: %s\n' "$_clv_path" >&2
+    return 1
+  fi
+  if [ ! -f "$_clv_path" ] || [ ! -r "$_clv_path" ]; then
+    printf 'valise: error: command ledger must be a readable regular file: %s\n' "$_clv_path" >&2
+    return 1
+  fi
+  _clv_awk=$(trusted_utility_path awk) || return 1
+  LC_ALL=C "$_clv_awk" -F '\t' '
+    NF != 3 || $1 !~ /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/ || $2 !~ /^\// ||
+    length($3) != 64 || $3 ~ /[^0-9a-fA-F]/ || seen[$2]++ { bad = 1 }
+    END { exit bad ? 1 : 0 }
+  ' "$_clv_path" || {
+    printf 'valise: error: cannot read a valid command ledger: %s\n' "$_clv_path" >&2
+    return 1
+  }
+}
+
+# Portable GNU/BSD stat spelling for identity, used only to distinguish a hard
+# link we published from a colliding file another process created meanwhile.
+commands_file_identity() {
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  _cfi_stat=$(trusted_utility_path stat) || return 1
+  _cfi_value=$("$_cfi_stat" -c '%d:%i' "$1" 2>/dev/null || :)
+  case "$_cfi_value" in
+    ''|*[!0-9:]*|:*|*:|*:*:*) _cfi_value=$("$_cfi_stat" -f '%d:%i' "$1" 2>/dev/null || :) ;;
+  esac
+  case "$_cfi_value" in ''|*[!0-9:]*|:*|*:|*:*:*) return 1 ;; esac
+  case "$_cfi_value" in *:*) printf '%s\n' "$_cfi_value" ;; *) return 1 ;; esac
+}
+
+commands_same_file() {
+  _csf_a=$(commands_file_identity "$1") && _csf_b=$(commands_file_identity "$2") &&
+    [ "$_csf_a" = "$_csf_b" ]
+}
+
+# Called before any active/stub/bridge mutation. Keep only verified owned stub
+# copies; user edits present before the transaction remain outside our ownership.
+commands_txn_snapshot() {
+  _cts_ledger=$(commands_ledger_path)
+  : >"$_transaction_dir/stubs.tsv" || die "cannot snapshot command ownership"
+  : >"$_transaction_dir/published.tsv" || die "cannot create command publication journal"
+  _cts_number=0
+  if [ -f "$_cts_ledger" ]; then
+    _transaction_ledger_had=1
+    _transaction_ledger_mode=$(file_mode "$_cts_ledger") || die "cannot read command ledger mode"
+    "$_tx_cat" "$_cts_ledger" >"$_transaction_dir/commands.tsv" || die "cannot snapshot command ledger"
+    commands_ledger_validate "$_transaction_dir/commands.tsv" || die "cannot snapshot valid command ledger"
+    _cts_tab=$(printf '\t')
+    while IFS="$_cts_tab" read -r _cts_name _cts_path _cts_sha || [ -n "${_cts_name:-}" ]; do
+      [ -n "$_cts_name" ] || continue
+      commands_file_is "$_cts_path" "$_cts_sha" || continue
+      _cts_number=$((_cts_number + 1))
+      _cts_copy=stub-$_cts_number
+      _cts_mode=$(file_mode "$_cts_path") || die "cannot read command stub mode: $_cts_path"
+      "$_tx_cat" "$_cts_path" >"$_transaction_dir/$_cts_copy" || die "cannot snapshot command stub: $_cts_path"
+      [ "$(file_sha256 "$_transaction_dir/$_cts_copy")" = "$_cts_sha" ] ||
+        die "command stub changed while being snapshotted: $_cts_path"
+      printf '%s\t%s\t%s\t%s\n' "$_cts_path" "$_cts_copy" "$_cts_mode" "$_cts_sha" >>"$_transaction_dir/stubs.tsv" ||
+        die "cannot snapshot command ownership"
+    done <"$_transaction_dir/commands.tsv"
+  fi
+  unset _cts_ledger _cts_number _cts_tab _cts_name _cts_path _cts_sha _cts_copy _cts_mode
+}
+
+# Keep the staging inode until the transaction ends. The journal precedes ln;
+# rollback can prove whether ln published this inode even when a signal changed
+# the utility's observed status, without adopting an identical foreign file.
+commands_txn_record_publication() {
+  [ "${_transaction_active:-0}" -eq 1 ] || return 0
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$_transaction_dir/published.tsv" ||
+    die "cannot record command publication"
+}
+
+commands_txn_restore() {
+  _ctr_status=0
+  _ctr_tab=$(printf '\t')
+  : >"$_transaction_dir/changed-stubs" || return 1
+  while IFS="$_ctr_tab" read -r _ctr_path _ctr_sha _ctr_stage; do
+    [ -n "$_ctr_path" ] || continue
+    if commands_same_file "$_ctr_stage" "$_ctr_path"; then
+      if commands_file_is "$_ctr_path" "$_ctr_sha"; then
+        "$_tx_rm" -f "$_ctr_path" 2>/dev/null || :
+        if [ -e "$_ctr_path" ] || [ -L "$_ctr_path" ]; then
+          printf 'valise: error: cannot remove newly published command stub: %s\n' "$_ctr_path" >&2
+          _ctr_status=1
+        fi
+      else
+        printf 'valise: warning: command stub changed during activation; leaving it: %s\n' "$_ctr_path" >&2
+      fi
+    fi
+  done <"$_transaction_dir/published.tsv" || _ctr_status=1
+  while IFS="$_ctr_tab" read -r _ctr_path _ctr_copy _ctr_mode _ctr_sha; do
+    [ -n "$_ctr_path" ] || continue
+    if [ -e "$_ctr_path" ] || [ -L "$_ctr_path" ]; then
+      if ! commands_file_is "$_ctr_path" "$_ctr_sha"; then
+        printf 'valise: warning: command stub changed during activation; leaving it: %s\n' "$_ctr_path" >&2
+        printf '%s\n' "$_ctr_path" >>"$_transaction_dir/changed-stubs" || _ctr_status=1
+        continue
+      fi
+    elif ! transaction_restore_file "$_transaction_dir/$_ctr_copy" "$_ctr_path" "$_ctr_mode" create; then
+      printf 'valise: error: cannot restore command stub: %s\n' "$_ctr_path" >&2
+      _ctr_status=1
+    fi
+  done <"$_transaction_dir/stubs.tsv" || _ctr_status=1
+  _ctr_ledger=$(commands_ledger_path)
+  if [ -L "$_ctr_ledger" ] || { [ -e "$_ctr_ledger" ] && [ ! -f "$_ctr_ledger" ]; }; then
+    printf 'valise: error: command ledger changed type during activation; leaving it: %s\n' "$_ctr_ledger" >&2
+    _ctr_status=1
+  elif [ "$_transaction_ledger_had" -eq 1 ]; then
+    _ctr_source=$_transaction_dir/commands.tsv
+    if [ -s "$_transaction_dir/changed-stubs" ]; then
+      _ctr_awk=$(trusted_utility_path awk) || return 1
+      "$_ctr_awk" -F '\t' 'FILENAME == ARGV[1] { changed[$0] = 1; next } !($2 in changed)' \
+        "$_transaction_dir/changed-stubs" "$_ctr_source" >"$_transaction_dir/restored-commands.tsv" || return 1
+      _ctr_source=$_transaction_dir/restored-commands.tsv
+    fi
+    if ! transaction_restore_file "$_ctr_source" "$_ctr_ledger" "$_transaction_ledger_mode"; then
+      printf 'valise: error: cannot restore command ledger: %s\n' "$_ctr_ledger" >&2
+      _ctr_status=1
+    fi
+  else
+    "$_tx_rm" -f "$_ctr_ledger" 2>/dev/null || :
+    if [ -e "$_ctr_ledger" ]; then
+      printf 'valise: error: cannot remove newly created command ledger: %s\n' "$_ctr_ledger" >&2
+      _ctr_status=1
+    fi
+  fi
+  return "$_ctr_status"
+}
+
+commands_txn_discard() {
+  [ -f "$_transaction_dir/published.tsv" ] || return 0
+  _ctd_status=0
+  _ctd_tab=$(printf '\t')
+  while IFS="$_ctd_tab" read -r _ctd_path _ctd_sha _ctd_stage; do
+    [ -n "$_ctd_stage" ] || continue
+    "$_tx_rm" -f "$_ctd_stage" 2>/dev/null || :
+    if [ -e "$_ctd_stage" ] || [ -L "$_ctd_stage" ]; then
+      printf 'valise: error: command staging file preserved at %s\n' "$_ctd_stage" >&2
+      _ctd_status=1
+    fi
+  done <"$_transaction_dir/published.tsv" || _ctd_status=1
+  return "$_ctd_status"
 }
 
 # commands_publish_ledger: publish the staged ledger rows as the ledger.
 commands_publish_ledger() {
-  _rc_pub=$(trusted_mktemp_at "$VALISE_XDG_STATE" file "$VALISE_XDG_STATE/.commands.XXXXXX") ||
+  trusted_mktemp_assign _rc_pub file "$VALISE_XDG_STATE/.commands.XXXXXX" "$VALISE_XDG_STATE" ||
     die "cannot create command ledger staging file"
   "$_rcm_cat" "$_rc_tmp" >"$_rc_pub" || die "cannot write command ledger"
   "$_rcm_chmod" 0644 "$_rc_pub" || die "cannot set command ledger mode"
@@ -206,6 +328,7 @@ commands_publish_ledger() {
 # which is left alone and reported. Call with the store lock held.
 reconcile_commands() {
   _rcm_release=$1
+  commands_ledger_validate "$(commands_ledger_path)" || die "cannot read command ledger"
   _rcm_want=$(release_commands "$_rcm_release") || die "refusing to publish the commands of $_rcm_release"
   if ! _rcm_bin=$(commands_bin_dir); then
     [ -z "$_rcm_want" ] || info "warning: HOME is not set; no commands were published"
@@ -223,7 +346,7 @@ reconcile_commands() {
   _rcm_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   [ ! -L "$_rcm_ledger" ] || die "command ledger must not be a symlink: $_rcm_ledger"
   "$_rcm_mkdir" -p "$VALISE_XDG_STATE" || die "cannot create state directory: $VALISE_XDG_STATE"
-  _rc_tmp=$(trusted_mktemp_at "$VALISE_XDG_STATE" file "$VALISE_XDG_STATE/.commands.XXXXXX") ||
+  trusted_mktemp_assign _rc_tmp file "$VALISE_XDG_STATE/.commands.XXXXXX" "$VALISE_XDG_STATE" ||
     die "cannot create command ledger staging file"
   _rcm_owned=
 
@@ -236,7 +359,7 @@ reconcile_commands() {
     die "command ledger is not a regular file: $_rcm_ledger"
   fi
   if [ -f "$_rcm_ledger" ]; then
-    while IFS="$_rcm_tab" read -r _rcm_name _rcm_path _rcm_sha; do
+    while IFS="$_rcm_tab" read -r _rcm_name _rcm_path _rcm_sha || [ -n "${_rcm_name:-}" ]; do
       [ -n "$_rcm_name" ] || continue
       case " $_rcm_want " in
       *" $_rcm_name "*) _rcm_keep=1 ;;
@@ -258,6 +381,7 @@ reconcile_commands() {
       else
         "$_rcm_rm" -f "$_rcm_path" || die "cannot remove command stub: $_rcm_path"
         info "removed command: $_rcm_path"
+        transaction_checkpoint
       fi
     done <"$_rcm_ledger"
   fi
@@ -271,7 +395,7 @@ reconcile_commands() {
       continue
     fi
     "$_rcm_mkdir" -p "$_rcm_bin" || die "cannot create command directory: $_rcm_bin"
-    _rc_stub=$(trusted_mktemp_at "$_rcm_bin" file "$_rcm_bin/.valise-stub.XXXXXX") ||
+    trusted_mktemp_assign _rc_stub file "$_rcm_bin/.valise-stub.XXXXXX" "$_rcm_bin" ||
       die "cannot create command stub staging file"
     commands_stub "$_rcm_name" >"$_rc_stub" || die "cannot write command stub: $_rcm_name"
     "$_rcm_chmod" 0755 "$_rc_stub" || die "cannot set command stub mode"
@@ -282,21 +406,30 @@ reconcile_commands() {
     printf '%s\t%s\t%s\n' "$_rcm_name" "$_rcm_path" "$_rcm_sha" >>"$_rc_tmp" ||
       die "cannot write command ledger"
     commands_publish_ledger
+    _rcm_stage=$_rc_stub
+    commands_txn_record_publication "$_rcm_path" "$_rcm_sha" "$_rcm_stage"
+    # From here the journal owns this inode, including a failed recovery that
+    # must preserve it. Generic EXIT scratch cleanup must not unlink it.
+    [ "${_transaction_active:-0}" -ne 1 ] || _rc_stub=
     # A hard link fails when the name exists, so a file created since the
     # check above is never replaced.
-    if "$_rcm_ln" "$_rc_stub" "$_rcm_path" 2>/dev/null; then
+    if "$_rcm_ln" "$_rcm_stage" "$_rcm_path" 2>/dev/null || commands_same_file "$_rcm_stage" "$_rcm_path"; then
       info "published command: $_rcm_path"
     else
       info "warning: command $_rcm_name not published: cannot create $_rcm_path"
-      _rc_pub=$(trusted_mktemp_at "$VALISE_XDG_STATE" file "$VALISE_XDG_STATE/.commands.XXXXXX") ||
+      trusted_mktemp_assign _rc_pub file "$VALISE_XDG_STATE/.commands.XXXXXX" "$VALISE_XDG_STATE" ||
         die "cannot create command ledger staging file"
-      "$_rcm_awk" -F '\t' -v n="$_rcm_name" -v p="$_rcm_path" '!($1 == n && $2 == p)' "$_rc_tmp" >"$_rc_pub" &&
+      VALISE_LEDGER_NAME="$_rcm_name" VALISE_LEDGER_PATH="$_rcm_path" "$_rcm_awk" -F '\t' \
+        '!($1 == ENVIRON["VALISE_LEDGER_NAME"] && $2 == ENVIRON["VALISE_LEDGER_PATH"])' "$_rc_tmp" >"$_rc_pub" &&
         "$_rcm_mv" -f "$_rc_pub" "$_rc_tmp" || die "cannot write command ledger"
       _rc_pub=""
       commands_publish_ledger
     fi
-    "$_rcm_rm" -f "$_rc_stub" || die "cannot remove command stub staging file"
+    if [ "${_transaction_active:-0}" -eq 0 ]; then
+      "$_rcm_rm" -f "$_rcm_stage" || die "cannot remove command stub staging file"
+    fi
     _rc_stub=""
+    transaction_checkpoint
   done
 
   "$_rcm_chmod" 0644 "$_rc_tmp" || die "cannot set command ledger mode"
@@ -308,50 +441,7 @@ reconcile_commands() {
     fi
   fi
   unset _rcm_release _rcm_bin _rcm_ledger _rcm_want _rcm_tab _rcm_rm _rcm_mkdir _rcm_chmod _rcm_ln _rcm_mv \
-    _rcm_cat _rcm_awk _rcm_owned _rcm_name _rcm_path _rcm_sha _rcm_keep
-}
-
-# clear_owned_commands: remove every stub the ledger records that still has the
-# content valise wrote, then atomically rewrite the ledger as an EMPTY regular
-# 0644 file instead of unlinking it. The ledger's presence is the signal that
-# command integration is active (release_activate reconciles only when it
-# exists, and doctor reports "installed without integration" when it does not),
-# so rollback of a release switch must keep the file and only clear the stubs
-# this activation published. Call with the store lock held.
-clear_owned_commands() {
-  _coc_ledger=${1:-$(commands_ledger_path)}
-  [ -e "$_coc_ledger" ] || [ -L "$_coc_ledger" ] || return 0
-  # A symlinked or non-regular ledger is an error state, not an empty ledger:
-  # reading it would follow the link and deleting owned stubs based on it
-  # could remove files another path owns. Report and fail so the caller keeps
-  # the ledger untouched instead of silently wiping stubs.
-  if [ -L "$_coc_ledger" ]; then
-    die "command ledger must not be a symlink: $_coc_ledger"
-  fi
-  [ -f "$_coc_ledger" ] || die "command ledger is not a regular file: $_coc_ledger"
-  _coc_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
-  _coc_tab=$(printf '\t')
-  while IFS="$_coc_tab" read -r _coc_name _coc_path _coc_sha; do
-    [ -n "$_coc_name" ] || continue
-    [ -e "$_coc_path" ] || [ -L "$_coc_path" ] || continue
-    if commands_file_is "$_coc_path" "$_coc_sha"; then
-      "$_coc_rm" -f "$_coc_path" || die "cannot remove command stub: $_coc_path"
-      info "removed command: $_coc_path"
-    else
-      info "warning: command stub was changed outside valise; leaving it: $_coc_path"
-    fi
-  done <"$_coc_ledger"
-  _coc_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
-  _coc_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
-  _coc_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
-  _coc_cat=$(trusted_utility_path cat) || die "no trusted cat utility available"
-  "$_coc_mkdir" -p "$VALISE_XDG_STATE" || die "cannot create state directory: $VALISE_XDG_STATE"
-  _coc_tmp=$(trusted_mktemp_at "$VALISE_XDG_STATE" file "$VALISE_XDG_STATE/.commands.XXXXXX") ||
-    die "cannot create command ledger staging file"
-  : >"$_coc_tmp" || { "$_coc_rm" -f "$_coc_tmp" 2>/dev/null || :; die "cannot write command ledger"; }
-  "$_coc_chmod" 0644 "$_coc_tmp" || { "$_coc_rm" -f "$_coc_tmp" 2>/dev/null || :; die "cannot set command ledger mode"; }
-  "$_coc_mv" -f "$_coc_tmp" "$_coc_ledger" || { "$_coc_rm" -f "$_coc_tmp" 2>/dev/null || :; die "cannot publish command ledger"; }
-  unset _coc_ledger _coc_rm _coc_tab _coc_name _coc_path _coc_sha _coc_mkdir _coc_chmod _coc_mv _coc_cat _coc_tmp
+    _rcm_cat _rcm_awk _rcm_owned _rcm_name _rcm_path _rcm_sha _rcm_keep _rcm_stage
 }
 
 # remove_owned_commands: remove every stub the ledger records that still has
@@ -359,10 +449,11 @@ clear_owned_commands() {
 remove_owned_commands() {
   _roc_ledger=$(commands_ledger_path)
   [ -e "$_roc_ledger" ] || [ -L "$_roc_ledger" ] || return 0
+  commands_ledger_validate "$_roc_ledger" || die "cannot read command ledger"
   [ -f "$_roc_ledger" ] && [ ! -L "$_roc_ledger" ] || die "command ledger is not a regular file: $_roc_ledger"
   _roc_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
   _roc_tab=$(printf '\t')
-  while IFS="$_roc_tab" read -r _roc_name _roc_path _roc_sha; do
+  while IFS="$_roc_tab" read -r _roc_name _roc_path _roc_sha || [ -n "${_roc_name:-}" ]; do
     [ -n "$_roc_name" ] || continue
     [ -e "$_roc_path" ] || [ -L "$_roc_path" ] || continue
     if commands_file_is "$_roc_path" "$_roc_sha"; then
@@ -380,8 +471,14 @@ remove_owned_commands() {
 # Report the state of each command the release publishes. Prints doctor
 # lines; sets _status=1 when a published command cannot run.
 doctor_commands() {
+  _dc_ledger=$(commands_ledger_path)
+  if ! commands_ledger_validate "$_dc_ledger"; then
+    printf '  FAIL: invalid command ledger: %s\n' "$_dc_ledger"
+    _status=1
+    return 0
+  fi
   if ! _dc_want=$(release_commands "$1"); then
-    printf '  FAIL: the active release lists an invalid command name\n'
+    printf '  FAIL: cannot read valid command declarations from the active release\n'
     _status=1
     return 0
   fi
@@ -391,8 +488,7 @@ doctor_commands() {
     _status=1
     return 0
   }
-  _dc_ledger=$(commands_ledger_path)
-  if [ ! -f "$_dc_ledger" ] || [ -L "$_dc_ledger" ]; then
+  if [ ! -e "$_dc_ledger" ]; then
     printf '  info: release commands are not published (installed without integration): %s\n' "$_dc_want"
     unset _dc_want _dc_bin _dc_ledger
     return 0
@@ -400,7 +496,11 @@ doctor_commands() {
   _dc_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   for _dc_name in $_dc_want; do
     _dc_path="$_dc_bin/$_dc_name"
-    _dc_sha=$("$_dc_awk" -F '\t' -v n="$_dc_name" -v p="$_dc_path" '$1 == n && $2 == p { print $3; exit }' "$_dc_ledger")
+    # The path goes through the environment, not -v: an awk -v assignment is
+    # a string literal in the program text, so a command directory whose name
+    # contains a newline would be a syntax error ("newline in string").
+    _dc_sha=$(VALISE_LEDGER_NAME="$_dc_name" VALISE_LEDGER_PATH="$_dc_path" "$_dc_awk" -F '\t' \
+      '$1 == ENVIRON["VALISE_LEDGER_NAME"] && $2 == ENVIRON["VALISE_LEDGER_PATH"] { print $3; exit }' "$_dc_ledger")
     if [ -z "$_dc_sha" ]; then
       if [ -e "$_dc_path" ] || [ -L "$_dc_path" ]; then
         printf '  warn: command %s not published: %s exists and valise does not own it\n' "$_dc_name" "$_dc_path"

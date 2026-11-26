@@ -3,74 +3,112 @@
 # Copyright (c) 2026 Joseph Cumines
 # SPDX-License-Identifier: MIT
 # valise - user-facing CLI for the valise-sh shell profile engine.
-# Pure POSIX /bin/sh. Zero non-POSIX runtime dependencies.
+# POSIX /bin/sh syntax with the supported BSD/GNU utility interfaces.
 
 set -eu
 
 VALISE_VERSION="0.4.1"
 
-# The path this CLI was invoked by, made absolute before -C can change the
-# working directory. The Fish hook calls the CLI back through it, so a package
-# symlink stays the entry point across upgrades.
-case "$0" in
-  /*) _valise_cli_path=$0 ;;
-  *) _valise_cli_path="$(pwd -P)/$0" ;;
-esac
 # The caller's working directory must be captured before -C: relative PATH
 # entries are interpreted from where valise was invoked, not from the project
-# directory. Only PATH-gap diagnostics use it; command lookup still uses the
-# real PATH after -C.
+# directory. The same capture anchors a relative CLI entry path below;
+# command lookup still uses the real PATH after -C.
 # `unset` first: in POSIX sh an assignment to a variable that already carries
 # the export attribute keeps it, which would leak the value into child
 # processes (valise run/test/env). Capture with a sentinel so command
 # substitution cannot strip trailing newlines from the path, and record an
 # unavailable marker when the CWD is gone (deleted directory) so --help,
 # --version and -C still work and PATH diagnostics skip relative entries.
-unset VALISE_CALLER_CWD
-# Capture the caller's physical working directory with an explicit `cd .` so
-# a deleted CWD still resolves (the subshell can re-enter it), and strip the
-# single trailing newline that `pwd` prints: ${var%pattern} with an unquoted
-# newline would be a syntax error, and command substitution already removed
-# the newline, so only the `cd .` failure path needs the unavailable marker.
-if _valise_cwd=$(cd . 2>/dev/null && pwd -P); then
-  VALISE_CALLER_CWD=$_valise_cwd
-  unset _valise_cwd
+unset VALISE_CALLER_CWD _valise_cwd _valise_cwd_unavailable
+_valise_cwd_unavailable=0
+# The sentinel protects every pathname newline from command substitution.
+# After removing it, remove exactly the one newline printed by pwd. A failed
+# physical lookup (including an unlinked working directory) is not an empty
+# pathname and must not be resolved against the later -C directory.
+# `cd -P .` first: in a deleted directory the shell's cached getcwd fails, but
+# cd re-reads the inode and succeeds, printing "."; without it the capture
+# would wrongly report the CWD as unavailable and a relative caller PATH entry
+# would be rebound to -C's project directory. A "." result (or any non-absolute
+# result) means the directory is gone, so the unavailable marker still applies.
+if _valise_cwd=$(cd -P . 2>/dev/null && pwd -P 2>/dev/null && printf x); then
+  _valise_cwd=${_valise_cwd%x}
+  _valise_cwd=${_valise_cwd%?}
+  case $_valise_cwd in
+    /*) VALISE_CALLER_CWD=$_valise_cwd ;;
+    *) VALISE_CALLER_CWD=; _valise_cwd_unavailable=1 ;;
+  esac
 else
   VALISE_CALLER_CWD=
   _valise_cwd_unavailable=1
 fi
+unset _valise_cwd
 # Deliberately not exported: the CLI libraries are sourced into this shell, and
 # generated content, env capture, and child processes must not inherit this
 # diagnostic-only context.
 
+# Make the invocation path absolute from the same newline-preserving capture,
+# before -C can change directories. The Fish hook calls this entry point back,
+# so a package symlink must survive instead of resolving to one package version.
+case "$0" in
+  /*) _valise_cli_path=$0 ;;
+  *)
+    if [ "$_valise_cwd_unavailable" -ne 0 ]; then
+      printf 'valise: error: cannot resolve the invocation directory for %s\n' "$0" >&2
+      exit 1
+    fi
+    _valise_cli_path=${VALISE_CALLER_CWD%/}/$0
+    ;;
+esac
+
 # Locate the engine from this script's physical path, so package installs
 # that expose bin/valise through a symlink (bun, npm) still find ../lib. This
-# runs before any helper is loaded, so it uses only parameter expansion,
-# readlink, cd and pwd.
-_valise_self=$0
+# runs before trusted_utility_path is loaded; mirror its fixed readlink
+# candidates rather than running a caller-controlled PATH executable. Every
+# captured pathname keeps its trailing newlines, stripping only the one that
+# readlink or pwd prints. The invocation path above stays the original alias.
+_valise_self=$_valise_cli_path
+_valise_readlink=
 while [ -L "$_valise_self" ]; do
-  _valise_link=$(readlink "$_valise_self") || {
+  if [ -z "$_valise_readlink" ]; then
+    for _valise_candidate in /usr/bin/readlink /bin/readlink; do
+      if [ -x "$_valise_candidate" ]; then _valise_readlink=$_valise_candidate; break; fi
+    done
+    if [ -z "$_valise_readlink" ]; then
+      printf 'valise: error: no trusted readlink utility available to resolve %s\n' "$_valise_self" >&2
+      exit 1
+    fi
+  fi
+  _valise_link=$("$_valise_readlink" "$_valise_self" && printf x) || {
     printf 'valise: error: cannot resolve %s\n' "$_valise_self" >&2
     exit 1
   }
+  _valise_link=${_valise_link%x}
+  _valise_link=${_valise_link%?}
   case "$_valise_link" in
     /*) _valise_self=$_valise_link ;;
-    *)
-      case "$_valise_self" in
-        */*) _valise_self=${_valise_self%/*}/$_valise_link ;;
-        *) _valise_self=$_valise_link ;;
-      esac
-      ;;
+    *) _valise_self=${_valise_self%/*}/$_valise_link ;;
   esac
 done
 case "$_valise_self" in
   */*) _valise_self_dir=${_valise_self%/*} ;;
   *) _valise_self_dir=. ;;
 esac
-_valise_engine_bin=$(cd "${_valise_self_dir:-/}" && pwd -P) || {
+_valise_engine_bin=$(CDPATH= cd -P "${_valise_self_dir:-/}" && pwd -P && printf x) || {
   printf 'valise: error: cannot locate the valise engine from %s\n' "$0" >&2
   exit 1
 }
+_valise_engine_bin=${_valise_engine_bin%x}
+_valise_engine_bin=${_valise_engine_bin%?}
+# Engine and project roots feed line-oriented metadata interfaces. Reject an
+# unrepresentable physical engine path before sourcing any library, rather
+# than letting a later capture silently select a newline-free lookalike.
+case "$_valise_engine_bin" in
+  *'	'* | *'
+'*)
+    printf 'valise: error: physical engine path contains TAB or LF: %s\n' "$_valise_engine_bin" >&2
+    exit 1
+    ;;
+esac
 VALISE_CLI_DIR="${_valise_engine_bin%/}/../lib/cli"
 for _valise_part in usage common store fish-hook integration commands lifecycle devtools project; do
   if [ ! -f "$VALISE_CLI_DIR/$_valise_part.sh" ]; then
@@ -79,27 +117,32 @@ for _valise_part in usage common store fish-hook integration commands lifecycle 
   fi
   . "$VALISE_CLI_DIR/$_valise_part.sh"
 done
-unset _valise_part _valise_self _valise_self_dir _valise_link
+unset _valise_part _valise_self _valise_self_dir _valise_link _valise_readlink _valise_candidate
 # _valise_cwd_unavailable is read by lib/cli/commands.sh (path_contains_dir)
 # to skip relative/empty caller PATH entries when the CWD is gone; keep it.
 
 # --- Main dispatch ---
 
 # -C <dir> runs the command as if valise had been started in dir.
+# Relative names cannot be cd options or CDPATH searches. Scope the CDPATH
+# override to cd so child commands still inherit the caller's original value.
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -C)
       [ "$#" -ge 2 ] && [ -n "$2" ] || die "-C needs a directory"
-      cd "$2" 2>/dev/null || die "cannot change to directory: $2"
+      case "$2" in /*) _valise_chdir=$2 ;; *) _valise_chdir=./$2 ;; esac
+      CDPATH= cd "$_valise_chdir" 2>/dev/null || die "cannot change to directory: $2"
       shift 2
       ;;
     -C*)
-      cd "${1#-C}" 2>/dev/null || die "cannot change to directory: ${1#-C}"
+      case "${1#-C}" in /*) _valise_chdir=${1#-C} ;; *) _valise_chdir=./${1#-C} ;; esac
+      CDPATH= cd "$_valise_chdir" 2>/dev/null || die "cannot change to directory: ${1#-C}"
       shift
       ;;
     *) break ;;
   esac
 done
+unset _valise_chdir
 
 _cmd="${1:-}"
 # POSIX shells may treat a zero-argument shift as a fatal error under -e,

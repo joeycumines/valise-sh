@@ -31,15 +31,16 @@ _awk="$_script_dir/lib/compiler.awk"
 
 printf '=== valise compiler structural scaling ===\n\n'
 
-# The emitted plan is a fixed-size shell block per module, wrapped in a
-# constant-size preamble and epilogue. BLOCK_LINES is that per-module size; the
-# dependency check of a module is one line however many dependencies it has.
-# FIXED_LINES is the preamble plus epilogue, which is what must stay CONSTANT as
-# N grows: it moved from 52 to 53 when the plan gained the `_valise_plan_carried`
-# hand-off for cross-phase availability. Only that constant changes when the
-# plan header changes; BLOCK_LINES changing would mean per-module work grew.
-BLOCK_LINES=14
-FIXED_LINES=53
+# This fixture has N source blocks and N-1 dependency checks. The numeric
+# dispatch adds one identity assignment per block; exact dependency membership
+# uses a fixed loop instead of a case pattern whose meaning changes under
+# nocasematch. Dependency names still share one generated for-list line, so a
+# fan-out edge cannot multiply emitted checks. Pin each structural contribution
+# explicitly: these are line counts, not a claim about runtime complexity.
+FIXED_LINES=55
+SOURCE_BLOCK_LINES=8
+DEPENDENCY_CHECK_LINES=26
+BLOCK_LINES=$((SOURCE_BLOCK_LINES + DEPENDENCY_CHECK_LINES))
 
 # Generate a synthetic module graph of N modules: a linear dependency chain
 # plus a fan-out edge every 7th module, seeded from the last 5 modules so the
@@ -103,20 +104,29 @@ for _size in $SIZES; do
     fail "$_size modules: expected $_size source blocks, got $_source_lines"
   fi
 
-  # Exactly one module source per module: no duplicate or skipped emission.
-  _sourced=$(grep -c '^[[:space:]]*\. "\${VALISE_MODULE_ROOT%/}/modules/test/mod_' "$_output" 2>/dev/null || echo 0)
-  if [ "$_sourced" -eq "$_size" ]; then
-    pass "$_size modules: sourced each module exactly once"
+  # Verify identities as well as the count: duplicating one source while
+  # omitting another must not satisfy the previous assertion accidentally.
+  if awk -v expected="$_size" '
+    /^[[:space:]]*\. "\$\{VALISE_MODULE_ROOT%\/\}\/modules\/test\/mod_[0-9]+\.sh"$/ {
+      line = $0
+      sub(/^.*\/mod_/, "", line)
+      sub(/\.sh"$/, "", line)
+      count++
+      if (line + 0 != count) bad = 1
+    }
+    END { exit bad || count != expected ? 1 : 0 }
+  ' "$_output"; then
+    pass "$_size modules: emitted each expected module source exactly once in order"
   else
-    fail "$_size modules: expected $_size module sources, got $_sourced"
+    fail "$_size modules: a module source is duplicated, missing, or out of order"
   fi
 
   # Structural linearity: the plan is a constant-size shell block per module
   # plus constant-size preamble and epilogue. This identity is what proves
-  # emitted work grows linearly in N; any re-emission or per-dependency
+  # emitted size grows linearly in N; any re-emission or per-dependency
   # expansion breaks it, and it holds identically on every host.
   _lines=$(wc -l < "$_output" | tr -d ' ')
-  _expected_lines=$((FIXED_LINES + BLOCK_LINES * _size))
+  _expected_lines=$((FIXED_LINES + SOURCE_BLOCK_LINES * _size + DEPENDENCY_CHECK_LINES * (_size - 1)))
   if [ "$_lines" -eq "$_expected_lines" ]; then
     pass "$_size modules: plan is exactly $_expected_lines lines (linear emission identity)"
   else
@@ -126,9 +136,9 @@ for _size in $SIZES; do
   # The per-module block size must be identical at every size, which is the
   # part of the identity a quadratic or re-entrant implementation would move.
   if [ -z "$_baseline_block_lines" ]; then
-    _baseline_block_lines=$(( (_lines - FIXED_LINES) / _size ))
+    _baseline_block_lines=$(( (_lines - FIXED_LINES + DEPENDENCY_CHECK_LINES) / _size ))
   fi
-  _observed_block_lines=$(( (_lines - FIXED_LINES) / _size ))
+  _observed_block_lines=$(( (_lines - FIXED_LINES + DEPENDENCY_CHECK_LINES) / _size ))
   if [ "$_observed_block_lines" -eq "$_baseline_block_lines" ] &&
      [ "$_observed_block_lines" -eq "$BLOCK_LINES" ]; then
     pass "$_size modules: per-module emission is $_observed_block_lines lines, unchanged with N"

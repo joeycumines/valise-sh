@@ -65,8 +65,13 @@ devtool_classes() {
 
 # devtool_scratch: create the scratch directory for one command.
 devtool_scratch() {
-  _dev_tmp=$(trusted_mktemp dir "${TMPDIR:-/tmp}/valise-dev.XXXXXX") || die "cannot create scratch directory"
-  _dev_tmp=$(cd "$_dev_tmp" && pwd -P) || die "cannot resolve scratch directory"
+  trusted_mktemp_assign _dev_tmp dir "${TMPDIR:-/tmp}/valise-dev.XXXXXX" || die "cannot create scratch directory"
+  # Keep the allocated name registered until physical lookup succeeds: a
+  # failed or interrupted lookup must not erase the cleanup owner's pathname.
+  _dev_resolved=$(CDPATH= cd -P "$_dev_tmp" && pwd -P && printf x) || die "cannot resolve scratch directory"
+  _dev_resolved=${_dev_resolved%x}
+  _dev_tmp=${_dev_resolved%?}
+  unset _dev_resolved
 }
 
 devtool_cleanup() {
@@ -193,7 +198,7 @@ devtool_exec() {
     VALISE_TEST_ROOT="$_de_scratch" VALISE_PROJECT_ROOT="$_project_root" \
     VALISE_TEST_MODULE="${_dev_module:-}" VALISE_TEST_MODULE_DIR="${_dev_module_dir:-}" \
     VALISE_TEST_SHELL="${_dev_class:-}" \
-    "$_de_interp" "$_de_runner" "$@" </dev/null
+    "$_de_interp" "$_de_runner" "$@"
 }
 
 # --- env ---
@@ -232,157 +237,148 @@ _eec_byte_count() {
   return 1
 }
 
-# env_export_capture <shell> [release-dir]: run a release's env plan for
-# <shell> in a quarantined environment and print the exported scalar
-# KEY=VALUE pairs that differ from a baseline. The release defaults to the
-# active one; install_preview passes the tree it is about to install, which is
-# not active yet.
+# _eec_encode_dump <od> <awk> <dump> <byte-file>: encode a NUL-delimited
+# environment as NAME=<three decimal digits per value byte>. POSIX od owns
+# the binary framing; awk sees only ASCII numbers, never embedded NULs. In
+# particular this does not depend on nonportable awk RS="\0" behavior.
+_eec_encode_dump() (
+  LC_ALL=C "$1" -A n -t u1 -v <"$3" >"$4" || exit 1
+  LC_ALL=C "$2" '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i !~ /^[0-9]+$/ || $i + 0 > 255) { bad = 1; exit 1 }
+        byte = $i + 0
+        if (byte == 0) {
+          if (has_equals && name ~ /^[A-Za-z_][A-Za-z0-9_]*$/)
+            print name "=" value
+          name = value = ""
+          has_equals = pending = 0
+        } else {
+          pending = 1
+          if (has_equals) value = value sprintf("%03d", byte)
+          else if (byte == 61) has_equals = 1
+          else name = name sprintf("%c", byte)
+        }
+      }
+    }
+    END { if (bad || pending) exit 1 }
+  ' "$4"
+)
+
+# env_export_capture <shell> [release-dir]: run a release's env plan and print
+# changed exported scalars as KEY=VALUE lines. The optional release is used by
+# install before it becomes active. All private state and scratch cleanup live
+# in a subshell, including when a caller runs this inside a store transaction.
 #
-# Faithfulness rules, each of which a previous version broke:
-#   * HOME and the four XDG roots and TMPDIR stay the CALLER'S. A throwaway HOME
-#     made every HOME-derived scalar (GOPATH, CARGO_HOME) bake the probe
-#     directory's path, which is deleted before the bridge is read; replacing
-#     the XDG roots did the same to every value derived from one, and made a
-#     module's `"${XDG_CONFIG_HOME:-$HOME/.config}"` fallback take a branch the
-#     real session never takes. Isolation is the STARTUP-FILE surface only:
-#     ZDOTDIR points at an empty directory and BASH_ENV/ENV point at /dev/null,
-#     so no user rc file runs. The module's side effects therefore happen
-#     exactly as they would at a login - which is why `apply --dry-run` must not
-#     call this function.
-#   * The baseline runs the SAME interpreter with the SAME fixture env as the
-#     target, so shell-specific incidental variables (LOGNAME, SHLVL, ksh's
-#     A__z) cancel instead of being captured as exports.
-#   * The interpreter AND the dump utility are resolved by absolute path BEFORE
-#     the sandbox starts, and the dump is invoked by that absolute path. A plan
-#     is allowed to prepend a directory to PATH (valise_path_prepend), so a
-#     bare `env` at dump time ran whatever the plan had just put first on PATH.
-#   * The dump is written through a dedicated fd with the plan's stdout
-#     suppressed, so a module that prints KEY=VALUE cannot inject a variable
-#     into the bridge.
-#   * Every failure - no interpreter, no `env -0` support, a plan that fails to
-#     source, a scratch file that cannot be made - is a failure of this
-#     function. Nothing is reported as a successful empty capture.
-#   * Records are NUL separated (env -0). Before any translation, every record
-#     is validated: a value containing a newline cannot be represented in
-#     environment.d (one KEY=VALUE per line), in a plist string, or in WSLENV,
-#     and a value containing any other C0 byte (except TAB) is outside the
-#     character range XML 1.0 permits. Either one makes the capture fail naming
-#     the owning key rather than publish a wrong or corrupt value. The NUL ->
-#     LF translation happens only AFTER that check, so a byte planted in a
-#     value can never be reinterpreted as a record boundary and fabricate a
-#     variable (`X="a\001FAKE=1"` used to manufacture FAKE).
-env_export_capture() {
+# Both runs see the same caller HOME, PATH, TMPDIR and XDG roots. Only the shell
+# startup-file surface is isolated (ENV/BASH_ENV and ZDOTDIR): derived values
+# must describe the real session, not a throwaway HOME. Consequently dry-run
+# must not call this function. The interpreter and dump utility are resolved
+# before either run, and module stdout cannot inject records into env -0.
+#
+# Keep NUL boundaries through the comparison and name filter. An excluded PATH
+# or shell bookkeeping value may contain bytes no bridge can represent; that
+# must not reject an otherwise valid export. Only selected records are decoded
+# and validated. A newline resembling another assignment remains part of its
+# original value and is diagnosed by its actual variable name.
+env_export_capture() (
+  _eec_scratch=
+  _eec_signal=
+  # Recording a signal before checking it closes the allocation/assignment
+  # window: mktemp may already have created a directory whose name has not
+  # reached this shell yet. The same handlers protect cleanup from a second
+  # signal. Checkpoints stop normal work once an operation has recorded its
+  # result and cleanup can identify every owned scratch path.
+  trap '_eec_signal=130' INT
+  trap '_eec_signal=143' TERM
+  _eec_checkpoint() { [ -z "$_eec_signal" ] || exit "$_eec_signal"; }
+  trap '_eec_exit=$?; trap - EXIT
+    if [ -n "$_eec_scratch" ]; then
+      run_ignoring_int_term remove_tree "$_eec_scratch" || {
+        printf "valise: error: cannot remove env capture scratch directory: %s\n" "$_eec_scratch" >&2
+        [ "$_eec_exit" -ne 0 ] || _eec_exit=1
+      }
+    fi
+    exit "${_eec_signal:-$_eec_exit}"' EXIT
   _eec_shell=$1
   if [ -n "${2:-}" ]; then
     _eec_active=$2
   else
-    _eec_active=$(active_release_dir) || return 1
+    _eec_active=$(active_release_dir) || exit 1
   fi
   _eec_plan="$_eec_active/plans/$_eec_shell.sh"
   [ -f "$_eec_plan" ] || _eec_plan="$_eec_active/plans/sh.sh"
-  [ -f "$_eec_plan" ] || return 1
+  [ -f "$_eec_plan" ] || exit 1
   _eec_interp=$(capture_interpreter "$_eec_shell") || {
     printf 'valise: error: no %s interpreter is available for the env capture\n' "$_eec_shell" >&2
-    unset _eec_shell _eec_active _eec_plan
-    return 1
+    exit 1
   }
-  # Resolve every tool this function launches BEFORE the sandbox runs. The outer
-  # `env` and the probe shell are otherwise resolved from the caller's PATH,
-  # which the project's own threat model treats as untrusted everywhere else.
   _eec_env=$(trusted_utility_path env) || {
     printf 'valise: error: no trusted env utility is available for the env capture\n' >&2
-    unset _eec_shell _eec_active _eec_plan _eec_interp
-    return 1
+    exit 1
   }
   _eec_sh=/bin/sh
   [ -x "$_eec_sh" ] || _eec_sh=$(trusted_utility_path sh 2>/dev/null || :)
-  if [ -z "$_eec_sh" ]; then
+  [ -n "$_eec_sh" ] || {
     printf 'valise: error: no absolute sh is available for the env capture\n' >&2
-    unset _eec_shell _eec_active _eec_plan _eec_interp _eec_env
-    return 1
-  fi
-  _eec_awk=$(trusted_utility_path awk) || {
-    printf 'valise: error: no trusted awk utility is available for the env capture\n' >&2
-    unset _eec_shell _eec_active _eec_plan _eec_interp _eec_env _eec_sh
-    return 1
+    exit 1
   }
-  _eec_scratch=$(trusted_mktemp dir "${TMPDIR:-/tmp}/valise-env-export.XXXXXX") || return 1
-  _eec_mkdir=$(trusted_utility_path mkdir) || { remove_tree "$_eec_scratch"; return 1; }
-  if ! "$_eec_mkdir" -p "$_eec_scratch/zdot"; then
-    remove_tree "$_eec_scratch"
-    unset _eec_shell _eec_active _eec_plan _eec_interp _eec_env _eec_sh _eec_awk _eec_scratch _eec_mkdir
-    return 1
-  fi
-  # The probe is a FILE, so no quoting layer can reinterpret a path. It takes
-  # the dump destination and the plan as ordinary arguments and hands the plan
-  # to the interpreter as a positional parameter, so nothing nests a -c script
-  # inside another string. The dump utility is an ABSOLUTE path resolved above,
-  # and it replaces the shell after the plan has been sourced, so the dump can
-  # only contain the post-plan environment: the plan's own stdout goes to
-  # /dev/null and cannot inject a KEY=VALUE line.
+  _eec_awk=$(trusted_utility_path awk) || exit 1
+  _eec_od=$(trusted_utility_path od) || {
+    printf 'valise: error: no trusted od utility is available for the env capture\n' >&2
+    exit 1
+  }
+  _eec_cat=$(trusted_utility_path cat) || exit 1
+  _eec_mkdir=$(trusted_utility_path mkdir) || exit 1
+  # Protect the entire capture, not only mktemp: a process-group signal must
+  # not kill an intermediate substitution after allocation but before its name
+  # reaches this worker. This worker records the signal and cleans at the next
+  # checkpoint; only the short allocation subprocess ignores it.
+  _eec_scratch=$(trap '' INT TERM; trusted_mktemp dir "${TMPDIR:-/tmp}/valise-env-export.XXXXXX") || exit 1
+  _eec_checkpoint
+  "$_eec_mkdir" -p "$_eec_scratch/zdot" || exit 1
   _eec_probe="$_eec_scratch/probe.sh"
-  _eec_env_abs=$_eec_env
-  # The module root is assigned AT THE SOURCE SITE inside the -c script, from
-  # the release path passed as a positional parameter. This is exactly what the
-  # managed block does (`VALISE_MODULE_ROOT="$_valise_active"` immediately
-  # before sourcing), so the capture cannot diverge from a real startup. It also
-  # keeps the root out of the env -i plumbing entirely: no assignment has to
-  # survive a function boundary or `env -i` for the plan to resolve its own
-  # files. The name is in the capture's excluded set, so it never reaches the
-  # diff.
+  # A probe FILE and ordinary arguments avoid another layer of shell quoting.
+  # VALISE_MODULE_ROOT is set at the source site, just as in managed startup.
+  # PATH is already supplied by the outer env; do not replace an empty value.
   printf '%s\n' \
     '_mode=$1 _out=$2 _plan=$3 _interp=$4 _env=$5 _root=$6' \
     '_fixture() {' \
-    '  "$_env" HOME="$EEC_HOME" ZDOTDIR="$EEC_ZDOT" BASH_ENV=/dev/null ENV=/dev/null \' \
-    '    PATH="${PATH:-/usr/bin:/bin}" "$@"' \
+    '  "$_env" HOME="$EEC_HOME" ZDOTDIR="$EEC_ZDOT" BASH_ENV=/dev/null ENV=/dev/null "$@"' \
     '}' \
     'if [ "$_mode" = plan ]; then' \
-    '  _fixture "$_interp" -c '"'"'VALISE_MODULE_ROOT=$4; . "$1" >/dev/null 2>>"$3" || exit 96; exec "$2" -0'"'"' valise-probe "$_plan" "$_env" "$EEC_PLAN_ERR" "$_root" >"$_out" 2>/dev/null' \
+    '  _fixture "$_interp" -c '\''VALISE_MODULE_ROOT=$4; . "$1" >/dev/null 2>>"$3" || exit 96; exec "$2" -0'\'' valise-probe "$_plan" "$_env" "$EEC_PLAN_ERR" "$_root" >"$_out" 2>/dev/null' \
     '  exit $?' \
     'fi' \
-    '_fixture "$_interp" -c '"'"'exec "$1" -0'"'"' valise-probe "$_env" >"$_out" 2>/dev/null' \
-    >"$_eec_probe" || {
-    remove_tree "$_eec_scratch"
-    unset _eec_shell _eec_active _eec_plan _eec_interp _eec_env _eec_sh _eec_awk _eec_scratch _eec_mkdir _eec_probe \
-      _eec_env_abs
-    return 1
-  }
+    '_fixture "$_interp" -c '\''exec "$1" -0'\'' valise-probe "$_env" >"$_out" 2>/dev/null' \
+    >"$_eec_probe" || exit 1
   _eec_plan_err="$_eec_scratch/plan.err"
-  : >"$_eec_plan_err" || {
-    remove_tree "$_eec_scratch"
-    unset _eec_shell _eec_active _eec_plan _eec_interp _eec_env _eec_sh _eec_awk _eec_scratch _eec_mkdir _eec_probe \
-      _eec_env_abs _eec_plan_err
-    return 1
-  }
-  # The outer environment is the one the plan sees, for baseline AND target: the
-  # caller's PATH, TMPDIR and each XDG root are passed through (PATH defaults to
-  # /usr/bin:/bin when unset/empty; TMPDIR and XDG roots only when set via
-  # ${VAR+x}), so PATH-dependent exports (such as valise_editor_defaults or
-  # command -v probes) match a real session while PATH itself stays excluded
-  # from bridge output. The words are accumulated with `set --` so values
-  # containing spaces survive intact.
-  _eec_status=0
-  set -- PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/}" \
-    EEC_HOME="${HOME:-/}" EEC_ZDOT="$_eec_scratch/zdot" EEC_PLAN_ERR="$_eec_plan_err"
+  : >"$_eec_plan_err" || exit 1
+  # Unset PATH gets a useful default; explicitly empty PATH stays empty. TMPDIR
+  # and each XDG root retain both their bytes and set/unset distinction.
+  set -- PATH="${PATH-/usr/bin:/bin}" HOME="${HOME-/}" \
+    EEC_HOME="${HOME-/}" EEC_ZDOT="$_eec_scratch/zdot" EEC_PLAN_ERR="$_eec_plan_err"
   if [ "${TMPDIR+x}" = x ]; then set -- "$@" TMPDIR="$TMPDIR"; fi
   if [ "${XDG_CONFIG_HOME+x}" = x ]; then set -- "$@" XDG_CONFIG_HOME="$XDG_CONFIG_HOME"; fi
   if [ "${XDG_DATA_HOME+x}" = x ]; then set -- "$@" XDG_DATA_HOME="$XDG_DATA_HOME"; fi
   if [ "${XDG_STATE_HOME+x}" = x ]; then set -- "$@" XDG_STATE_HOME="$XDG_STATE_HOME"; fi
   if [ "${XDG_CACHE_HOME+x}" = x ]; then set -- "$@" XDG_CACHE_HOME="$XDG_CACHE_HOME"; fi
+  _eec_checkpoint
+  _eec_status=0
   "$_eec_env" -i "$@" \
-    "$_eec_sh" "$_eec_probe" base "$_eec_scratch/base" "$_eec_plan" "$_eec_interp" "$_eec_env_abs" "$_eec_active" ||
+    "$_eec_sh" "$_eec_probe" base "$_eec_scratch/base" "$_eec_plan" "$_eec_interp" "$_eec_env" "$_eec_active" ||
     _eec_status=$?
+  _eec_checkpoint
   if [ "$_eec_status" -eq 0 ]; then
     "$_eec_env" -i "$@" \
-      "$_eec_sh" "$_eec_probe" plan "$_eec_scratch/target" "$_eec_plan" "$_eec_interp" "$_eec_env_abs" "$_eec_active" ||
+      "$_eec_sh" "$_eec_probe" plan "$_eec_scratch/target" "$_eec_plan" "$_eec_interp" "$_eec_env" "$_eec_active" ||
       _eec_status=$?
   fi
+  _eec_checkpoint
   if [ "$_eec_status" -ne 0 ]; then
     case "$_eec_status" in
     96)
       printf 'valise: error: the env plan for shell %s failed to load\n' "$_eec_shell" >&2
-      # The plan's own diagnostics are the useful half of the message; the old
-      # code sent them to /dev/null and reported only "failed to load".
       if [ -s "$_eec_plan_err" ]; then
         printf 'valise: the plan reported:\n' >&2
         while IFS= read -r _eec_line || [ -n "$_eec_line" ]; do printf '  %s\n' "$_eec_line" >&2; done <"$_eec_plan_err"
@@ -390,243 +386,144 @@ env_export_capture() {
       ;;
     *) printf 'valise: error: the env capture for shell %s failed (status %s)\n' "$_eec_shell" "$_eec_status" >&2 ;;
     esac
-    remove_tree "$_eec_scratch"
-    unset _eec_shell _eec_active _eec_plan _eec_interp _eec_env _eec_sh _eec_awk _eec_scratch _eec_mkdir _eec_probe \
-      _eec_env_abs _eec_plan_err _eec_status _eec_line
-    return 1
+    exit 1
   fi
-  # Reject unrepresentable values BEFORE translating the NUL separators.
-  #
-  # NUL is the only byte an environment value cannot contain, so a NUL-separated
-  # dump is unambiguous. It must NOT be parsed with awk RS="\000": BWK and
-  # BusyBox awk truncate the stream at the first NUL, so the record framing
-  # would silently collapse. Instead the two forbidden classes are COUNTED with
-  # tr/wc, which is byte-exact on every lane:
-  #   * LF   - a value with a newline cannot be represented in environment.d
-  #            (one KEY=VALUE per line), a plist string, or WSLENV.
-  #   * C0   - any byte 1..31 except TAB and LF is outside the XML 1.0 character
-  #            range (the launchd plist) and corrupts the line formats.
-  # A single present byte is enough to refuse: publishing a truncated or
-  # re-encoded value to a GUI session is worse than failing the install. The
-  # count is what decides, so a continuation line that happens to look like
-  # NAME=value can never be mistaken for a real variable.
-  _eec_result=0
-  # Claims a diagnostic is printed, so the fallback at the end never repeats it.
-  # It MUST start defined: the script runs `set -eu`, and most failure paths set
-  # _eec_result without claiming a message, so an unset read below would abort
-  # with "unbound variable" instead of printing the message this flag exists to
-  # guarantee.
-  _eec_diagnosed=0
-  _eec_tr=$(trusted_utility_path tr) || _eec_result=1
-  _eec_wc=$(trusted_utility_path wc) || _eec_result=1
-  _eec_iconv=$(trusted_utility_path iconv 2>/dev/null || :)
-  if [ "$_eec_result" -eq 0 ]; then
-    if [ -n "$_eec_iconv" ]; then
-      # A launchd plist is an XML document, so a value must be valid UTF-8 (a raw
-      # high byte that is not a valid sequence makes plutil refuse the plist).
-      # The TARGET dump is validated once, and the refusal names no key because
-      # the byte stream is not yet split into records.
-      if ! LC_ALL=C "$_eec_iconv" -f UTF-8 -t UTF-8 <"$_eec_scratch/target" >/dev/null 2>"$_eec_scratch/iconv.err"; then
-        printf 'valise: error: the env plan produced a value that is not valid UTF-8; GUI env formats cannot represent it\n' >&2
-        _eec_result=1
-        _eec_diagnosed=1
-      fi
+  for _eec_dump in base target; do
+    if ! _eec_encode_dump "$_eec_od" "$_eec_awk" "$_eec_scratch/$_eec_dump" "$_eec_scratch/bytes" \
+      >"$_eec_scratch/$_eec_dump.encoded"; then
+      printf 'valise: error: the env capture for shell %s could not be read as NUL-delimited records\n' "$_eec_shell" >&2
+      exit 1
+    fi
+    _eec_checkpoint
+  done
+  : >"$_eec_scratch/diagnostic" || exit 1
+  : >"$_eec_scratch/notes" || exit 1
+  # The baseline and target use the same interpreter, so incidental variables
+  # cancel. Match by FILENAME, not record number (the baseline may be empty).
+  # Compare encoded records before decoding: no newline or control byte can
+  # become a fabricated variable, even in an excluded value.
+  if ! LC_ALL=C EEC_BASE="$_eec_scratch/base.encoded" \
+    EEC_DIAGNOSTIC="$_eec_scratch/diagnostic" EEC_NOTES="$_eec_scratch/notes" "$_eec_awk" '
+    function key_of(rec,   at) { at = index(rec, "="); return substr(rec, 1, at - 1) }
+    # RFC 3629 permits only Unicode scalar values. Some iconv implementations
+    # accept obsolete five/six-byte sequences and values above U+10FFFF, so
+    # iconv success alone is insufficient. Track exact continuation bounds,
+    # rejecting overlong encodings and surrogate code points as well.
+    function utf8_byte(b) {
+      if (utf8_left) {
+        if (b < utf8_min || b > utf8_max) return 0
+        utf8_left--
+        utf8_min = 128; utf8_max = 191
+        return 1
+      }
+      if (b < 128) return 1
+      utf8_min = 128; utf8_max = 191
+      if (b >= 194 && b <= 223) utf8_left = 1
+      else if (b >= 224 && b <= 239) {
+        utf8_left = 2
+        if (b == 224) utf8_min = 160
+        if (b == 237) utf8_max = 159
+      } else if (b >= 240 && b <= 244) {
+        utf8_left = 3
+        if (b == 240) utf8_min = 144
+        if (b == 244) utf8_max = 143
+      } else return 0
+      return 1
+    }
+    FILENAME == ENVIRON["EEC_BASE"] { base[key_of($0)] = $0; next }
+    {
+      name = key_of($0)
+      if (name in base && base[name] == $0) next
+      if (name == "_" || name == "HOME" || name == "PWD" || name == "SHLVL" ||
+          name == "OLDPWD" || name == "VALISE_MODULE_ROOT" || name == "ZDOTDIR" ||
+          name == "BASH_ENV" || name == "ENV" || name == "EEC_HOME" ||
+          name == "EEC_ZDOT" || name == "EEC_PLAN_ERR" ||
+          name == "VALISE_CALLER_PATH" || name == "VALISE_CALLER_CWD") next
+      if (name == "PATH" || name == "XDG_CONFIG_HOME" || name == "XDG_DATA_HOME" ||
+          name == "XDG_STATE_HOME" || name == "XDG_CACHE_HOME" || name == "TMPDIR") {
+        excluded++
+        excluded_names = excluded_names (excluded_names == "" ? "" : " ") name
+        next
+      }
+      encoded = substr($0, index($0, "=") + 1)
+      value = ""
+      forbidden = ""
+      utf8_left = utf8_bad = 0
+      for (i = 1; i <= length(encoded); i += 3) {
+        byte = substr(encoded, i, 3) + 0
+        if (!utf8_byte(byte)) utf8_bad = 1
+        if (byte == 10) forbidden = "newline"
+        else if (byte < 32 && byte != 9 && forbidden == "") forbidden = "control character"
+        value = value sprintf("%c", byte)
+      }
+      if (forbidden != "") {
+        printf "valise: error: the env plan sets %s to a value containing a %s; GUI env formats cannot represent it\n", name, forbidden > ENVIRON["EEC_DIAGNOSTIC"]
+        bad = 1
+        next
+      }
+      if (utf8_bad || utf8_left) {
+        printf "valise: error: %s is set to a value that is not valid UTF-8; GUI env formats cannot represent it\n", name > ENVIRON["EEC_DIAGNOSTIC"]
+        bad = 1
+        next
+      }
+      # XML 1.0 excludes these two valid UTF-8 sequences. Check only selected
+      # values; a noncharacter in PATH or another excluded value is irrelevant.
+      if (index(value, sprintf("%c%c%c", 239, 191, 190)) ||
+          index(value, sprintf("%c%c%c", 239, 191, 191))) {
+        printf "valise: error: %s is set to a value containing U+FFFE or U+FFFF, which XML 1.0 forbids; GUI env formats cannot represent it\n", name > ENVIRON["EEC_DIAGNOSTIC"]
+        bad = 1
+        next
+      }
+      out = out name "=" value "\n"
+    }
+    END {
+      if (bad) exit 1
+      printf "%s", out
+      if (excluded)
+        printf "valise: note: %d exported variable(s) are not bridged (a GUI session sets its own): %s\n", excluded, excluded_names > ENVIRON["EEC_NOTES"]
+    }
+  ' "$_eec_scratch/base.encoded" "$_eec_scratch/target.encoded" >"$_eec_scratch/selected"; then
+    if [ -s "$_eec_scratch/diagnostic" ]; then
+      "$_eec_cat" "$_eec_scratch/diagnostic" >&2
     else
-      # Without a trusted iconv the UTF-8 check cannot run, so a value with any byte
-      # above 0x7F is refused rather than published unchecked. ASCII is valid UTF-8
-      # by definition and still exports.
-      _eec_high=$(_eec_byte_count "$_eec_tr" "$_eec_wc" "$_eec_scratch" \
-        "$_eec_scratch/target" -d '\000-\177') || _eec_result=1
-      _eec_high=${_eec_high#"${_eec_high%%[![:space:]]*}"}
-      _eec_high=${_eec_high%"${_eec_high##*[![:space:]]}"}
-      case "${_eec_high:-}" in
-      '' | *[!0-9]*)
-        printf 'valise: error: the env capture for shell %s could not count its bytes\n' "$_eec_shell" >&2
-        _eec_result=1
-        _eec_diagnosed=1
-        ;;
-      0) ;;
-      *)
-        printf 'valise: error: the env plan produced a non-ASCII value, and no trusted iconv is available to check it as UTF-8\n' >&2
-        _eec_result=1
-        _eec_diagnosed=1
-        ;;
-      esac
+      printf 'valise: error: the env capture for shell %s could not be inspected\n' "$_eec_shell" >&2
     fi
+    exit 1
   fi
-  if [ "$_eec_result" -eq 0 ]; then
-    for _eec_dump in base target; do
-      _eec_dump_file="$_eec_scratch/$_eec_dump"
-      _eec_lf=$(_eec_byte_count "$_eec_tr" "$_eec_wc" "$_eec_scratch" \
-        "$_eec_dump_file" -cd '\012') || _eec_result=1
-      _eec_c0=
-      [ "$_eec_result" -ne 0 ] ||
-        _eec_c0=$(_eec_byte_count "$_eec_tr" "$_eec_wc" "$_eec_scratch" \
-          "$_eec_dump_file" -cd '\001-\010\013-\037') || _eec_result=1
-      [ "$_eec_result" -eq 0 ] || break
-      # wc -c pads with leading spaces on BSD, so strip whitespace in shell
-      # before the digit check: a failed tr/wc (empty or non-digit) is a
-      # refusal, never a clean 0.
-      _eec_lf=${_eec_lf#"${_eec_lf%%[![:space:]]*}"}
-      _eec_lf=${_eec_lf%"${_eec_lf##*[![:space:]]}"}
-      _eec_c0=${_eec_c0#"${_eec_c0%%[![:space:]]*}"}
-      _eec_c0=${_eec_c0%"${_eec_c0##*[![:space:]]}"}
-      case "${_eec_lf:-}" in '' | *[!0-9]*) _eec_result=1 ;; esac
-      case "${_eec_c0:-}" in '' | *[!0-9]*) _eec_result=1 ;; esac
-      [ "$_eec_result" -eq 0 ] || break
-      if [ "$_eec_lf" -eq 0 ] && [ "$_eec_c0" -eq 0 ]; then
-        continue
-      fi
-      # The COUNT is the decision, and it is final: any LF or C0 byte refuses the
-      # capture, whatever the naming pass below finds. The naming pass only words
-      # the diagnostic. It names a key only when the offending byte sits on a line
-      # that starts a record; a byte on a continuation line has no reliable owner
-      # in the dump, so the message says so instead of naming a neighbour.
-      _eec_result=1
-      # The diagnostic is claimed only once one has actually been written. The
-      # flag is NOT set before tr/awk run: an awk that cannot exec, cannot read
-      # the dump, or cannot open /dev/stderr would then leave the capture
-      # failing with EMPTY stderr - the exact silent failure this flag exists to
-      # prevent.
-      if ! LC_ALL=C "$_eec_tr" '\000' '\012' <"$_eec_dump_file" >"$_eec_scratch/$_eec_dump.lf"; then
-        printf 'valise: error: the env capture for shell %s could not translate its dump\n' "$_eec_shell" >&2
-        _eec_diagnosed=1
-        break
-      fi
-      # awk writes its message to STDOUT and the shell redirects it, so a
-      # missing or unwritable /dev/stderr is not itself a failure. The exit
-      # status now means "a message was printed" (0) rather than the inverse,
-      # so a broken awk cannot be mistaken for one that reported the defect.
-      _eec_named=0
-      if LC_ALL=C "$_eec_awk" '
-        BEGIN { lastkey = ""; printed = 0 }
-        {
-          keyline = ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/)
-          if (keyline) { lastkey = $0; sub(/=.*/, "", lastkey) }
-          ctl = 0
-          for (i = 1; i <= 31; i++) {
-            if (i == 9 || i == 10) continue
-            if (index($0, sprintf("%c", i)) > 0) { ctl = 1; break }
-          }
-          # The first offending line: a control byte on a record line, or any
-          # continuation line (a value that spans a newline). The owner is the
-          # record it continues. A continuation that itself looks like a record
-          # cannot be told apart from a real record in this stream, so its name
-          # is best-effort; the refusal does not depend on it.
-          if (printed || (keyline && !ctl)) next
-          owner = (lastkey == "" ? "(unknown)" : lastkey)
-          if (ctl)
-            printf "valise: error: the env plan sets %s to a value containing a control character; GUI env formats cannot represent it\n", owner
-          else
-            printf "valise: error: the env plan sets %s to a value containing a newline; GUI env formats cannot represent it\n", owner
-          printed = 1
-        }
-        END { exit printed ? 0 : 1 }
-      ' "$_eec_scratch/$_eec_dump.lf" >&2; then
-        _eec_named=1
-        _eec_diagnosed=1
-      fi
-      if [ "$_eec_named" -eq 0 ]; then
-        printf 'valise: error: the env plan produced a value containing a newline or control character; GUI env formats cannot represent it\n' >&2
-        _eec_diagnosed=1
-      fi
-      break
-    done
-  fi
-  unset _eec_lf _eec_c0 _eec_dump_file
-  if [ "$_eec_result" -eq 0 ]; then
-    # No value contains LF (proved above), so a NUL -> LF translation now gives
-    # an unambiguous one-record-per-line stream for the diff.
-    LC_ALL=C "$_eec_tr" '\000' '\012' <"$_eec_scratch/base" >"$_eec_scratch/base.lf" || _eec_result=1
-    LC_ALL=C "$_eec_tr" '\000' '\012' <"$_eec_scratch/target" >"$_eec_scratch/target.lf" || _eec_result=1
-  fi
-  if [ "$_eec_result" -eq 0 ]; then
-    # Diff the two dumps. Both sides come from the SAME interpreter and fixture
-    # environment, so incidental shell variables cancel instead of being
-    # captured. A key present on both sides with a DIFFERENT value is a real
-    # override and is kept; a key present only in the target is an export.
-    # Records are matched by FILENAME, never by record count, so an empty
-    # baseline cannot shift which side a record belongs to.
-    LC_ALL=C BASE="$_eec_scratch/base.lf" TARGET="$_eec_scratch/target.lf" "$_eec_awk" '
-      function key_of(rec,   at) { at = index(rec, "="); return at ? substr(rec, 1, at - 1) : "" }
-      FILENAME == ENVIRON["BASE"] { base_key[key_of($0)] = $0; next }
-      FILENAME == ENVIRON["TARGET"] {
-        k = key_of($0)
-        if (k == "") next
-        if (k in base_key) { if (base_key[k] != $0) print $0; next }
-        print $0
-      }
-    ' "$_eec_scratch/base.lf" "$_eec_scratch/target.lf" \
-      >"$_eec_scratch/diff" || _eec_result=1
-  fi
-  if [ "$_eec_result" -eq 0 ]; then
-    # XML 1.0 excludes U+FFFE and U+FFFF. Both are valid UTF-8, so neither the
-    # UTF-8 check nor the C0 count sees them, and a launchd plist carrying one is
-    # malformed. Check the reported records, and name the first offending key.
-    _eec_grep=$(trusted_utility_path grep) || _eec_result=1
-    if [ "$_eec_result" -eq 0 ]; then
-      _eec_nc1=$(printf '\357\277\276')
-      _eec_nc2=$(printf '\357\277\277')
-      # grep's status distinguishes match (0), no match (1) and error (2+).
-      # Reading an error as "no noncharacters" would publish a value this check
-      # never examined, so anything above 1 refuses.
-      if LC_ALL=C "$_eec_grep" -q -F -e "$_eec_nc1" -e "$_eec_nc2" "$_eec_scratch/diff" 2>/dev/null; then
-        _eec_nc_found=0
-      else
-        _eec_nc_found=$?
-      fi
-      if [ "$_eec_nc_found" -gt 1 ]; then
-        printf 'valise: error: the env capture for shell %s could not be scanned for XML noncharacters\n' "$_eec_shell" >&2
-        _eec_result=1
-        _eec_diagnosed=1
-      elif [ "$_eec_nc_found" -eq 0 ]; then
-        _eec_nc_key=$(LC_ALL=C "$_eec_grep" -F -e "$_eec_nc1" -e "$_eec_nc2" "$_eec_scratch/diff" 2>/dev/null |
-          LC_ALL=C "$_eec_awk" -F= 'NR == 1 { print $1; exit }')
-        printf 'valise: error: %s is set to a value containing U+FFFE or U+FFFF, which XML 1.0 forbids; GUI env formats cannot represent it\n' \
-          "${_eec_nc_key:-an env variable}" >&2
-        _eec_result=1
-        _eec_diagnosed=1
-      fi
-      unset _eec_nc_found
+  _eec_checkpoint
+  # The selected stream now has unambiguous LF-delimited records. Validate it
+  # with the platform UTF-8 implementation; excluded input is never passed to
+  # iconv. Without trusted iconv, fail closed on non-ASCII selected values.
+  _eec_iconv=$(trusted_utility_path iconv 2>/dev/null || :)
+  if [ -n "$_eec_iconv" ]; then
+    if ! LC_ALL=C "$_eec_iconv" -f UTF-8 -t UTF-8 <"$_eec_scratch/selected" >/dev/null 2>"$_eec_scratch/iconv.err"; then
+      printf 'valise: error: the env plan produced a value that is not valid UTF-8; GUI env formats cannot represent it\n' >&2
+      exit 1
     fi
+  else
+    _eec_tr=$(trusted_utility_path tr) || exit 1
+    _eec_wc=$(trusted_utility_path wc) || exit 1
+    _eec_high=$(_eec_byte_count "$_eec_tr" "$_eec_wc" "$_eec_scratch" \
+      "$_eec_scratch/selected" -d '\000-\177') || {
+      printf 'valise: error: the env capture for shell %s could not count its bytes\n' "$_eec_shell" >&2
+      exit 1
+    }
+    _eec_high=${_eec_high#"${_eec_high%%[![:space:]]*}"}
+    _eec_high=${_eec_high%"${_eec_high##*[![:space:]]}"}
+    case "$_eec_high" in
+    0) ;;
+    '' | *[!0-9]*)
+      printf 'valise: error: the env capture for shell %s could not count its bytes\n' "$_eec_shell" >&2
+      exit 1 ;;
+    *)
+      printf 'valise: error: the env plan produced a non-ASCII value, and no trusted iconv is available to check it as UTF-8\n' >&2
+      exit 1 ;;
+    esac
   fi
-  if [ "$_eec_result" -eq 0 ]; then
-    # One KEY=VALUE per line. The excluded names are interpreter bookkeeping and
-    # the variables this capture itself overwrote; EXCLUDED_* records how many
-    # real exports were dropped, so `valise env export` can say what it left
-    # out instead of silently publishing a partial environment.
-    LC_ALL=C "$_eec_awk" '
-      {
-        name = $0; sub(/=.*/, "", name)
-        if (name !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next
-        if (name == "_" || name == "HOME" || name == "PWD" ||
-            name == "SHLVL" || name == "OLDPWD" || name == "VALISE_MODULE_ROOT" ||
-            name == "ZDOTDIR" || name == "BASH_ENV" || name == "ENV") next
-        if (name == "PATH" || name == "XDG_CONFIG_HOME" || name == "XDG_DATA_HOME" ||
-            name == "XDG_STATE_HOME" || name == "XDG_CACHE_HOME" || name == "TMPDIR") {
-          excluded++
-          if (excluded <= 200) excluded_names = excluded_names (excluded_names == "" ? "" : " ") name
-          next
-        }
-        print
-      }
-      END {
-        if (excluded > 0)
-          printf "valise: note: %d exported variable(s) are not bridged (a GUI session sets its own): %s\n", excluded, excluded_names > "/dev/stderr"
-      }
-    ' "$_eec_scratch/diff" || _eec_result=1
-  fi
-  if [ "$_eec_result" -ne 0 ]; then
-    [ "$_eec_diagnosed" = 1 ] ||
-      printf 'valise: error: the env capture for shell %s could not be read\n' "$_eec_shell" >&2
-  fi
-  remove_tree "$_eec_scratch"
-  _eec_rc=$_eec_result
-  unset _eec_shell _eec_active _eec_plan _eec_interp _eec_env _eec_sh _eec_awk _eec_scratch _eec_mkdir _eec_probe \
-    _eec_env_abs _eec_plan_err _eec_status _eec_line
-  unset _eec_tr _eec_wc _eec_iconv _eec_result _eec_diagnosed _eec_dump _eec_named _eec_high _eec_grep _eec_nc1 _eec_nc2 _eec_nc_key _ebc_status
-  return "$_eec_rc"
-}
+  _eec_checkpoint
+  "$_eec_cat" "$_eec_scratch/notes" >&2 || exit 1
+  "$_eec_cat" "$_eec_scratch/selected"
+)
 
 # env_export_emit <format> <capture-lines>: render captured KEY=VALUE pairs in
 # the requested GUI-bridge format. Unknown formats fail without leaking the
@@ -843,7 +740,9 @@ cmd_env() {
   *) die "unknown env option: $1" ;;
   esac
   _env_engine=$(engine_root) || die "cannot locate the valise engine"
-  _env_project=$(project_find_root 2>/dev/null || :)
+  if _env_project=$(project_find_root); then :; else
+    [ "$?" -eq 1 ] || exit 1
+  fi
   _env_bin=$(commands_bin_dir 2>/dev/null || :)
   for _env_pair in \
     "VALISE_VERSION=$VALISE_VERSION" \

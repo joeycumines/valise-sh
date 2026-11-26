@@ -122,6 +122,200 @@ case "$_init_out" in
 esac
 unset _init_expected_active _init_out
 
+# --- Bootstrap paths before the CLI helpers are loaded ---
+# Keep a real newline-free sibling so stripping pathname newlines produces a
+# successful but WRONG callback, rather than merely making init fish fail.
+_bootstrap_root="$_test_home/bootstrap"
+mkdir -p "$_bootstrap_root"
+_bootstrap_root=$(cd "$_bootstrap_root" && pwd -P)
+_bootstrap_nl=$(printf '\n\nx')
+_bootstrap_nl=${_bootstrap_nl%x}
+_bootstrap_lf_cwd="$_bootstrap_root/caller$_bootstrap_nl"
+mkdir -p "$_bootstrap_lf_cwd" "$_bootstrap_root/caller" "$_bootstrap_root/cdpath/bin"
+ln -s "$_valise" "$_bootstrap_lf_cwd/valise"
+ln -s "$_valise" "$_bootstrap_root/caller/valise"
+_bootstrap() {
+  env -i HOME="$_test_home" PATH=/usr/bin:/bin TMPDIR=/tmp \
+    XDG_CONFIG_HOME="$XDG_CONFIG_HOME" XDG_DATA_HOME="$XDG_DATA_HOME" \
+    XDG_STATE_HOME="$XDG_STATE_HOME" "$@"
+}
+_bootstrap_rc=0
+_bootstrap_hook=$(cd "$_bootstrap_lf_cwd" && _bootstrap ./valise -C "$_bootstrap_root" init fish \
+  2>"$_bootstrap_root/lf.err") || _bootstrap_rc=$?
+_bootstrap_expected="  set _valise_fish_active_root ('$_bootstrap_lf_cwd/valise' release verify --print-root 2>/dev/null)"
+_bootstrap_wrong="  set _valise_fish_active_root ('$_bootstrap_root/caller/valise' release verify --print-root 2>/dev/null)"
+_bootstrap_match=0
+case "$_bootstrap_hook" in *"$_bootstrap_expected"*) _bootstrap_match=1 ;; esac
+case "$_bootstrap_hook" in *"$_bootstrap_wrong"*) _bootstrap_match=0 ;; esac
+if [ "$_bootstrap_rc" -eq 0 ] && [ "$_bootstrap_match" -eq 1 ]; then
+  pass "a relative CLI invocation preserves trailing CWD newlines in the Fish callback before -C"
+else
+  fail "a relative CLI invocation changed the Fish callback's newline-bearing directory"
+  cat "$_bootstrap_root/lf.err" >&2
+fi
+
+_bootstrap_rc=0
+_bootstrap_out=$(cd "${_valise%/bin/valise}" && \
+  _bootstrap CDPATH="$_bootstrap_root/cdpath" bin/valise version 2>"$_bootstrap_root/cdpath.err") || _bootstrap_rc=$?
+if [ "$_bootstrap_rc" -eq 0 ] && [ "$_bootstrap_out" = 0.4.1 ]; then
+  pass "relative CLI bootstrap ignores a CDPATH lookalike bin without printing a directory"
+else
+  fail "relative CLI bootstrap followed CDPATH or polluted its output"
+  cat "$_bootstrap_root/cdpath.err" >&2
+fi
+
+# -C names a directory relative to the caller, including a name beginning
+# with '-'. CDPATH must neither choose a different project nor print a path.
+for _bootstrap_project in project -project cdpath/project cdpath/-project; do
+  mkdir -p "$_bootstrap_root/$_bootstrap_project/module.d"
+  printf 'bundle=default\nvariant=default\n' >"$_bootstrap_root/$_bootstrap_project/valise.conf"
+  printf 'default\tsh\tvalise_path\n' >"$_bootstrap_root/$_bootstrap_project/bundles.tsv"
+done
+for _bootstrap_form in split attached dash; do
+  case "$_bootstrap_form" in
+    split) set -- -C project; _bootstrap_project=project ;;
+    attached) set -- -Cproject; _bootstrap_project=project ;;
+    dash) set -- -C -project; _bootstrap_project=-project ;;
+  esac
+  _bootstrap_rc=0
+  (cd "$_bootstrap_root" && _bootstrap CDPATH="$_bootstrap_root/cdpath" "$_valise" "$@" status) \
+    >"$_bootstrap_root/dispatch.out" 2>"$_bootstrap_root/dispatch.err" || _bootstrap_rc=$?
+  if [ "$_bootstrap_rc" -eq 0 ] && \
+    [ "$(head -n 1 "$_bootstrap_root/dispatch.out")" = "project: $_bootstrap_root/$_bootstrap_project" ]; then
+    pass "-C selects the caller's directory without CDPATH output ($_bootstrap_form)"
+  else
+    fail "-C selected a CDPATH lookalike, interpreted a directory as an option, or printed a path ($_bootstrap_form)"
+    cat "$_bootstrap_root/dispatch.out" "$_bootstrap_root/dispatch.err" >&2
+  fi
+done
+_bootstrap_rc=0
+_bootstrap_out=$(cd "$_bootstrap_root" && _bootstrap CDPATH="$_bootstrap_root/cdpath" \
+  "$_valise" -C project run --keep-env -- 'printf "%s\n%s\n" "$CDPATH" "$PATH"' \
+  2>"$_bootstrap_root/dispatch-child.err") || _bootstrap_rc=$?
+if [ "$_bootstrap_rc" -eq 0 ] && [ "$_bootstrap_out" = "$_bootstrap_root/cdpath
+/usr/bin:/bin" ]; then
+  pass "-C leaves the child's exported CDPATH and PATH unchanged"
+else
+  fail "-C changed the child's exported CDPATH or PATH"
+  printf '%s\n' "$_bootstrap_out" >&2
+  cat "$_bootstrap_root/dispatch-child.err" >&2
+fi
+
+# An npm-style entry traverses relative and absolute symlinks. The first
+# target itself ends in newlines, so readlink output needs its own sentinel.
+_bootstrap_prefix="$_bootstrap_root/npm-prefix"
+mkdir -p "$_bootstrap_prefix/bin" "$_bootstrap_prefix/lib" "$_bootstrap_root/poison"
+ln -s "$_valise" "$_bootstrap_prefix/lib/entry$_bootstrap_nl"
+ln -s "../lib/entry$_bootstrap_nl" "$_bootstrap_prefix/bin/valise"
+_bootstrap_rc=0
+_bootstrap_out=$(_bootstrap "$_bootstrap_prefix/bin/valise" version \
+  2>"$_bootstrap_root/link.err") || _bootstrap_rc=$?
+if [ "$_bootstrap_rc" -eq 0 ] && [ "$_bootstrap_out" = 0.4.1 ]; then
+  pass "CLI bootstrap preserves trailing newlines in a chained relative symlink target"
+else
+  fail "CLI bootstrap changed a chained symlink target's trailing newlines"
+  cat "$_bootstrap_root/link.err" >&2
+fi
+
+cat >"$_bootstrap_root/poison/readlink" <<'EOF'
+#!/bin/sh
+printf 'poisoned\n' >"$BOOTSTRAP_READLINK_MARKER"
+printf '%s\n' "$BOOTSTRAP_READLINK_TARGET"
+EOF
+chmod 0755 "$_bootstrap_root/poison/readlink"
+_bootstrap_marker="$_bootstrap_root/poison-ran"
+_bootstrap PATH="$_bootstrap_root/poison:/usr/bin:/bin" \
+  BOOTSTRAP_READLINK_MARKER="$_bootstrap_marker" BOOTSTRAP_READLINK_TARGET="$_valise" \
+  readlink "$_bootstrap_prefix/bin/valise" >"$_bootstrap_root/poison-control.out"
+_bootstrap_control=0
+[ ! -s "$_bootstrap_marker" ] || _bootstrap_control=1
+rm -f "$_bootstrap_marker"
+_bootstrap_rc=0
+_bootstrap_out=$(_bootstrap PATH="$_bootstrap_root/poison:/usr/bin:/bin" \
+  BOOTSTRAP_READLINK_MARKER="$_bootstrap_marker" BOOTSTRAP_READLINK_TARGET="$_valise" \
+  "$_bootstrap_prefix/bin/valise" version 2>"$_bootstrap_root/poison.err") || _bootstrap_rc=$?
+if [ "$_bootstrap_control" -eq 1 ] && [ "$_bootstrap_rc" -eq 0 ] && \
+  [ "$_bootstrap_out" = 0.4.1 ] && [ ! -e "$_bootstrap_marker" ]; then
+  pass "package-symlink bootstrap ignores a callable readlink on the caller's PATH"
+else
+  fail "package-symlink bootstrap executed an untrusted readlink or lost the real target"
+  cat "$_bootstrap_root/poison.err" >&2
+fi
+
+# Unlike invocation aliases/CWD, physical engine and project roots feed
+# line-oriented metadata interfaces. Reject TAB/LF before a truncated capture
+# could select a lookalike tree. Either fake usage.sh would mark an unsafe
+# source attempt; ordinary-root version/init above are positive controls.
+_bootstrap_tab=$(printf '\t')
+for _bootstrap_kind in tab lf; do
+  case "$_bootstrap_kind" in tab) _bootstrap_char=$_bootstrap_tab ;; lf) _bootstrap_char=$_bootstrap_nl ;; esac
+  _bootstrap_engine="$_bootstrap_root/invalid-engine-$_bootstrap_kind$_bootstrap_char"
+  _bootstrap_lookalike="$_bootstrap_root/invalid-engine-$_bootstrap_kind"
+  for _bootstrap_tree in "$_bootstrap_engine" "$_bootstrap_lookalike"; do
+    mkdir -p "$_bootstrap_tree/bin" "$_bootstrap_tree/lib/cli"
+    cp "$_valise" "$_bootstrap_tree/bin/valise"
+    printf 'printf reached >"$BOOTSTRAP_ENGINE_MARKER"\n' >"$_bootstrap_tree/lib/cli/usage.sh"
+  done
+  _bootstrap_marker="$_bootstrap_root/engine-$_bootstrap_kind-sourced"
+  _bootstrap_rc=0
+  _bootstrap BOOTSTRAP_ENGINE_MARKER="$_bootstrap_marker" "$_bootstrap_engine/bin/valise" version \
+    >"$_bootstrap_root/engine.out" 2>"$_bootstrap_root/engine.err" || _bootstrap_rc=$?
+  if [ "$_bootstrap_rc" -ne 0 ] && [ ! -e "$_bootstrap_marker" ] && \
+    [ ! -s "$_bootstrap_root/engine.out" ] && \
+    grep -F 'physical engine path contains TAB or LF' "$_bootstrap_root/engine.err" >/dev/null; then
+    pass "CLI bootstrap rejects an unrepresentable engine path before sourcing either tree ($_bootstrap_kind)"
+  else
+    fail "CLI bootstrap accepted an unrepresentable engine path or sourced a lookalike ($_bootstrap_kind)"
+    cat "$_bootstrap_root/engine.out" "$_bootstrap_root/engine.err" >&2
+  fi
+
+  _bootstrap_bad_project="$_bootstrap_root/project$_bootstrap_char"
+  mkdir -p "$_bootstrap_bad_project/module.d"
+  cp "$_bootstrap_root/project/valise.conf" "$_bootstrap_bad_project/valise.conf"
+  cp "$_bootstrap_root/project/bundles.tsv" "$_bootstrap_bad_project/bundles.tsv"
+  for _bootstrap_command in build env layer-lint; do
+    case "$_bootstrap_command" in
+      build) set -- build "$_bootstrap_root/rejected-build-$_bootstrap_kind" ;;
+      env) set -- env ;;
+      layer-lint) set -- layer-lint absent ;;
+    esac
+    _bootstrap_rc=0
+    _bootstrap "$_valise" -C "$_bootstrap_bad_project" "$@" \
+      >"$_bootstrap_root/project.out" 2>"$_bootstrap_root/project.err" || _bootstrap_rc=$?
+    if [ "$_bootstrap_rc" -ne 0 ] && [ ! -s "$_bootstrap_root/project.out" ] && \
+      [ ! -e "$_bootstrap_root/rejected-build-$_bootstrap_kind" ] && \
+      grep -F 'physical project path contains TAB or LF' "$_bootstrap_root/project.err" >/dev/null; then
+      pass "$_bootstrap_command rejects an unrepresentable project root before using its lookalike ($_bootstrap_kind)"
+    else
+      fail "$_bootstrap_command accepted an unrepresentable project root or used its lookalike ($_bootstrap_kind)"
+      cat "$_bootstrap_root/project.out" "$_bootstrap_root/project.err" >&2
+    fi
+  done
+done
+
+# An ordinary project reached from a child CWD ending in LF is still valid.
+# The newline-free sibling is itself another project, so trimming pwd output
+# would select that child project and make the first output line differ.
+mkdir -p "$_bootstrap_root/project/child$_bootstrap_nl" "$_bootstrap_root/project/child"
+cp "$_bootstrap_root/project/valise.conf" "$_bootstrap_root/project/child/valise.conf"
+cp "$_bootstrap_root/project/bundles.tsv" "$_bootstrap_root/project/child/bundles.tsv"
+_bootstrap_rc=0
+(cd "$_bootstrap_root/project/child$_bootstrap_nl" && _bootstrap "$_valise" status) \
+  >"$_bootstrap_root/ancestor.out" 2>"$_bootstrap_root/ancestor.err" || _bootstrap_rc=$?
+if [ "$_bootstrap_rc" -eq 0 ] && \
+  [ "$(head -n 1 "$_bootstrap_root/ancestor.out")" = "project: $_bootstrap_root/project" ]; then
+  pass "project discovery preserves a newline-bearing child CWD and finds its ordinary ancestor"
+else
+  fail "project discovery rejected a valid ancestor or selected the child CWD's lookalike"
+  cat "$_bootstrap_root/ancestor.out" "$_bootstrap_root/ancestor.err" >&2
+fi
+unset -f _bootstrap
+unset _bootstrap_root _bootstrap_nl _bootstrap_lf_cwd _bootstrap_rc _bootstrap_hook \
+  _bootstrap_expected _bootstrap_wrong _bootstrap_match _bootstrap_out \
+  _bootstrap_prefix _bootstrap_marker _bootstrap_control _bootstrap_project _bootstrap_form \
+  _bootstrap_tab _bootstrap_kind _bootstrap_char _bootstrap_engine _bootstrap_lookalike \
+  _bootstrap_tree _bootstrap_bad_project _bootstrap_command
+
 # Generated shell snippets must quote hostile XDG paths as data. In particular,
 # command substitutions in an environment-provided path must not execute while
 # `valise init` emits Fish, Bash, Zsh, Ksh, or POSIX-sh integration.
@@ -629,6 +823,26 @@ if HOME="$_eq_home" XDG_DATA_HOME="$_eq_home/.local/share" XDG_CONFIG_HOME="$_eq
   pass "release verify passes with '= ' in HOME path"
 else
   fail "release verify passes with '= ' in HOME path"
+fi
+
+# The digest is a property of the bytes, independent of a utility's filename
+# rendering. SHA-256("abc") is a fixed external test vector; quoting or escaping
+# in sha256sum/shasum output must never become part of the returned digest.
+_digest_ok=1
+for _digest_name in plain 'back\slash' 'line
+break' '*[x]'; do
+  _digest_file="$_test_home/$_digest_name"
+  printf abc >"$_digest_file"
+  _digest_actual=$(env -i HOME="$_test_home" PATH=/usr/bin:/bin /bin/sh -c '
+    . "$1/lib/cli/common.sh"
+    file_sha256 "$2"
+  ' digest "${_valise%/bin/valise}" "$_digest_file") || _digest_ok=0
+  [ "$_digest_actual" = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad ] || _digest_ok=0
+done
+if [ "$_digest_ok" -eq 1 ]; then
+  pass "SHA-256 digests are independent of filename escaping"
+else
+  fail "SHA-256 filename escaping corrupted a digest"
 fi
 
 # --- Atomic symlink swap test ---

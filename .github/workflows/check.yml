@@ -27,3 +27,41 @@ jobs:
             printf '::error title=Release check log tail::%s\n' "$summary"
             exit "$result"
           fi
+      - name: Keep release check log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: valise-check-linux
+          path: ${{ runner.temp }}/valise-check.log
+          if-no-files-found: ignore
+
+  check-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install native shell runtimes
+        run: brew install dash-shell fish ksh93
+      - name: Run native macOS release check
+        shell: bash
+        run: |
+          # System Bash remains first on TEST_ENV_PATH: this exercises Apple's
+          # Bash 3.2 and BSD utilities. Linux's check job requires BusyBox ash;
+          # this job requires every native shell rather than a Linux VM.
+          set +e
+          make VALISE_REQUIRE_TOOLING=1 \
+            VALISE_REQUIRED_PARSERS=sh,dash,ksh,bash,zsh,fish \
+            syntax test test-fish-syntax test-docs test-e2e test-startup-state \
+            2>&1 | tee "$RUNNER_TEMP/valise-check.log"
+          result=${PIPESTATUS[0]}
+          if [ "$result" -ne 0 ]; then
+            summary=$(tail -n 40 "$RUNNER_TEMP/valise-check.log" | sed 's/%/%25/g; s/\r/%0D/g' | awk '{ printf "%s%%0A", $0 }')
+            printf '::error title=macOS release check log tail::%s\n' "$summary"
+            exit "$result"
+          fi
+      - name: Keep native macOS release check log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: valise-check-macos
+          path: ${{ runner.temp }}/valise-check.log
+          if-no-files-found: ignore

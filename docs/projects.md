@@ -29,7 +29,11 @@ build/               build output; keep it out of version control
 
 Project commands find the project by walking up from the working directory to
 the first directory that holds `valise.conf`. `valise -C <dir> <command>` runs
-a command as if it had been started in `dir`.
+a command as if it had been started in `dir`; directory selection does not
+consult `CDPATH`. The physical project root must not contain TAB or LF because
+its path participates in the line- and tab-separated registry. An unsupported
+root is reported before registry generation; a caller directory below an
+ordinary project root may contain those characters.
 
 `valise.conf` has one `key=value` per line. Blank lines and `#` comments are
 ignored; an unknown or repeated key is an error.
@@ -193,8 +197,8 @@ a release, the plan:
   modules, and returns zero;
 - loads an optional dependency first when it can; its absence never affects
   the module that declared it;
-- with `VALISE_RELOAD=1`, removes the plan's declared exports first, so the
-  plan can be sourced again.
+- with `VALISE_RELOAD=1`, clears only declared exports the same provider
+  previously installed; caller-owned names and other providers remain conflicts.
 
 Compile fails before writing anything when the variant or bundle is unknown,
 an exclusion or root does not resolve, a variant exclusion breaks a required
@@ -257,13 +261,30 @@ release's env plan, so graphical sessions get the exported variables the env
 plan produces. The bridge is deliberately **partial**: `PATH` and the four XDG
 root variables are not carried, because a GUI session's `PATH` comes from
 launchd or the systemd user manager rather than the profile, and copying the
-installer's `PATH` into every application would be wrong. `valise env export`
-lists every excluded variable on stderr so the omission is visible.
+installer's `PATH` into every application would be wrong. `TMPDIR` is also
+excluded. `valise env export` names changes to these excluded variables on
+stderr; unchanged baseline values and private capture bookkeeping are omitted.
 `valise env export <environment.d|launchd|wsl>` prints that bridge content
 directly for the active release, without installing. The copy is evaluated the
 way a login shell would evaluate it, module side effects included; only
 `valise apply --dry-run` refuses to run module bodies, so it reports that the
 bridge would be regenerated rather than computing its bytes.
+
+Capture compares a baseline and the env plan using the same interpreter and
+the caller's `PATH`, `HOME`, `TMPDIR`, and XDG roots. An explicitly empty value
+stays empty; an unset `PATH` defaults to `/usr/bin:/bin` and an unset `HOME`
+defaults to `/`. Startup hooks are isolated. The comparison keeps NUL record
+boundaries until after baseline removal and exclusions, so a newline inside
+an excluded value cannot become a fabricated exported variable.
+
+Selected values must be valid UTF-8 Unicode scalar values. Newlines, C0 control
+bytes other than TAB, and U+FFFE/U+FFFF are rejected with the variable's name
+before output is emitted. `environment.d` also rejects TAB, DEL, and all 66
+Unicode noncharacters because its parser cannot preserve them. The launchd
+format preserves TAB, DEL, and the remaining XML-compatible noncharacters.
+These checks apply to selected exports; an excluded value cannot invalidate
+an otherwise representable bridge. Failed allocation, scanning, encoding, or
+cleanup makes capture fail rather than publishing an incomplete bridge.
 
 ## Checking a project
 

@@ -448,6 +448,14 @@ functions readonly. Those names are reserved because the loader must recover
 control after sourcing a module; direct definitions in module bodies are
 rejected before the body is invoked.
 
+The native Fish runtime distinguishes a recoverable module failure from
+unrecoverable damage to protected caller state. It restores and returns for
+the former. If it cannot authenticate its recovery machinery or restore a
+protected definition, it terminates the Fish process with status `125`;
+commands following the source or loader call cannot continue. This fatal path
+is reserved for integrity failures, including replacement of Fish-provided
+control functions that cannot be restored with their original provenance.
+
 After a body runs, the loader restores the caller's physical directory, logical
 `PWD` and `OLDPWD`, `IFS`, and the shell options it snapshotted. A body that
 makes any of those variables readonly is rejected as caller-state modification:

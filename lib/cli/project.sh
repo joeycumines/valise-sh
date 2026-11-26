@@ -20,19 +20,30 @@ VALISE_PROJECT_SHELLS="sh bash zsh ksh"
 
 # project_find_root [start]
 # Print the nearest ancestor of start (default: the working directory) that
-# holds valise.conf.
+# holds valise.conf. Return 1 when no project is found, or 2 after reporting a
+# physical root that cannot be represented in the line-oriented metadata API.
 project_find_root() {
-  _pfr_dir=${1:-}
-  if [ -z "$_pfr_dir" ]; then
-    _pfr_dir=$(pwd -P) || return 1
-  fi
+  _pfr_dir=${1:-.}
+  case "$_pfr_dir" in /*) ;; *) _pfr_dir=./$_pfr_dir ;; esac
+  _pfr_dir=$(CDPATH= cd -P "$_pfr_dir" 2>/dev/null && pwd -P 2>/dev/null && printf x) || return 1
+  _pfr_dir=${_pfr_dir%x}
+  _pfr_dir=${_pfr_dir%?}
   while :; do
     if [ -f "$_pfr_dir/valise.conf" ] && [ ! -L "$_pfr_dir/valise.conf" ]; then
+      case "$_pfr_dir" in
+        *"$VALISE_TAB"* | *"$VALISE_NL"*)
+          printf 'valise: error: physical project path contains TAB or LF: %s\n' "$_pfr_dir" >&2
+          return 2
+          ;;
+      esac
       printf '%s\n' "$_pfr_dir"
       return 0
     fi
     [ "$_pfr_dir" != "/" ] && [ -n "$_pfr_dir" ] || return 1
-    _pfr_dir=$(path_parent "$_pfr_dir")
+    # pwd -P produced an absolute physical path, so its parent needs neither
+    # another command substitution (which would strip LF) nor CDPATH lookup.
+    _pfr_dir=${_pfr_dir%/*}
+    [ -n "$_pfr_dir" ] || _pfr_dir=/
   done
 }
 
@@ -56,8 +67,10 @@ version_at_least() {
 # Find the project and read valise.conf. Sets _project_root, _project_variant,
 # _project_bundle and _project_requires.
 project_config_load() {
-  _project_root=$(project_find_root) ||
+  if _project_root=$(project_find_root); then :; else
+    [ "$?" -eq 1 ] || exit 1
     die "not inside a valise project: no valise.conf in $(pwd -P) or any parent (run 'valise new' or pass -C <dir>)"
+  fi
   [ -n "${HOME:-}" ] || die "HOME is required for project commands"
   _project_variant=default
   _project_bundle=default
@@ -262,7 +275,7 @@ cmd_registry() {
   done
   project_config_load
   if [ -z "$_registry_out" ]; then
-    _rg_tmp=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-registry.XXXXXX") ||
+    trusted_mktemp_assign _rg_tmp file "${TMPDIR:-/tmp}/valise-registry.XXXXXX" ||
       die "cannot create registry scratch file"
     registry_generate "$_project_root" "$_rg_tmp"
     _registry_cat=$(trusted_utility_path cat) || die "no trusted cat utility available"
@@ -278,7 +291,7 @@ cmd_registry() {
   fi
   _registry_parent=$(path_parent "$_registry_out")
   [ -d "$_registry_parent" ] || die "registry output directory does not exist: $_registry_parent"
-  _rg_tmp=$(trusted_mktemp_at "$_registry_parent" file "$_registry_parent/.valise-registry.XXXXXX") ||
+  trusted_mktemp_assign _rg_tmp file "$_registry_parent/.valise-registry.XXXXXX" "$_registry_parent" ||
     die "cannot create registry staging file"
   registry_generate "$_project_root" "$_rg_tmp"
   _registry_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
@@ -513,56 +526,67 @@ project_compile() {
 }
 
 # project_closure_has_phase <registry> <shell> <seeds> <excludes> <phase>
-# Succeeds when the closure for the shell contains a module of the phase.
-# The probe renders the plan ONCE into a staging file and reads its "# order="
-# header: the compiler partitions the closure by phase, so a non-empty order
-# list proves some module in the closure carries that phase. Compiler errors
-# are NOT swallowed - a graph that does not compile must fail here, because
-# the caller is about to compile the same graph again.
+# A successful probe returns yes/no as data from an isolated worker. Only the
+# outer function converts "no" to status 1: an allocation, compiler, inspection
+# or cleanup failure must abort even when the caller uses this as an if test.
+# The worker owns one private scratch directory and always cleans it itself.
 project_closure_has_phase() {
-  _pch_engine=$(engine_root) || die "cannot locate the valise engine"
-  _pch_compiler="$_pch_engine/lib/compiler.awk"
-  [ -r "$_pch_compiler" ] || die "compiler not found: $_pch_compiler"
-  _pch_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
-  _pch_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
-  _pch_prelude=$(project_prelude_functions) || exit 1
-  _pch_stream_file=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-closure.XXXXXX") ||
-    die "cannot create closure probe scratch file"
-  _pch_plan_file=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-closure-plan.XXXXXX") || {
-    "$_pch_rm" -f "$_pch_stream_file" 2>/dev/null || :
-    die "cannot create closure probe scratch file"
-  }
-  _pch_order=
-  # "No module of this phase" and "the graph does not compile" are DIFFERENT
-  # answers, and only the first may be a quiet no. The caller is about to
-  # compile the same graph, so a compile failure here must surface rather than
-  # silently omit the plan (a broken interactive release used to ship without
-  # its interactive plan). The two failures are distinguished by running the
-  # preprocess and the compiler as separate statements.
-  if ! project_preprocess "$1" "$2" "$3" "$4" "$_pch_prelude" >"$_pch_stream_file"; then
-    "$_pch_rm" -f "$_pch_stream_file" "$_pch_plan_file" 2>/dev/null || :
-    unset _pch_stream_file _pch_plan_file _pch_engine _pch_compiler _pch_awk _pch_rm _pch_prelude
-    die "cannot resolve the $2 module graph while probing for $5-phase modules"
+  if _pch_result=$(
+    _pch_engine=$(engine_root) || die "cannot locate the valise engine"
+    _pch_compiler="$_pch_engine/lib/compiler.awk"
+    [ -r "$_pch_compiler" ] || die "compiler not found: $_pch_compiler"
+    _pch_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
+    _pch_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
+    _pch_scratch=
+    _pch_signal=0
+    # Defer signals across mktemp and assignment of its result. Exiting from
+    # the signal trap there could strand a directory whose name is not known
+    # yet. Once the worker exits, its own EXIT trap finishes the cleanup.
+    trap '_pch_signal=130' INT
+    trap '_pch_signal=143' TERM
+    trap '
+      _pch_status=$?
+      if [ -n "$_pch_scratch" ] && ! run_ignoring_int_term "$_pch_rm" -rf "$_pch_scratch"; then
+        printf "valise: error: cannot remove closure probe scratch directory: %s\n" "$_pch_scratch" >&2
+        [ "$_pch_status" -ne 0 ] || _pch_status=1
+      fi
+      [ "$_pch_signal" -eq 0 ] || _pch_status=$_pch_signal
+      exit "$_pch_status"
+    ' EXIT
+    _pch_prelude=$(project_prelude_functions) || exit 1
+    # The outer worker records signals; every inner allocation subprocess
+    # ignores them until the owned pathname has reached that worker. Otherwise
+    # a process-group signal could kill a substitution after mkdir succeeded.
+    _pch_scratch=$(trap '' INT TERM; trusted_mktemp dir "${TMPDIR:-/tmp}/valise-closure.XXXXXX") ||
+      die "cannot create closure probe scratch directory"
+    [ "$_pch_signal" -eq 0 ] || exit "$_pch_signal"
+    if ! project_preprocess "$1" "$2" "$3" "$4" "$_pch_prelude" >"$_pch_scratch/stream"; then
+      die "cannot resolve the $2 module graph while probing for $5-phase modules"
+    fi
+    [ "$_pch_signal" -eq 0 ] || exit "$_pch_signal"
+    if ! "$_pch_awk" -v target_shell="$2" -v plan_name="$2" -v mode=plan -v phase="$5" \
+      -f "$_pch_compiler" "$_pch_scratch/stream" >"$_pch_scratch/plan"; then
+      die "cannot compile the $2 module graph while probing for $5-phase modules"
+    fi
+    [ "$_pch_signal" -eq 0 ] || exit "$_pch_signal"
+    # Exactly one header is required. A successful read of a truncated or
+    # malformed plan is not evidence that the closure has no interactive body.
+    "$_pch_awk" '
+      /^# order=/ { count++; order = substr($0, 9) }
+      END {
+        if (count != 1) exit 1
+        print length(order) ? "yes" : "no"
+      }
+    ' "$_pch_scratch/plan" ||
+      die "cannot inspect the $2 module graph while probing for $5-phase modules"
+  ); then
+    case $_pch_result in
+      yes) unset _pch_result; return 0 ;;
+      no) unset _pch_result; return 1 ;;
+    esac
   fi
-  if ! "$_pch_awk" -v target_shell="$2" -v plan_name="$2" -v mode=plan -v phase="$5" \
-    -f "$_pch_compiler" "$_pch_stream_file" >"$_pch_plan_file"; then
-    "$_pch_rm" -f "$_pch_stream_file" "$_pch_plan_file" 2>/dev/null || :
-    unset _pch_stream_file _pch_plan_file _pch_engine _pch_compiler _pch_awk _pch_rm _pch_prelude
-    die "cannot compile the $2 module graph while probing for $5-phase modules"
-  fi
-  if ! _pch_order=$("$_pch_awk" '/^# order=/ { sub(/^# order=/, ""); print; exit }' "$_pch_plan_file"); then
-    "$_pch_rm" -f "$_pch_stream_file" "$_pch_plan_file" 2>/dev/null || :
-    unset _pch_stream_file _pch_plan_file _pch_engine _pch_compiler _pch_awk _pch_rm _pch_prelude _pch_order
-    die "cannot inspect the $2 module graph while probing for $5-phase modules"
-  fi
-  "$_pch_rm" -f "$_pch_stream_file" "$_pch_plan_file" || die "cannot remove closure probe scratch files"
-  unset _pch_stream_file _pch_plan_file _pch_engine _pch_compiler _pch_awk _pch_rm _pch_prelude
-  if [ -n "$_pch_order" ]; then
-    unset _pch_order
-    return 0
-  fi
-  unset _pch_order
-  return 1
+  unset _pch_result
+  die "cannot probe the $2 module graph for $5-phase modules"
 }
 
 # project_output_check <out> <replace>
@@ -596,7 +620,7 @@ project_publish() {
     "$_pub_rmdir" "$2" || die "cannot clear empty output directory: $2"
     ;;
   2)
-    _publish_previous=$(trusted_mktemp_at "$_pub_parent" dir "$_pub_parent/.valise-previous.XXXXXX") ||
+    trusted_mktemp_assign _publish_previous dir "$_pub_parent/.valise-previous.XXXXXX" "$_pub_parent" ||
       die "cannot reserve a place for the previous output"
     "$_pub_mv" "$2" "$_publish_previous/tree" || die "cannot move the previous output aside: $2"
     ;;
@@ -640,7 +664,7 @@ cmd_compile() {
   _co_parent=$(path_parent "$_co_out")
   _co_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
   [ -d "$_co_parent" ] || "$_co_mkdir" -p "$_co_parent" || die "cannot create output parent: $_co_parent"
-  _stage=$(trusted_mktemp_at "$_co_parent" dir "$_co_parent/.valise-compile.XXXXXX") ||
+  trusted_mktemp_assign _stage dir "$_co_parent/.valise-compile.XXXXXX" "$_co_parent" ||
     die "cannot create compile staging directory"
   registry_generate "$_project_root" "$_stage/.registry"
   for _co_shell in $VALISE_PROJECT_SHELLS; do
@@ -668,7 +692,7 @@ project_meta_add_require() {
   _pm_module=$2
   [ -f "$_pm_meta" ] && [ ! -L "$_pm_meta" ] || die "metadata file is missing or unsafe: $_pm_meta"
   _pm_parent=$(path_parent "$_pm_meta")
-  _pm_tmp=$(trusted_mktemp_at "$_pm_parent" file "$_pm_parent/.valise-meta.XXXXXX") ||
+  trusted_mktemp_assign _pm_tmp file "$_pm_parent/.valise-meta.XXXXXX" "$_pm_parent" ||
     die "cannot create metadata staging file"
   _pm_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   "$_pm_awk" -v module="$_pm_module" '
@@ -699,7 +723,7 @@ project_meta_remove_module() {
   _pm_module=$2
   [ -f "$_pm_meta" ] && [ ! -L "$_pm_meta" ] || die "metadata file is missing or unsafe: $_pm_meta"
   _pm_parent=$(path_parent "$_pm_meta")
-  _pm_tmp=$(trusted_mktemp_at "$_pm_parent" file "$_pm_parent/.valise-meta.XXXXXX") ||
+  trusted_mktemp_assign _pm_tmp file "$_pm_parent/.valise-meta.XXXXXX" "$_pm_parent" ||
     die "cannot create metadata staging file"
   _pm_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   "$_pm_awk" -v module="$_pm_module" '
@@ -782,7 +806,7 @@ project_release_filter() {
 project_release_strip() {
   [ -f "$1" ] || return 0
   _rs_parent=$(path_parent "$1")
-  _rr_tmp=$(trusted_mktemp_at "$_rs_parent" file "$_rs_parent/.valise-table.XXXXXX") ||
+  trusted_mktemp_assign _rr_tmp file "$_rs_parent/.valise-table.XXXXXX" "$_rs_parent" ||
     die "cannot create table staging file"
   _rs_status=0
   project_release_filter "$1" "$2" "$3" "$4" >"$_rr_tmp" || _rs_status=$?
@@ -863,7 +887,7 @@ project_write_integration() {
     die "startup path is not a regular file: $_pi_target"
   fi
   _pi_parent=$(path_parent "$_pi_target")
-  _pi_tmp=$(trusted_mktemp_at "$_pi_parent" file "$_pi_parent/.valise-integration.XXXXXX") ||
+  trusted_mktemp_assign _pi_tmp file "$_pi_parent/.valise-integration.XXXXXX" "$_pi_parent" ||
     die "cannot create integration staging file"
   integration_render "$_pi_target" "$_pi_snippet" >"$_pi_tmp" || die "cannot read startup file: $_pi_target"
   if [ -f "$_pi_target" ]; then
@@ -1093,7 +1117,7 @@ cmd_module() {
         esac
         case "$_module_export" in
         *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*) die "invalid export name: $_module_export" ;;
-        case | do | done | elif | else | esac | fi | for | if | in | then | until | while | time)
+        'case' | 'do' | 'done' | 'elif' | 'else' | 'esac' | 'fi' | 'for' | 'if' | 'in' | 'then' | 'until' | 'while' | 'time')
           die "invalid export name (reserved word): $_module_export"
           ;;
         esac
@@ -1149,7 +1173,7 @@ cmd_module() {
     shift
     [ "$#" -eq 0 ] || die "usage: valise module list"
     project_config_load
-    _module_list_tmp=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-module-list.XXXXXX") ||
+    trusted_mktemp_assign _module_list_tmp file "${TMPDIR:-/tmp}/valise-module-list.XXXXXX" ||
       die "cannot create module list staging file"
     registry_generate "$_project_root" "$_module_list_tmp"
     _module_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
@@ -1458,7 +1482,7 @@ project_build() {
   [ -d "$_pb_parent" ] || "$_pb_mkdir" -p "$_pb_parent" || die "cannot create output parent: $_pb_parent"
   # Build beside the destination and publish only after the complete tree and
   # manifest exist, so a failed build never leaves a partial release.
-  _stage=$(trusted_mktemp_at "$_pb_parent" dir "$_pb_parent/.valise-build.XXXXXX") ||
+  trusted_mktemp_assign _stage dir "$_pb_parent/.valise-build.XXXXXX" "$_pb_parent" ||
     die "cannot create build staging directory"
   _pb_scratch="$_stage/.scratch"
   "$_pb_mkdir" -p "$_pb_scratch" "$_stage/plans" "$_stage/runtime" || die "cannot create release tree"
@@ -1707,7 +1731,7 @@ cmd_explain_variant() {
   printf '\nPer-shell impact (bundle %s):\n' "$_ev_bundle"
   # Resolve through the compiler, so a qualified exclusion matches a bare root
   # and the module counts are the closures a build would load.
-  _stage=$(trusted_mktemp dir "${TMPDIR:-/tmp}/valise-explain.XXXXXX") || die "cannot create scratch directory"
+  trusted_mktemp_assign _stage dir "${TMPDIR:-/tmp}/valise-explain.XXXXXX" || die "cannot create scratch directory"
   registry_generate "$_project_root" "$_stage/registry"
   _ev_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   for _ev_shell in $VALISE_PROJECT_SHELLS fish; do
@@ -1748,7 +1772,7 @@ cmd_explain_bundles() {
   else
     _eb_bundles=$(project_bundle_names "$_project_root") || die "cannot read bundles.tsv"
   fi
-  _stage=$(trusted_mktemp dir "${TMPDIR:-/tmp}/valise-explain.XXXXXX") || die "cannot create scratch directory"
+  trusted_mktemp_assign _stage dir "${TMPDIR:-/tmp}/valise-explain.XXXXXX" || die "cannot create scratch directory"
   registry_generate "$_project_root" "$_stage/registry"
   _eb_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   printf 'Bundle resolution (variant %s):\n\n' "$_eb_variant"
@@ -1785,7 +1809,9 @@ cmd_layer_lint() {
   [ -n "$_ll_name" ] || die "usage: valise layer-lint <layer-name|layer-path>"
   # A layer is addressed by its directory name in the current project, or by a
   # path to a layer tree that contains module.d/.
-  _ll_root=$(project_find_root 2>/dev/null || :)
+  if _ll_root=$(project_find_root); then :; else
+    [ "$?" -eq 1 ] || exit 1
+  fi
   if [ -n "$_ll_root" ] && [ -d "$_ll_root/layers/$_ll_name/module.d" ]; then
     _ll_dir="$_ll_root/layers/$_ll_name"
   elif [ -d "$_ll_name/module.d" ]; then

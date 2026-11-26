@@ -10,7 +10,7 @@
 # plans/<shell>-interactive.sh; a shell class with no plan loads nothing.
 #
 # The block is two-stage, and the stage it carries depends on WHERE it is
-# written (print_posix_integration <all|env>):
+# written (print_posix_integration <all|env|bash-login>):
 #   stage 1 (every file)  sources the env plan. The env plan is a convergent
 #     projection: re-running it in a fresh nested shell (a new tmux pane, a new
 #     login) is what repairs PATH reordering done by /etc/profile or macOS
@@ -68,9 +68,9 @@
 # re-asserted in the shell that actually runs; the module bodies re-run then.
 #
 # Both stages must stay silent, so ssh host-cmd sessions (which read .bashrc
-# non-interactively) are safe. The shell class is named by the first of
-# KSH_VERSION, ZSH_VERSION and BASH_VERSION that is set; any other shell uses
-# the generic sh plan.
+# non-interactively) are safe. Shell-specific builtins identify the running
+# interpreter in an isolated probe; inherited version variables and commands
+# supplied by the caller cannot select another shell's plan.
 print_posix_integration() {
   _pix_stage=${1:-all}
   _pix_active_literal=$(shell_quote "$VALISE_ACTIVE_LINK") || return 1
@@ -92,18 +92,34 @@ print_posix_integration() {
   # release was attempted": on the FIRST load of a release nothing is owned yet,
   # so a genuine foreign conflict is still reported, and a second read of the
   # SAME release is skipped by the guard, not reloaded.
+  # An empty PATH would still search the current directory; /dev/null is not
+  # a directory, so no executable can satisfy these probes. Bash's command
+  # builtin bypasses a function named builtin. Native zsh's command prefix
+  # searches only external commands; zsh in sh emulation supports the command
+  # probe first, while native zsh needs a direct builtin invocation after
+  # removing a same-named function inside the disposable subshell. Probe ksh
+  # before that fallback so its readonly functions never need to be removed.
   printf '%s\n' \
     '# BEGIN valise managed block' \
     "_valise_active_link=$_pix_active_literal" \
-    '# The running shell is identified by probes on shell-specific builtins, not' \
-    '# by inherited *_VERSION variables: a bash login can inherit KSH_VERSION or' \
-    '# ZSH_VERSION, and ksh/dash/zsh can inherit BASH_VERSION, and the version' \
-    '# variables alone would then pick the wrong plan class here.' \
-    '_valise_plan=' \
-    'if command -v shopt >/dev/null 2>&1; then _valise_plan=bash' \
-    'elif command -v emulate >/dev/null 2>&1; then _valise_plan=zsh' \
-    'elif command -v whence >/dev/null 2>&1; then _valise_plan=ksh' \
-    'else _valise_plan=sh; fi' \
+    '# Probe builtins with external lookup disabled. The subshell preserves' \
+    '# caller functions, PATH and options; inherited *_VERSION values are inert.' \
+    '_valise_plan=$(' \
+    '  PATH=/dev/null' \
+    '  if \command "builtin" shopt -p >/dev/null 2>&1; then' \
+    '    if \command "builtin" shopt -q -o posix; then \command "builtin" printf "%s\n" bash-posix' \
+    '    else \command "builtin" printf "%s\n" bash; fi' \
+    '  elif \command "builtin" emulate -L sh >/dev/null 2>&1; then \command printf "%s\n" zsh' \
+    '  elif \command "whence" whence >/dev/null 2>&1; then \command printf "%s\n" ksh' \
+    '  else' \
+    '    \unset -f builtin 2>/dev/null || :' \
+    '    if \builtin emulate -L sh >/dev/null 2>&1; then \builtin printf "%s\n" zsh' \
+    '    else \command printf "%s\n" sh; fi' \
+    '  fi' \
+    ') 2>/dev/null' \
+    '_valise_bash_native=0' \
+    'if [ "$_valise_plan" = bash ]; then _valise_bash_native=1' \
+    'elif [ "$_valise_plan" = bash-posix ]; then _valise_plan=bash; fi' \
     '_valise_active=$(cd "$_valise_active_link" 2>/dev/null && pwd -P)' \
     '_valise_stage1_ok=1' \
     'if [ -n "$_valise_active" ]; then' \
@@ -166,35 +182,18 @@ print_posix_integration() {
     '  fi'
   if [ "$_pix_stage" = all ] || [ "$_pix_stage" = bash-login ]; then
     if [ "$_pix_stage" = bash-login ]; then
-      # Gate on the shell ACTUALLY running, not _valise_plan: a bash login can
-      # inherit KSH_VERSION/ZSH_VERSION from its parent, and ksh/dash/zsh can
-      # inherit BASH_VERSION, so a version variable alone cannot prove native
-      # bash. shopt is a bash-only builtin, so its presence identifies bash;
-      # POSIX mode and an `sh` invocation name keep bash-as-sh on its env-only
-      # stage: bash invoked as `sh` reads ~/.profile BEFORE enabling POSIX
-      # mode, so `set +o` still prints `set +o posix` there, while `shopt -q
-      # -o posix` reports the mode that is in effect for the code that
-      # follows. Use `set +o` and match the option name exactly as a fallback:
-      # `set -o` also lists `verbose on` / `xtrace on` after `posix off`, so a
-      # loose *posix*on* pattern would skip stage 2 whenever either option
-      # was enabled. The invocation name is matched with a trailing -sh so a
-      # login shell reached through any symlink whose basename ends in -sh
-      # (or is exactly sh) is treated as an sh invocation.
+      # The builtin probe proves Bash and records its POSIX option without
+      # changing caller state. Bash invoked as sh enables POSIX mode only AFTER
+      # reading .profile, so also check its exact invocation name here. A name
+      # merely ending in -sh is native Bash and ignores ENV; it needs stage 2
+      # in this login file. Use byte comparisons, unaffected by nocasematch.
       printf '%s\n' \
-        '  _valise_bash_native=0' \
         '  # bash-login marker: doctor keys its gate expectation on this line.' \
         '  # A .profile without it is a pre-0.4.1 env-only install for a' \
         '  # non-bash default shell and must not be flagged as legacy.' \
         '  _valise_bash_login_stage=1' \
-        '  if command -v shopt >/dev/null 2>&1; then' \
-        '    case "${0##*/}" in sh|*-sh) : ;;' \
-        '    *) if shopt -q -o posix 2>/dev/null; then :; else' \
-        '         case "$(set +o 2>/dev/null)" in' \
-        '         *"set -o posix"*) : ;;' \
-        '         *) _valise_bash_native=1 ;;' \
-        '         esac' \
-        '       fi ;;' \
-        '    esac' \
+        '  if [ "${0##*/}" = sh ] || [ "$0" = -sh ]; then' \
+        '    _valise_bash_native=0' \
         '  fi' \
         '  if [ "$_valise_stage1_ok" -eq 1 ] && [ "$_valise_bash_native" -eq 1 ]; then'
     else
@@ -259,7 +258,7 @@ print_posix_integration() {
       'unset _valise_shim'
   fi
   printf '%s\n' \
-    'unset _valise_active _valise_plan' \
+    'unset _valise_active _valise_plan _valise_bash_native' \
     'unset _valise_active_link' \
     '# END valise managed block'
   unset _pix_active_literal _pix_shim_literal _pix_stage
@@ -601,7 +600,7 @@ cmd_doctor() {
       # The candidate paths are read one per line. Word splitting on $(...)
       # would break a home directory containing whitespace, so the list goes
       # through a staging file instead.
-      _doctor_cand_file=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-doctor-candidates.XXXXXX") ||
+      trusted_mktemp_assign _doctor_cand_file file "${TMPDIR:-/tmp}/valise-doctor-candidates.XXXXXX" ||
         die "cannot create doctor candidate staging file"
       integration_shell_files "$_doctor_shell" "$_doctor_home" >"$_doctor_cand_file"
       while IFS= read -r _doctor_candidate; do
