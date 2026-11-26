@@ -9,6 +9,11 @@ set -eu
 
 VALISE_VERSION="0.4.1"
 
+# A literal newline for case patterns below: parameter expansion cannot put a
+# raw newline inside a case pattern portably, so bind it once here.
+_valise_nl='
+'
+
 # The caller's working directory must be captured before -C: relative PATH
 # entries are interpreted from where valise was invoked, not from the project
 # directory. The same capture anchors a relative CLI entry path below;
@@ -82,8 +87,16 @@ while [ -L "$_valise_self" ]; do
     printf 'valise: error: cannot resolve %s\n' "$_valise_self" >&2
     exit 1
   }
-  _valise_link=${_valise_link%x}
-  _valise_link=${_valise_link%?}
+  # The sentinel keeps every newline that is part of the target itself. BSD
+  # readlink appends one newline only when the target does not already end in
+  # one, while GNU readlink always appends one; either way the capture ends
+  # in "x", so after removing the sentinel strip one trailing newline only
+  # when present: that removes exactly the separator readlink printed and
+  # keeps every newline that belongs to the target.
+  case $_valise_link in
+    *"$_valise_nl"x) _valise_link=${_valise_link%"$_valise_nl"x}$_valise_nl ;;
+    *) _valise_link=${_valise_link%x} ;;
+  esac
   case "$_valise_link" in
     /*) _valise_self=$_valise_link ;;
     *) _valise_self=${_valise_self%/*}/$_valise_link ;;
@@ -117,7 +130,7 @@ for _valise_part in usage common store fish-hook integration commands lifecycle 
   fi
   . "$VALISE_CLI_DIR/$_valise_part.sh"
 done
-unset _valise_part _valise_self _valise_self_dir _valise_link _valise_readlink _valise_candidate
+unset _valise_part _valise_self _valise_self_dir _valise_link _valise_readlink _valise_candidate _valise_nl
 # _valise_cwd_unavailable is read by lib/cli/commands.sh (path_contains_dir)
 # to skip relative/empty caller PATH entries when the CWD is gone; keep it.
 

@@ -135,7 +135,7 @@ mkdir -p "$_bootstrap_lf_cwd" "$_bootstrap_root/caller" "$_bootstrap_root/cdpath
 ln -s "$_valise" "$_bootstrap_lf_cwd/valise"
 ln -s "$_valise" "$_bootstrap_root/caller/valise"
 _bootstrap() {
-  env -i HOME="$_test_home" PATH=/usr/bin:/bin TMPDIR=/tmp \
+  env -i HOME="$_test_home" PATH=/usr/bin:/bin TMPDIR=/tmp SHELL=/bin/sh \
     XDG_CONFIG_HOME="$XDG_CONFIG_HOME" XDG_DATA_HOME="$XDG_DATA_HOME" \
     XDG_STATE_HOME="$XDG_STATE_HOME" "$@"
 }
