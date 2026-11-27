@@ -244,9 +244,22 @@ xdg_child() {
   unset _xdg_child_root
 }
 
+# readlink_target <path>
+# Print the literal symlink target byte-exact, on both GNU and BSD readlink
+# (which otherwise differ in the separator newline they append), while
+# preserving newlines that belong to the target itself. -n suppresses the
+# separator, and the 'x' sentinel survives command substitution's own
+# trailing-newline stripping, so removing exactly the sentinel leaves the
+# target untouched.
 readlink_target() {
   _readlink_path=$(trusted_utility_path readlink) || return 1
-  "$_readlink_path" "$1"
+  _readlink_out=$("$_readlink_path" -n "$1" && printf x) || return 1
+  # The sentinel protects the target's trailing newlines from command
+  # substitution's stripping, so removing exactly the sentinel restores the
+  # target byte-exact; printf '%s' then emits it with no added separator.
+  _readlink_out=${_readlink_out%x}
+  printf '%s' "$_readlink_out"
+  unset _readlink_path _readlink_out
 }
 
 # active_release_dir

@@ -607,12 +607,10 @@ transaction_preflight() {
   if [ -L "$VALISE_ACTIVE_LINK" ]; then
     _tp_had_link=1
     # Keep the literal target, including trailing newlines, for restoration.
-    _tp_target=$(readlink_target "$VALISE_ACTIVE_LINK" && printf '.') ||
+    # readlink_target already prints the target byte-exact with no separator
+    # newline, so no sentinel/strip dance is needed here.
+    _tp_target=$(readlink_target "$VALISE_ACTIVE_LINK") ||
       die "cannot read active pointer: $VALISE_ACTIVE_LINK"
-    _tp_target=${_tp_target%.}
-    _tp_nl='
-'
-    _tp_target=${_tp_target%"$_tp_nl"}
     [ -n "$_tp_target" ] || die "cannot read active pointer: $VALISE_ACTIVE_LINK"
   elif [ -e "$VALISE_ACTIVE_LINK" ]; then
     die "active path exists and is not a symlink: $VALISE_ACTIVE_LINK"
@@ -633,7 +631,7 @@ transaction_preflight() {
     _tp_bridge=$(transaction_bridge_path "$_tp_mode") || continue
     transaction_record_path_check "$_tp_bridge" "GUI bridge path"
   done
-  unset _tp_previous _tp_nl _tp_mode _tp_bridge
+  unset _tp_previous _tp_mode _tp_bridge
 }
 
 # transaction_begin <install|release> <commands 0|1> <bridges 0|1>
@@ -817,19 +815,13 @@ transaction_abort() {
 transaction_restore() {
   _transaction_rolled=0
   if [ "$_transaction_had_link" -eq 1 ]; then
-    _ta_current=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null && printf '.') || _ta_current=
-    _ta_nl='
-'
-    _ta_current=${_ta_current%.}
-    _ta_current=${_ta_current%"$_ta_nl"}
+    _ta_current=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null) || _ta_current=
     if [ ! -L "$VALISE_ACTIVE_LINK" ] || [ "$_ta_current" != "$_transaction_old_target" ]; then
       if [ ! -e "$VALISE_ACTIVE_LINK" ] || [ -L "$VALISE_ACTIVE_LINK" ]; then
         "$_tx_ln" -sfn "$_transaction_old_target" "$VALISE_ACTIVE_LINK" 2>/dev/null || :
       fi
     fi
-    _ta_current=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null && printf '.') || _ta_current=
-    _ta_current=${_ta_current%.}
-    _ta_current=${_ta_current%"$_ta_nl"}
+    _ta_current=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null) || _ta_current=
     if [ -L "$VALISE_ACTIVE_LINK" ] && [ "$_ta_current" = "$_transaction_old_target" ]; then
       _transaction_rolled=1
     fi
@@ -880,7 +872,7 @@ transaction_restore() {
     printf 'valise: already updated (they load whichever release is active):%s\n' "$_txn_changed" >&2
   fi
   [ "$_transaction_keep" -eq 0 ] || _cleanup_failed=1
-  unset _ta_current _ta_nl _ta_previous
+  unset _ta_current _ta_previous
   [ "$_transaction_keep" -eq 0 ]
 }
 

@@ -235,14 +235,10 @@ switch_active_link() {
   # owns the exact outgoing target, so every failure uses the central restore
   # path rather than a separate, incomplete link-only rollback here.
   "$_ln_path" -sfn "$1" "$VALISE_ACTIVE_LINK" || die "failed to update active symlink"
-  _switch_target=$(readlink_target "$VALISE_ACTIVE_LINK" && printf '.') || die "cannot verify active symlink"
-  _switch_target=${_switch_target%.}
-  _switch_nl='
-'
-  _switch_target=${_switch_target%"$_switch_nl"}
+  _switch_target=$(readlink_target "$VALISE_ACTIVE_LINK") || die "cannot verify active symlink"
   [ -L "$VALISE_ACTIVE_LINK" ] && [ "$_switch_target" = "$1" ] || die "active symlink target mismatch"
   note_switch "$_transaction_old_target" "$1"
-  unset _switch_target _switch_nl
+  unset _switch_target
 }
 
 source_path_is_physical() {
