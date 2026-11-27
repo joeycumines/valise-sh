@@ -1157,7 +1157,15 @@ cmd_run() {
   devtool_runner "$_run_class" "$_run_rel" "$_dev_tmp/runner" "$_dev_tmp/script" || die "cannot write the runner"
   _run_rc=0
   if [ "$_run_keep" -eq 1 ]; then
-    "$_run_interp" "$_dev_tmp/runner" "$@" || _run_rc=$?
+    # Normalize TERM like the quarantine path below: a caller without TERM (CI
+    # runners) makes fish's init run tput with no terminfo entry, printing
+    # diagnostics to stderr that the caller never asked for. TERM=dumb is the
+    # same inert terminal the quarantine path already uses.
+    if [ -z "${TERM:-}" ]; then
+      TERM=dumb "$_run_interp" "$_dev_tmp/runner" "$@" || _run_rc=$?
+    else
+      "$_run_interp" "$_dev_tmp/runner" "$@" || _run_rc=$?
+    fi
   else
     devtool_exec "$_dev_tmp/home" "$_run_interp" "$_dev_tmp/runner" "$@" || _run_rc=$?
   fi

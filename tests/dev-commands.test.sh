@@ -625,13 +625,19 @@ for _stdin_shell in sh bash zsh ksh fish; do
     [ "$_stdin_mode" != keep-env ] || set -- --keep-env
     if _stdin_run run --shell="$_stdin_shell" --module="$_stdin_module" "$@" -- \
       "$_stdin_script" 'a b' 'x*y' '' <"$_tmp/run-stdin.in" \
-      >"$_tmp/run-stdin.out" 2>"$_tmp/run-args.out" &&
+      >"$_tmp/run-stdin.out" 2>"$_tmp/run-args.raw" &&
       cmp -s "$_tmp/run-stdin.in" "$_tmp/run-stdin.out" &&
+      # Fish 3.x writes a tput terminfo diagnostic to stderr when TERM=dumb
+      # lacks the 'ce' capability; that line is the interpreter's init noise,
+      # not the script's output, so strip lines starting with 'tput: ' before
+      # comparing the argument echo.
+      grep -v '^tput: ' "$_tmp/run-args.raw" >"$_tmp/run-args.out" 2>/dev/null || \
+        cp "$_tmp/run-args.raw" "$_tmp/run-args.out" &&
       cmp -s "$_tmp/run-args.want" "$_tmp/run-args.out"; then
       pass "run forwards stdin byte for byte and preserves arguments ($_stdin_shell, $_stdin_mode)"
     else
       fail "run changed stdin or arguments ($_stdin_shell, $_stdin_mode)"
-      cat "$_tmp/run-args.out" >&2
+      cat "$_tmp/run-args.raw" >&2
     fi
   done
 done
@@ -659,11 +665,21 @@ EOF
     fail "run --keep-env accepted or executed a caller cd function"
     cat "$_tmp/fish-caller.out" "$_tmp/fish-caller.err" >&2
   fi
-  if [ "$(_stdin_run run --shell=fish --module=fish_bits -- 'fish_bits_ok' 2>"$_tmp/fish-isolated-run.err")" = fish-ok ] &&
-    [ ! -s "$_tmp/fish-isolated-run.err" ] &&
-    _stdin_run test --shell=fish fish_bits >"$_tmp/fish-isolated-test.out" 2>"$_tmp/fish-isolated-test.err" &&
+  _fish_isolated_run_out=$(_stdin_run run --shell=fish --module=fish_bits -- 'fish_bits_ok' 2>"$_tmp/fish-isolated-run.err")
+  # Fish 3.x writes a tput terminfo diagnostic to stderr when TERM=dumb lacks
+  # the 'ce' capability; that line is interpreter init noise, not the run's
+  # output, so a poisoned-config failure must not be masked by it.
+  grep -v '^tput: ' "$_tmp/fish-isolated-run.err" >"$_tmp/fish-isolated-run.clean" 2>/dev/null || \
+    cp "$_tmp/fish-isolated-run.err" "$_tmp/fish-isolated-run.clean"
+  _fish_isolated_test_rc=0
+  _stdin_run test --shell=fish fish_bits >"$_tmp/fish-isolated-test.out" 2>"$_tmp/fish-isolated-test.err" || _fish_isolated_test_rc=$?
+  grep -v '^tput: ' "$_tmp/fish-isolated-test.err" >"$_tmp/fish-isolated-test.clean" 2>/dev/null || \
+    cp "$_tmp/fish-isolated-test.err" "$_tmp/fish-isolated-test.clean"
+  if [ "$_fish_isolated_run_out" = fish-ok ] &&
+    [ ! -s "$_tmp/fish-isolated-run.clean" ] &&
+    [ "$_fish_isolated_test_rc" -eq 0 ] &&
     grep -Fx 'ok fish_bits [fish] tests/fish_bits.fish' "$_tmp/fish-isolated-test.out" >/dev/null &&
-    [ ! -s "$_tmp/fish-isolated-test.err" ]; then
+    [ ! -s "$_tmp/fish-isolated-test.clean" ]; then
     pass "quarantined Fish run and test ignore a poisoned caller config"
   else
     fail "quarantined Fish run or test used a poisoned caller config"

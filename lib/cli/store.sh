@@ -127,8 +127,13 @@ seal_tree() {
   _seal_tree_root=$1
   _find_path=$(trusted_utility_path find) || return 1
   _seal_chmod_path=$(trusted_utility_path chmod) || return 1
-  "$_find_path" "$_seal_tree_root" -type d -exec "$_seal_chmod_path" 0555 {} + 2>/dev/null || return 1
-  _seal_tree_dirs=$("$_find_path" "$_seal_tree_root" -type d -print) || return 1
+  # The root itself stays writable: a sealed root could not be renamed out of
+  # its parent during publication (rename needs write on the moved directory,
+  # not just on the parent), and every directory strictly below the root is
+  # sealed. verify_release_dir only requires 0555 for in-tree directories,
+  # never for the release root itself.
+  "$_find_path" "$_seal_tree_root" -mindepth 1 -type d -exec "$_seal_chmod_path" 0555 {} + 2>/dev/null || return 1
+  _seal_tree_dirs=$("$_find_path" "$_seal_tree_root" -mindepth 1 -type d -print) || return 1
   while IFS= read -r _seal_tree_dir; do
     [ -n "$_seal_tree_dir" ] || continue
     [ "$(file_mode "$_seal_tree_dir")" = "0555" ] || return 1
@@ -430,7 +435,15 @@ verify_release_dir() {
   _verify_dir=$1
   _verify_manifest=$2
   _verify_canonical=$(cd "$_verify_dir" 2>/dev/null && pwd -P) || _verify_fail "cannot resolve release root" || return 1
-  [ "$(file_mode "$_verify_dir")" = "0555" ] || _verify_fail "release root mode mismatch" || return 1
+  # The root itself stays owner-writable so publication can rename it into
+  # place (rename(2) needs write permission on the moved directory, not just
+  # on the parent); every directory strictly below the root is sealed 0555.
+  # Accept any owner-writable mode: the umask decides whether a fresh root is
+  # 0755 or 0775, and both are movable.
+  case "$(file_mode "$_verify_dir")" in
+    0555|07[0-7][0-7]|06[0-7][0-7]) : ;;
+    *) _verify_fail "release root mode mismatch" || return 1 ;;
+  esac
   _verify_snapshot="$_verify_dir/.valise-manifest"
   if [ -e "$_verify_snapshot" ] || [ -L "$_verify_snapshot" ]; then
     [ -f "$_verify_snapshot" ] || _verify_fail "release manifest snapshot is not a regular file" || return 1
@@ -792,6 +805,15 @@ cmd_install() {
 
     # Create target directories
     "$_mkdir_path" -p "$VALISE_RELEASES_DIR" "$VALISE_XDG_CONFIG" "$VALISE_XDG_STATE"
+
+    # A previous install seals the releases directory itself; rename(2) into
+    # it needs write permission on the parent, so restore owner-write before
+    # publishing. The release root itself stays writable for the same reason
+    # (seal_tree seals only directories strictly below it).
+    if [ -d "$VALISE_RELEASES_DIR" ] && [ ! -L "$VALISE_RELEASES_DIR" ]; then
+      "$_chmod_path" u+w "$VALISE_RELEASES_DIR" 2>/dev/null ||
+        die "cannot make the releases directory writable for publication: $VALISE_RELEASES_DIR"
+    fi
 
     # Stage into temp directory first
     trusted_mktemp_assign _stage dir "${TMPDIR:-/tmp}/valise-install.XXXXXX" || die "cannot create staging directory"

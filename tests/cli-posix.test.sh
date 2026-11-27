@@ -687,6 +687,27 @@ else
   fail "install creates releases directory"
 fi
 
+# Regression: a sealed (0555) releases directory from a previous install must
+# not make the next install fail. rename(2) needs write permission on the moved
+# directory itself, so seal_tree leaves the release root writable while sealing
+# every directory strictly inside it.
+_sealed_home="$_test_home/sealed-home"
+mkdir -p "$_sealed_home"
+_sealed_releases="$_sealed_home/.local/share/valise/releases"
+mkdir -p "$_sealed_releases"
+chmod 0555 "$_sealed_releases"
+if (cd "$_test_home/repo" && HOME="$_sealed_home" XDG_DATA_HOME="$_sealed_home/.local/share" XDG_CONFIG_HOME="$_sealed_home/.config" XDG_STATE_HOME="$_sealed_home/.local/state" SHELL=/bin/bash "$_valise" install >/dev/null 2>&1); then
+  _sealed_rel=$(cd "$_sealed_home/.config/valise/active" 2>/dev/null && pwd -P) || _sealed_rel=
+  if [ -n "$_sealed_rel" ] && [ -d "$_sealed_rel" ]; then
+    pass "install succeeds over a sealed releases directory"
+  else
+    fail "install succeeded over a sealed releases directory but no release landed"
+  fi
+else
+  fail "install fails over a sealed (0555) releases directory"
+fi
+chmod u+w "$_sealed_releases" 2>/dev/null || :
+
 if [ -d "$XDG_CONFIG_HOME/valise" ]; then
   pass "install creates config directory"
 else
