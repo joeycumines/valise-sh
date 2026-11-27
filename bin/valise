@@ -69,8 +69,13 @@ esac
 # that expose bin/valise through a symlink (bun, npm) still find ../lib. This
 # runs before trusted_utility_path is loaded; mirror its fixed readlink
 # candidates rather than running a caller-controlled PATH executable. Every
-# captured pathname keeps its trailing newlines, stripping only the one that
-# readlink or pwd prints. The invocation path above stays the original alias.
+# captured pathname keeps its trailing newlines: strip only the one separator
+# newline that readlink prints, never a newline that belongs to the target.
+# Hops are joined textually and handed back to the kernel (-L/readlink), which
+# resolves '..' against the physical parent — resolving the directory portion
+# per hop instead would rewrite 'bin/../lib' into 'lib' early and break a
+# base name that legitimately ends in newlines. Only the final directory is
+# made physical. The invocation path above stays the original alias.
 _valise_self=$_valise_cli_path
 _valise_readlink=
 while [ -L "$_valise_self" ]; do
@@ -83,20 +88,15 @@ while [ -L "$_valise_self" ]; do
       exit 1
     fi
   fi
-  _valise_link=$("$_valise_readlink" "$_valise_self" && printf x) || {
+  # The sentinel protects every newline that is part of the target itself.
+  # -n suppresses readlink's separator newline on both GNU and BSD, so after
+  # removing the sentinel the value is the verbatim target — including any
+  # trailing newlines that belong to it.
+  _valise_link=$("$_valise_readlink" -n "$_valise_self" && printf x) || {
     printf 'valise: error: cannot resolve %s\n' "$_valise_self" >&2
     exit 1
   }
-  # The sentinel keeps every newline that is part of the target itself. BSD
-  # readlink appends one newline only when the target does not already end in
-  # one, while GNU readlink always appends one; either way the capture ends
-  # in "x", so after removing the sentinel strip one trailing newline only
-  # when present: that removes exactly the separator readlink printed and
-  # keeps every newline that belongs to the target.
-  case $_valise_link in
-    *"$_valise_nl"x) _valise_link=${_valise_link%"$_valise_nl"x}$_valise_nl ;;
-    *) _valise_link=${_valise_link%x} ;;
-  esac
+  _valise_link=${_valise_link%x}
   case "$_valise_link" in
     /*) _valise_self=$_valise_link ;;
     *) _valise_self=${_valise_self%/*}/$_valise_link ;;
