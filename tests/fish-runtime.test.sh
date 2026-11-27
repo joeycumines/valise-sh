@@ -1082,9 +1082,12 @@ mkdir -p "$_entrypoint_switch_a/fake-prefix/share/fish/functions"
 printf '%s\n' 'function entrypoint_fake_runtime; echo release-owned; end' \
   >"$_entrypoint_switch_a/fake-prefix/share/fish/functions/entrypoint_fake_runtime.fish"
 {
-  printf "builtin set -g __fish_data_dir '%s/fake-prefix/share/fish'\n" "$_entrypoint_switch_a"
-  printf '%s\n' 'builtin set -g fish_function_path "$__fish_data_dir/functions" $fish_function_path' \
-    'builtin source "$__fish_data_dir/functions/entrypoint_fake_runtime.fish"'
+  # Fish 4.x makes __fish_data_dir read-only, so the data-prefix forge only
+  # lands on Fish 3.x; fish_function_path stays mutable on every major, and the
+  # absolute source path loads the lookalike on both.
+  printf "builtin set -g __fish_data_dir '%s/fake-prefix/share/fish' 2>/dev/null\n" "$_entrypoint_switch_a"
+  printf "builtin set -g fish_function_path '%s/fake-prefix/share/fish/functions' \$fish_function_path\n" "$_entrypoint_switch_a"
+  printf "builtin source '%s/fake-prefix/share/fish/functions/entrypoint_fake_runtime.fish'\n" "$_entrypoint_switch_a"
   cat "$_entrypoint_switch_a/runtime/fish/profile.fish"
 } >"$_entrypoint_switch_a/runtime/fish/profile.new"
 mv "$_entrypoint_switch_a/runtime/fish/profile.new" "$_entrypoint_switch_a/runtime/fish/profile.fish"

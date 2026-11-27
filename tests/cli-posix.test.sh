@@ -242,6 +242,37 @@ else
   cat "$_bootstrap_root/poison.err" >&2
 fi
 
+# Chained package symlinks must resolve byte-exact at every hop for 0-LF and
+# 1-LF intermediate targets as well, with a lookalike sibling at the other
+# newline count as a trap: confusing the two spellings must not select it.
+# The 1-LF case is the BSD readlink discriminator (its separator newline is
+# indistinguishable from a target newline without -n).
+_bootstrap_lf=$(printf '\nx')
+_bootstrap_lf=${_bootstrap_lf%x}
+for _bootstrap_lfs in 0 1; do
+  _bootstrap_entry=entry
+  _bootstrap_i=0
+  while [ "$_bootstrap_i" -lt "$_bootstrap_lfs" ]; do
+    _bootstrap_entry="$_bootstrap_entry$_bootstrap_lf"
+    _bootstrap_i=$((_bootstrap_i + 1))
+  done
+  case $_bootstrap_lfs in 0) _bootstrap_trap="entry$_bootstrap_lf" ;; *) _bootstrap_trap=entry ;; esac
+  _bootstrap_pfx="$_bootstrap_root/npm-prefix-$_bootstrap_lfs"
+  mkdir -p "$_bootstrap_pfx/bin" "$_bootstrap_pfx/lib"
+  ln -s "$_valise" "$_bootstrap_pfx/lib/$_bootstrap_entry"
+  ln -s nonexistent-trap "$_bootstrap_pfx/lib/$_bootstrap_trap"
+  ln -s "../lib/$_bootstrap_entry" "$_bootstrap_pfx/bin/valise"
+  _bootstrap_rc=0
+  _bootstrap_out=$(_bootstrap "$_bootstrap_pfx/bin/valise" version \
+    2>"$_bootstrap_root/link-$_bootstrap_lfs.err") || _bootstrap_rc=$?
+  if [ "$_bootstrap_rc" -eq 0 ] && [ "$_bootstrap_out" = 0.4.1 ]; then
+    pass "CLI bootstrap resolves a chained symlink with a $_bootstrap_lfs-LF intermediate target byte-exact"
+  else
+    fail "CLI bootstrap misresolved a chained symlink with a $_bootstrap_lfs-LF intermediate target"
+    cat "$_bootstrap_root/link-$_bootstrap_lfs.err" >&2
+  fi
+done
+
 # Unlike invocation aliases/CWD, physical engine and project roots feed
 # line-oriented metadata interfaces. Reject TAB/LF before a truncated capture
 # could select a lookalike tree. Either fake usage.sh would mark an unsafe
@@ -314,7 +345,8 @@ unset _bootstrap_root _bootstrap_nl _bootstrap_lf_cwd _bootstrap_rc _bootstrap_h
   _bootstrap_expected _bootstrap_wrong _bootstrap_match _bootstrap_out \
   _bootstrap_prefix _bootstrap_marker _bootstrap_control _bootstrap_project _bootstrap_form \
   _bootstrap_tab _bootstrap_kind _bootstrap_char _bootstrap_engine _bootstrap_lookalike \
-  _bootstrap_tree _bootstrap_bad_project _bootstrap_command
+  _bootstrap_tree _bootstrap_bad_project _bootstrap_command \
+  _bootstrap_lf _bootstrap_lfs _bootstrap_entry _bootstrap_trap _bootstrap_pfx _bootstrap_i
 
 # Generated shell snippets must quote hostile XDG paths as data. In particular,
 # command substitutions in an environment-provided path must not execute while

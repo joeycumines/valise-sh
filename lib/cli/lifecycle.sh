@@ -607,9 +607,9 @@ transaction_preflight() {
   if [ -L "$VALISE_ACTIVE_LINK" ]; then
     _tp_had_link=1
     # Keep the literal target, including trailing newlines, for restoration.
-    # readlink_target already prints the target byte-exact with no separator
-    # newline, so no sentinel/strip dance is needed here.
-    _tp_target=$(readlink_target "$VALISE_ACTIVE_LINK") ||
+    # readlink_target_assign captures byte-exact: a plain $(readlink_target ...)
+    # would still lose the target's trailing newlines to command substitution.
+    readlink_target_assign _tp_target "$VALISE_ACTIVE_LINK" ||
       die "cannot read active pointer: $VALISE_ACTIVE_LINK"
     [ -n "$_tp_target" ] || die "cannot read active pointer: $VALISE_ACTIVE_LINK"
   elif [ -e "$VALISE_ACTIVE_LINK" ]; then
@@ -815,13 +815,13 @@ transaction_abort() {
 transaction_restore() {
   _transaction_rolled=0
   if [ "$_transaction_had_link" -eq 1 ]; then
-    _ta_current=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null) || _ta_current=
+    readlink_target_assign _ta_current "$VALISE_ACTIVE_LINK" 2>/dev/null || _ta_current=
     if [ ! -L "$VALISE_ACTIVE_LINK" ] || [ "$_ta_current" != "$_transaction_old_target" ]; then
       if [ ! -e "$VALISE_ACTIVE_LINK" ] || [ -L "$VALISE_ACTIVE_LINK" ]; then
         "$_tx_ln" -sfn "$_transaction_old_target" "$VALISE_ACTIVE_LINK" 2>/dev/null || :
       fi
     fi
-    _ta_current=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null) || _ta_current=
+    readlink_target_assign _ta_current "$VALISE_ACTIVE_LINK" 2>/dev/null || _ta_current=
     if [ -L "$VALISE_ACTIVE_LINK" ] && [ "$_ta_current" = "$_transaction_old_target" ]; then
       _transaction_rolled=1
     fi

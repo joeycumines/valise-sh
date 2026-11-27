@@ -654,6 +654,10 @@ if [ "$_have_fish" -eq 1 ]; then
 set -g __fish_data_dir "$HOME/fake/share/fish"
 set -g fish_function_path "$__fish_data_dir/functions" $fish_function_path
 builtin source "$__fish_data_dir/functions/cd.fish"
+# Fish 4.x embeds cd and makes __fish_data_dir read-only, so the forged data
+# prefix above cannot install a caller cd there; define it directly so the
+# loader gate is exercised on every Fish major version.
+function cd; printf "caller-cd-ran\n"; return 1; end
 EOF
   _fish_caller_rc=0
   _stdin_run run --shell=fish --module=fish_bits --keep-env -- 'printf "poison-accepted\\n"' \

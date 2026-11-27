@@ -32,8 +32,11 @@ startup and compiled plans, environment capture, and compatibility checks.
   disappeared or become unreadable.
 - Activation validates the active link and ownership records before mutation.
   Symlinked, non-regular, unreadable, and malformed records fail closed without
-  being followed or silently replaced. Relative and dangling active targets
-  are restored literally. A prior empty command ledger stays present; a
+  being followed or silently replaced. Relative, dangling, and newline-bearing
+  active targets are captured and restored byte-exact (the library's readlink
+  captures use the same sentinel as the CLI bootstrap, so command substitution
+  cannot strip a target's own trailing newlines). A prior empty command ledger
+  stays present; a
   failed first install restores the ledger's prior absence.
 - Stub publication journals its staging inode before creating the public hard
   link. Rollback removes only a verified new publication, restores deleted
@@ -47,6 +50,9 @@ startup and compiled plans, environment capture, and compatibility checks.
   signals. Temporary pathnames are assigned to their cleanup owner before a
   pending signal is honored; a utility cannot create a lock or scratch file
   and lose its ownership record when it is interrupted immediately afterward.
+  The signal-shielded wait no longer prints a reaped-PID diagnostic to stderr
+  (Bash 3.2 and GNU bash both emit one for an already-collected child), so
+  diagnostics captured with `2>&1` stay clean.
 - Existing store locks are never reclaimed automatically. The previous
   dead-PID check followed by deletion allowed simultaneous reclaimers to
   delete each other's new lock and enter the store concurrently. A leftover

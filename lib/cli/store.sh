@@ -36,7 +36,10 @@ run_ignoring_int_term() {
   _rigt_pid=$!
   while :; do
     _rigt_status=0
-    wait "$_rigt_pid" || _rigt_status=$?
+    # A reaped or unknown PID makes some shells (Bash 3.2, GNU bash) print a
+    # "not a child of this shell" diagnostic on stderr; suppress it so the
+    # caller's own stderr stays clean. wait writes nothing else to stderr.
+    wait "$_rigt_pid" 2>/dev/null || _rigt_status=$?
     # No retained child status means this is no longer our waitable process;
     # its numeric PID may already have been reused. Never poll that PID again.
     [ "$_rigt_status" -ne 127 ] || break
@@ -46,7 +49,7 @@ run_ignoring_int_term() {
     # is gone, then collect its remembered status once more.
     kill -0 "$_rigt_pid" 2>/dev/null && continue
     _rigt_final=0
-    wait "$_rigt_pid" || _rigt_final=$?
+    wait "$_rigt_pid" 2>/dev/null || _rigt_final=$?
     [ "$_rigt_final" -eq 127 ] || _rigt_status=$_rigt_final
     break
   done
@@ -235,7 +238,7 @@ switch_active_link() {
   # owns the exact outgoing target, so every failure uses the central restore
   # path rather than a separate, incomplete link-only rollback here.
   "$_ln_path" -sfn "$1" "$VALISE_ACTIVE_LINK" || die "failed to update active symlink"
-  _switch_target=$(readlink_target "$VALISE_ACTIVE_LINK") || die "cannot verify active symlink"
+  readlink_target_assign _switch_target "$VALISE_ACTIVE_LINK" || die "cannot verify active symlink"
   [ -L "$VALISE_ACTIVE_LINK" ] && [ "$_switch_target" = "$1" ] || die "active symlink target mismatch"
   note_switch "$_transaction_old_target" "$1"
   unset _switch_target
@@ -534,7 +537,7 @@ cmd_verify_active() {
     esac
   done
   [ -L "$VALISE_ACTIVE_LINK" ] || die "active pointer is not a symlink"
-  _verify_active_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null) || die "cannot read active pointer"
+  readlink_target_assign _verify_active_target "$VALISE_ACTIVE_LINK" 2>/dev/null || die "cannot read active pointer"
   case "$_verify_active_target" in
     /*) : ;;
     *)

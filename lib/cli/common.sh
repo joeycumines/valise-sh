@@ -262,13 +262,32 @@ readlink_target() {
   unset _readlink_path _readlink_out
 }
 
+# readlink_target_assign <internal-var> <path>
+# Assign the literal symlink target to <var> byte-exact, including trailing
+# newlines that belong to the target. readlink_target's stdout is byte-exact,
+# but a caller capturing it with $(...) would still lose trailing newlines to
+# command substitution's stripping, so the capture appends an 'x' sentinel
+# after the target and removes exactly that sentinel.
+readlink_target_assign() {
+  case ${1:-} in
+    ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*|_rta_*) return 1 ;;
+  esac
+  _rta_name=$1
+  _rta_value=$(readlink_target "$2" && printf x) || { unset _rta_name _rta_value; return 1; }
+  _rta_value=${_rta_value%x}
+  # Only the validated variable name becomes shell syntax; the target is
+  # expanded from a literal variable reference, never eval'd.
+  eval "$_rta_name=\$_rta_value"
+  unset _rta_name _rta_value
+}
+
 # active_release_dir
 # Print the physical directory the active pointer names, or fail. The result
 # is canonical, so a trailing slash, a relative target, or an alias symlink
 # never changes the release identity.
 active_release_dir() {
   [ -L "$VALISE_ACTIVE_LINK" ] || return 1
-  _ard_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null) || return 1
+  readlink_target_assign _ard_target "$VALISE_ACTIVE_LINK" 2>/dev/null || return 1
   [ -n "$_ard_target" ] || return 1
   case "$_ard_target" in
     /*) : ;;
