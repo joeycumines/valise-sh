@@ -8,15 +8,15 @@
 CI ?= false
 VALISE_REQUIRE_TOOLING ?= $(if $(filter true TRUE 1 yes YES,$(CI) $(GITHUB_ACTIONS)),1,0)
 comma := ,
-VALISE_REQUIRED_PARSERS ?= $(if $(filter 1,$(VALISE_REQUIRE_TOOLING)),sh$(comma)dash$(comma)ksh$(comma)busybox-ash$(comma)bash$(comma)fish,)
+VALISE_REQUIRED_PARSERS ?= $(if $(filter 1,$(VALISE_REQUIRE_TOOLING)),sh$(comma)dash$(comma)ksh$(comma)busybox-ash$(comma)bash$(comma)zsh$(comma)fish,)
 
 VALISE_CLI_LIBS := $(wildcard lib/cli/*.sh)
 
-.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-project-layout test-commands test-lifecycle test-dev-commands test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-consumer-profile clean distclean
-.NOTPARALLEL: check test
+.PHONY: check syntax test test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-detection-contract-busybox test-loader-multi-root test-loader-multi-root-lanes test-entrypoint-runtime test-capabilities test-contrib-modules test-non-macos-runtime test-cli-posix test-cli-gaps test-compile-assemble test-compiler-plan test-registry test-project-ux test-phase-probe test-project-layout test-commands test-lifecycle test-activation-transaction test-dev-commands test-compiler-benchmark benchmark-timing test-fish-syntax test-fish-runtime test-integration test-install test-update test-docs check-fast test-doc-links test-e2e test-startup-state test-consumer-profile clean distclean
+.NOTPARALLEL: check check-fast test
 
 TEST_ENV_PATH = /usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
-TEST_RUNNER = umask 022; PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_CONSUMER_PROFILE="$${VALISE_CONSUMER_PROFILE:-}" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_REQUIRED_PARSERS="$(VALISE_REQUIRED_PARSERS)" MACOS_PROFILE_PARSER_SEARCH_PATH="$${MACOS_PROFILE_PARSER_SEARCH_PATH:-}" T07_TEST_CHILD_SHELL="$${T07_TEST_CHILD_SHELL:-/bin/bash}" T07_TEST_CHILD_SHELL_ARGS="$${T07_TEST_CHILD_SHELL_ARGS:-}" T07_TEST_CHILD_PATH="$${T07_TEST_CHILD_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
+TEST_RUNNER = umask 022; PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_CONSUMER_PROFILE="$${VALISE_CONSUMER_PROFILE:-}" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_REQUIRED_PARSERS="$(VALISE_REQUIRED_PARSERS)" VALISE_REQUIRE_TOOLING="$(VALISE_REQUIRE_TOOLING)" VALISE_TEST_CLI_SHELL="$${VALISE_TEST_CLI_SHELL:-/bin/sh}" LIMA_HOME="$${LIMA_HOME:-$${HOME:-}/.lima}" MACOS_PROFILE_PARSER_SEARCH_PATH="$${MACOS_PROFILE_PARSER_SEARCH_PATH:-}" T07_TEST_CHILD_SHELL="$${T07_TEST_CHILD_SHELL:-/bin/bash}" T07_TEST_CHILD_SHELL_ARGS="$${T07_TEST_CHILD_SHELL_ARGS:-}" T07_TEST_CHILD_PATH="$${T07_TEST_CHILD_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
 RUNTIME_TEST_RUNNER = umask 022; PATH="$(TEST_ENV_PATH)"; _tmp_home=$$(/usr/bin/mktemp -d /tmp/shell-profile-engine-test-home.XXXXXX) && /usr/bin/env -i HOME="$$_tmp_home" TMPDIR=/tmp PATH="$(TEST_ENV_PATH)" VALISE_TEST_FORBIDDEN_HOME="$${VALISE_TEST_FORBIDDEN_HOME:-}" VALISE_LINUX_IMAGE="$${VALISE_LINUX_IMAGE:-}" VALISE_BSD_IMAGE="$${VALISE_BSD_IMAGE:-}" VALISE_RUNTIME_SEARCH_PATH="$${VALISE_RUNTIME_SEARCH_PATH:-}" /bin/bash "$<"; _test_status=$$?; /bin/rm -rf "$$_tmp_home"; [ $$_test_status -eq 0 ]
 
 check: syntax test test-fish-syntax test-docs test-detection-contract-busybox test-loader-multi-root-lanes test-e2e test-startup-state
@@ -65,9 +65,11 @@ test: test-runner-quarantine
 	@$(MAKE) test-compiler-plan
 	@$(MAKE) test-registry
 	@$(MAKE) test-project-ux
+	@$(MAKE) test-phase-probe
 	@$(MAKE) test-project-layout
 	@$(MAKE) test-commands
 	@$(MAKE) test-lifecycle
+	@$(MAKE) test-activation-transaction
 	@$(MAKE) test-dev-commands
 	@$(MAKE) test-compiler-benchmark
 	@$(MAKE) test-fish-runtime
@@ -125,7 +127,7 @@ VALISE_BUSYBOX_LIMA_INSTANCE ?= valise-busybox
 VALISE_BUSYBOX_WORKDIR ?= $(CURDIR)
 
 test-detection-contract-busybox: tests/loader/detection-contract.test.sh lib/metadata.sh lib/loader.sh
-	@set -eu; \
+	@set -eu; PATH="$(TEST_ENV_PATH)"; export PATH; \
 	if command -v limactl >/dev/null 2>&1 && \
 		limactl list --format '{{.Name}} {{.Status}}' 2>/dev/null | \
 		grep -F -x '$(VALISE_BUSYBOX_LIMA_INSTANCE) Running' >/dev/null 2>&1; then \
@@ -154,15 +156,16 @@ test-loader-multi-root: tests/loader/multi-root.test.sh lib/metadata.sh lib/load
 # shells beyond its default Bash harness, plus BusyBox ash when available.
 # Missing extended runtimes skip locally and fail in strict CI.
 test-loader-multi-root-lanes: tests/loader/multi-root.test.sh lib/metadata.sh lib/loader.sh tests/fixtures/modules/loader-failure-modes
-	@set -eu; \
-	for _shell in /bin/sh /bin/dash /bin/ksh; do \
-		if test -x "$$_shell"; then \
+	@set -eu; PATH="$(TEST_ENV_PATH)"; export PATH; \
+	for _shell_name in sh dash ksh; do \
+		_shell=$$(PATH="$(TEST_ENV_PATH)" command -v "$$_shell_name" 2>/dev/null || :); \
+		if test -n "$$_shell" && test -x "$$_shell"; then \
 			echo "=== loader multi-root child-shell lane: $$_shell ==="; \
 			T07_TEST_CHILD_SHELL="$$_shell" $(TEST_RUNNER); \
 		elif test "$(VALISE_REQUIRE_TOOLING)" = 1; then \
-			echo "FAIL: required POSIX child shell is unavailable: $$_shell (VALISE_REQUIRE_TOOLING=1)" >&2; exit 1; \
+			echo "FAIL: required POSIX child shell is unavailable: $$_shell_name (VALISE_REQUIRE_TOOLING=1)" >&2; exit 1; \
 		else \
-			echo "SKIP: loader child-shell lane $$_shell (install it or set VALISE_REQUIRE_TOOLING=1 to require it)"; \
+			echo "SKIP: loader child-shell lane $$_shell_name (install it or set VALISE_REQUIRE_TOOLING=1 to require it)"; \
 		fi; \
 	done; \
 	if command -v limactl >/dev/null 2>&1 && \
@@ -215,6 +218,12 @@ test-compiler-plan: tests/compiler-plan.test.sh bin/valise $(VALISE_CLI_LIBS) li
 test-registry: tests/registry.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
+test-phase-probe: tests/phase-probe.test.sh bin/valise $(VALISE_CLI_LIBS) lib/compiler.awk
+	@$(TEST_RUNNER)
+
+test-activation-transaction: tests/activation-transaction.test.sh bin/valise $(VALISE_CLI_LIBS) lib/compiler.awk
+	@$(TEST_RUNNER)
+
 test-project-ux: tests/project-ux.test.sh bin/valise $(VALISE_CLI_LIBS) lib/metadata.sh lib/compiler.awk lib/capabilities.sh
 	@$(TEST_RUNNER)
 
@@ -261,7 +270,7 @@ test-doc-links: tests/docs/doc-links.test.sh README.md AGENTS.md $(wildcard docs
 
 test-e2e: tests/e2e.test.sh bin/valise $(VALISE_CLI_LIBS) examples/e2e/valise.conf examples/e2e/bundles.tsv
 	@echo "=== valise end-to-end test ==="
-	@VALISE_REQUIRE_TOOLING="$(VALISE_REQUIRE_TOOLING)" /bin/bash tests/e2e.test.sh
+	@$(TEST_RUNNER)
 
 # VALISE_CONSUMER_PROFILE names a real consumer project (a directory with
 # valise.conf). The suite copies it to a temporary directory and works only
@@ -278,4 +287,4 @@ clean: ## Delete build products, temporary release trees, and pack tarballs.
 distclean: clean ## Delete all generated files and local build directories.
 	@rm -rf build
 
-check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-registry test-project-ux test-project-layout test-commands test-lifecycle test-dev-commands test-cli-gaps test-contrib-modules test-consumer-profile test-docs test-doc-links
+check-fast: test-runner-quarantine test-parser-support test-metadata-abi test-loader-failure-modes test-loader-process-count test-detection-contract test-loader-multi-root test-entrypoint-runtime test-compiler-plan test-registry test-project-ux test-phase-probe test-project-layout test-commands test-lifecycle test-activation-transaction test-dev-commands test-cli-gaps test-contrib-modules test-consumer-profile test-docs test-doc-links

@@ -268,11 +268,14 @@ The ledger of installed exports records the PROVIDER of each one, as
 `<module>:<export>`. A reload therefore clears only the exports the same
 module previously installed: a different module exporting the same name is
 reported as a conflict instead of silently replacing it, and a function the
-caller defined is left alone. The ledger is per shell process and never
-pruned, so renaming an export-providing module (`foo:fn` to `bar:fn`) leaves
-the old provider recorded in every shell that is already running. Shells
-started after the rename are unaffected; an already-running shell keeps its
-existing export until it is restarted.
+caller defined before valise owned that name is left alone. Because the
+ledger tracks ownership by provider and name rather than by function body,
+a caller redefinition of a function that valise already owns in the current
+shell will be replaced on the next reload of that provider. The ledger is per
+shell process and never pruned, so renaming an export-providing module
+(`foo:fn` to `bar:fn`) leaves the old provider recorded in every shell that is
+already running. Shells started after the rename are unaffected; an
+already-running shell keeps its existing export until it is restarted.
 
 ### Published commands
 
@@ -444,6 +447,14 @@ utilities (`command`, `unset`, `readonly`, `return`, or `eval`) or mark those
 functions readonly. Those names are reserved because the loader must recover
 control after sourcing a module; direct definitions in module bodies are
 rejected before the body is invoked.
+
+The native Fish runtime distinguishes a recoverable module failure from
+unrecoverable damage to protected caller state. It restores and returns for
+the former. If it cannot authenticate its recovery machinery or restore a
+protected definition, it terminates the Fish process with status `125`;
+commands following the source or loader call cannot continue. This fatal path
+is reserved for integrity failures, including replacement of Fish-provided
+control functions that cannot be restored with their original provenance.
 
 After a body runs, the loader restores the caller's physical directory, logical
 `PWD` and `OLDPWD`, `IFS`, and the shell options it snapshotted. A body that

@@ -2,7 +2,8 @@
 
 ## Current status
 
-`valise-sh` is at **0.4.0**. Before 1.0, the CLI, module ABI, and release
+The working tree targets **0.4.1**; its changes remain under **Unreleased**
+until the release checklist is complete. Before 1.0, the CLI, module ABI, and release
 format do not have a backward-compatibility guarantee. Pin the version you
 use, read the release notes, and run `valise lint` and `valise test` on your
 project before upgrading. A project can set `requires_valise=` in
@@ -82,8 +83,8 @@ project commands report that they are not inside a valise project.
 ### New commands
 
 `valise lint`, `test`, `run`, `env`, `uninstall`, `release rollback`, and
-`apply --dry-run`. Install is transactional: a failure puts the previous
-active release back.
+`apply --dry-run`. Install is transactional; its rollback scope and recovery
+failure behavior are documented in [activation recovery](installation.md#activation-recovery).
 
 ## Release checklist
 
@@ -94,9 +95,10 @@ Before tagging or publishing a release:
    two versions match, so a bump that updates one and forgets the other
    fails the build.
 2. Run `make check-fast`, then run `make VALISE_REQUIRE_TOOLING=1 check`
-   locally or use the GitHub Actions job. Keep the successful strict run as
-   release evidence for every lane, including Fish, zsh, BusyBox, dash, and
-   ksh.
+   locally or use the Linux GitHub Actions job. Also require the native macOS
+   job, which checks Bash 3.2, zsh, dash, ksh, Fish, and BSD utilities. Keep both
+   successful runs as release evidence. Linux supplies the required BusyBox
+   ash lane; macOS does not require a Linux VM.
 3. Run the README's scratch-home example from a clean checkout and check
    that `greet` runs and the cleanup removes the scratch directory.
 4. Inspect the result of `npm pack --dry-run` and install/test the packed
@@ -104,11 +106,10 @@ Before tagging or publishing a release:
    module loading. The probe in `tests/cli-posix.test.sh` builds a tree from
    the real `files` whitelist, plants build directories at more than one
    depth under `examples/`, and requires the tarball to exclude every one of
-   them while keeping the surrounding example sources. `package.json` keeps
-   them out with `!examples/**/build/`, because npm applies `files` without
-   consulting `.gitignore` and `valise apply` writes build output into
-   `examples/profile-project/`. The `**` is load-bearing: a single `*` still
-   packs a build directory nested one level deeper.
+   them while keeping the surrounding example sources. `package.json` uses
+   an explicit file allowlist for the runtime, documentation, and example
+   sources. Keep it synchronized with required runtime files; do not replace
+   it with a broad directory entry that also admits generated build output.
 5. Review the changed CLI, module ABI, release manifest, docs, and examples;
    check `git diff --check` and doc links.
 6. Publish only through the chosen distribution channel. The repository

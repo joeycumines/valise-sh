@@ -263,16 +263,17 @@ else
   printf '%s\n' "$_status" >&2
 fi
 
-if [ -x /bin/dash ]; then
-  if HOME="$_home" /bin/dash -c '. "$HOME/.profile"; greet' 2>/dev/null | grep -Fx 'hello from greet' >/dev/null; then
+_dash_bin=$(command -v dash 2>/dev/null || :)
+if [ -n "$_dash_bin" ] && [ -x "$_dash_bin" ]; then
+  if HOME="$_home" "$_dash_bin" -c '. "$HOME/.profile"; greet' 2>/dev/null | grep -Fx 'hello from greet' >/dev/null; then
     pass "a dash login loads the sh plan through the managed block"
   else
     fail "a dash login loads the sh plan through the managed block"
   fi
 elif [ "$_require_tooling" -eq 1 ]; then
-  fail "a dash login loads the sh plan through the managed block (/bin/dash unavailable)"
+  fail "a dash login loads the sh plan through the managed block (dash unavailable)"
 else
-  skip "a dash login loads the sh plan through the managed block (/bin/dash unavailable)"
+  skip "a dash login loads the sh plan through the managed block (dash unavailable)"
 fi
 
 # The guard is set only after a plan was sourced: with no active release the

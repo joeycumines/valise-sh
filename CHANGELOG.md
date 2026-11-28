@@ -3,6 +3,135 @@
 Notable user-facing changes are recorded here. Versions before 1.0 may include
 module ABI or CLI changes; see [the release policy](docs/release-policy.md).
 
+## [Unreleased]
+
+Planned version: **0.4.1**. This release hardens activation recovery, shell
+startup and compiled plans, environment capture, and compatibility checks.
+
+### Added
+
+- `VALISE_CALLER_PATH` supplies the original PATH for install and doctor
+  diagnostics when a wrapper invokes valise with a sanitized PATH. It never
+  participates in command lookup or generated profile content. An explicitly
+  empty value reports a PATH gap; relative and empty entries use the physical
+  invocation directory recorded before `-C`.
+- A native macOS CI job complements the Linux strict gate. Both retain test
+  logs; macOS covers system Bash 3.2 and BSD utilities, while Linux also
+  requires BusyBox ash. Native zsh is included in the POSIX parser contract.
+
+### Fixed
+
+- Phase probing distinguishes a genuinely empty phase from allocation,
+  compilation, inspection, or malformed compiler-output failures. A private
+  scratch directory and signal-aware cleanup prevent a failed probe from
+  silently publishing a release without interactive plans or leaking scratch.
+- Install and release activation share one recovery transaction. Before the
+  active link moves, the transaction snapshots the previous record, command
+  ledger, verified owned stubs, and owned GUI bridges. Recovery restores saved
+  bytes and modes instead of re-reading an outgoing manifest that may have
+  disappeared or become unreadable.
+- Activation validates the active link and ownership records before mutation.
+  Symlinked, non-regular, unreadable, and malformed records fail closed without
+  being followed or silently replaced. Relative, dangling, and newline-bearing
+  active targets are captured and restored byte-exact (the library's readlink
+  captures use the same sentinel as the CLI bootstrap, so command substitution
+  cannot strip a target's own trailing newlines). A prior empty command ledger
+  stays present; a
+  failed first install restores the ledger's prior absence.
+- Stub publication journals its staging inode before creating the public hard
+  link. Rollback removes only a verified new publication, restores deleted
+  outgoing stubs, and preserves user edits and identical foreign collisions.
+  Unterminated final ledger records are consumed consistently.
+- INT and TERM are recorded through mutation bookkeeping and recovery; a
+  second signal cannot terminate restoration midway. The final status is 130
+  or 143 as appropriate. The central exit handler performs transaction,
+  scratch, and lock cleanup without recursively aborting itself.
+- Critical allocation and recovery workers also withstand process-group
+  signals. Temporary pathnames are assigned to their cleanup owner before a
+  pending signal is honored; a utility cannot create a lock or scratch file
+  and lose its ownership record when it is interrupted immediately afterward.
+  The signal-shielded wait no longer prints a reaped-PID diagnostic to stderr
+  (Bash 3.2 and GNU bash both emit one for an already-collected child), so
+  diagnostics captured with `2>&1` stay clean.
+- Existing store locks are never reclaimed automatically. The previous
+  dead-PID check followed by deletion allowed simultaneous reclaimers to
+  delete each other's new lock and enter the store concurrently. A leftover
+  lock now requires explicit recovery after all users of that store stop;
+  the diagnostic names the lock and its recorded PID when readable.
+- Recovery failures preserve private snapshots and report their locations.
+  When the active link cannot be restored, old bridge bytes are not published
+  under the incoming active release. Post-commit cleanup failures report a
+  nonzero result without rolling back a committed activation.
+- GUI bridge removal distinguishes failure before commit from failure to
+  remove a committed backup. Both bridge directions, including `gui_env=off`,
+  participate in activation recovery. Ownership checks refuse symlinks and
+  non-regular files before reading, so a foreign FIFO cannot block startup
+  integration.
+- The POSIX managed block identifies the running interpreter using isolated
+  builtin probes, with external lookup disabled. Inherited shell-version
+  variables and lookalike `shopt`, `emulate`, `whence`, and `builtin` commands
+  no longer select another shell's plans.
+- A fresh non-Bash-default home receives a Bash login stage in `.profile`
+  without requiring `.bashrc`. Actual Bash-as-`sh` reads the env stage there
+  and interactive setup through `$ENV`; a native Bash executable named
+  `sh-as-sh`, `SH`, or another custom name still loads its interactive stage
+  from the login file. Option checks and invocation-name comparisons remain
+  correct with `nocasematch`, `verbose`, or `xtrace` enabled.
+- Interactive success markers are invalidated before a release switch and
+  before retrying stage 2. Returning to a release after a partial failure or
+  an env-only intermediate release restores its interactive definitions.
+- Runtime `$ENV` adoption and doctor require a readable regular non-symlink
+  shim with the exact managed header. Doctor detects the Bash login marker
+  inside its managed block using trusted awk, and reports invalid command
+  ledgers as failures rather than disabled integration.
+- Compiled module dispatch, dependency availability, platform matching, and
+  export ownership use byte-exact identities even with Bash `nocasematch`.
+  An external executable or alias cannot satisfy a promised function export.
+  Native zsh cleans all declared exports created by a failed module and
+  preserves pre-existing caller definitions.
+- Environment capture preserves explicit empty caller inputs and uses the
+  caller's PATH in both baseline and target evaluations. Binary environment
+  records retain their NUL boundaries through comparison and exclusion;
+  newline-bearing excluded values cannot fabricate variables or reject
+  unrelated valid exports.
+- Selected bridge values are checked against the Unicode scalar limits of
+  UTF-8, including overlong forms, surrogates, obsolete five/six-byte forms,
+  and code points above U+10FFFF. Diagnostics name the offending variable and
+  failures emit no partial bridge. `environment.d` additionally rejects TAB,
+  DEL, and all Unicode noncharacters; launchd retains XML-compatible UTF-8,
+  TAB, and DEL. Capture allocation, scanning, and cleanup failures fail closed.
+- `valise run` preserves stdin in clean and `--keep-env` modes for every
+  supported interpreter; only the automated test runner receives EOF.
+- Native Fish recognizes its own distributed functions in relocated
+  installations without trusting mutable Fish path variables. Unrecoverable
+  caller-state corruption now terminates the Fish process with status 125;
+  `exit` inside a sourced Fish file previously allowed the caller to continue.
+- CLI bootstrap resolves package symlinks through fixed trusted `readlink`
+  paths and preserves invocation-path newlines in the generated Fish callback.
+  Bootstrap and `-C` directory selection ignore `CDPATH`. Physical engine and
+  project roots containing TAB or LF are rejected before their line-oriented
+  consumers can silently resolve a different pathname.
+- PATH diagnostics compare physical directories, preserving symlink/`..`
+  semantics and accepting different aliases for the same location. They
+  preserve trailing newlines, ignore inherited `CDPATH`, join `/` with one
+  separator, and skip relative entries when the invocation directory is
+  unavailable. Diagnostic CWD state is never exported to child processes.
+- `valise_path_remove` validates every argument before modifying PATH, so a
+  mixed valid/invalid call fails without partially applying removals.
+- Reserved-word validation patterns parse under Bash 3.2 as well as newer
+  POSIX shells. Tests discover supported interpreters from their controlled
+  PATH, and strict-tooling requirements survive the test runner's environment
+  quarantine.
+- File digests are computed from stdin, so SHA-256 utility filename escaping
+  cannot introduce a backslash into a command ledger or release digest.
+
+### Documentation
+
+- Documented the transaction's recovery scope, retained recovery material,
+  commit boundary, and failure limits; clarified env re-evaluation triggers,
+  caller function ownership, capture exclusions, and the explicit npm package
+  allowlist.
+
 ## [0.4.0] - 2026-11-18
 
 0.4.0 adds phase-separated plans, GUI-session environment bridges, and fixes

@@ -16,6 +16,16 @@ pass() { _total=$((_total + 1)); _pass=$((_pass + 1)); printf '  PASS: %s\n' "$1
 fail() { _total=$((_total + 1)); _fail=$((_fail + 1)); printf '  FAIL: %s\n' "$1" >&2; }
 skip() { _total=$((_total + 1)); _skip=$((_skip + 1)); printf '  SKIP: %s\n' "$1"; }
 
+_bash_bin=$(command -v bash 2>/dev/null || :)
+if [ -z "$_bash_bin" ] || [ ! -x "$_bash_bin" ]; then
+  if [ "$_require_tooling" -eq 1 ]; then
+    fail "compiled-plan Bash runtime (bash is required but unavailable)"
+    exit 1
+  fi
+  skip "compiled-plan Bash runtime (bash is unavailable)"
+  exit 0
+fi
+
 _repo=$(cd "$(dirname "$0")/.." && pwd -P)
 _valise="$_repo/bin/valise"
 _tmp=$(mktemp -d "${TMPDIR:-/tmp}/valise-compiler-plan.XXXXXX")
@@ -380,7 +390,7 @@ fi
 # plans within one evaluation. Strict stops at the env failure; permissive
 # continues but must record the failure and block the dependent.
 for _cx_mode in strict permissive; do
-  VALISE_MODE=$_cx_mode VALISE_MODULE_ROOT="$_tmp/release-cross-phase" /bin/bash -c '
+  VALISE_MODE=$_cx_mode VALISE_MODULE_ROOT="$_tmp/release-cross-phase" "$_bash_bin" -c '
     # A plan returns (not exits), so it must be sourced inside a function: at
     # the top level of a -c script, `return 42` would end the whole shell.
     _cx_run() {
@@ -410,7 +420,7 @@ done
 # owned it.
 # The diagnostics go to a file both passes append to, so the count covers both.
 OWNER_ERR="$_tmp/owner.err" : >"$_tmp/owner.err"
-OWNER_ERR="$_tmp/owner.err" VALISE_MODULE_ROOT="$_tmp/release-ownership" /bin/bash -c '
+OWNER_ERR="$_tmp/owner.err" VALISE_MODULE_ROOT="$_tmp/release-ownership" "$_bash_bin" -c '
   owner_probe_fn() { printf "USER\n"; }
   printf "before=%s\n" "$(owner_probe_fn)"
   . "$VALISE_MODULE_ROOT/plans/bash.sh" 2>>"$OWNER_ERR"
@@ -431,7 +441,7 @@ else
 fi
 # A module valise DID install is cleared and reinstalled on a reload pass with
 # no conflict diagnostic: ownership, not a guess from having attempted a load.
-VALISE_MODULE_ROOT="$_tmp/release-reload" /bin/bash -c '
+VALISE_MODULE_ROOT="$_tmp/release-reload" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "reload_ok=%s owned=%s\n" "$(command -v reload_probe_loaded >/dev/null && echo yes)" "${_valise_plan_owned:-unset}"
@@ -461,7 +471,7 @@ printf '# bundle\tshell\troots\ndefault\tbash\tstalemod\n' >"$_stale_src/bundles
 printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_stale_src/variants.tsv"
 rm -rf "$_stale_rel"
 ( cd "$_stale_src" && "$_valise" build "$_stale_rel" ) >/dev/null 2>&1
-STALE_FAIL="$_tmp/stale-fail" STALE_ERR="$_tmp/stale.err" VALISE_MODULE_ROOT="$_stale_rel" /bin/bash -c '
+STALE_FAIL="$_tmp/stale-fail" STALE_ERR="$_tmp/stale.err" VALISE_MODULE_ROOT="$_stale_rel" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "first_owned=[%s]\n" "${_valise_plan_owned:-}"
   : >"$STALE_FAIL"
@@ -514,6 +524,47 @@ else
   fail "could not extract the reload prelude from the compiled plan"
 fi
 
+# Case-distinct provider names across releases must not be conflated when Bash
+# has `shopt -s nocasematch` enabled (control: nocasematch off; regression: on).
+_nc_a="$_tmp/nc-a"
+_nc_b="$_tmp/nc-b"
+mkdir -p "$_nc_a/module.d" "$_nc_a/modules" "$_nc_b/module.d" "$_nc_b/modules"
+: >"$_nc_a/valise.conf"
+: >"$_nc_b/valise.conf"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_nc_a/variants.tsv"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_nc_b/variants.tsv"
+printf 'name=caseMod\nversion=\nside_effect=read-only\nrequires=\noptional=\nshells=posix\nplatforms=any\nexports=review_common\nload=modules/cm.sh\n' >"$_nc_a/module.d/caseMod.meta"
+printf 'review_common() { printf "A\\n"; }\n' >"$_nc_a/modules/cm.sh"
+printf '# bundle\tshell\troots\ndefault\tbash\tcaseMod\n' >"$_nc_a/bundles.tsv"
+printf 'name=casemod\nversion=\nside_effect=read-only\nrequires=\noptional=\nshells=posix\nplatforms=any\nexports=review_common\nload=modules/cm.sh\n' >"$_nc_b/module.d/casemod.meta"
+printf 'review_common() { printf "B\\n"; }\n' >"$_nc_b/modules/cm.sh"
+printf '# bundle\tshell\troots\ndefault\tbash\tcasemod\n' >"$_nc_b/bundles.tsv"
+rm -rf "$_tmp/nc-rel-a" "$_tmp/nc-rel-b"
+(cd "$_nc_a" && "$_valise" build "$_tmp/nc-rel-a") >/dev/null 2>&1
+(cd "$_nc_b" && "$_valise" build "$_tmp/nc-rel-b") >/dev/null 2>&1
+for _nc_mode in off on; do
+  _nc_out=$("$_bash_bin" -c '
+    if [ "$1" = on ]; then shopt -s nocasematch; else shopt -u nocasematch; fi
+    VALISE_MODULE_ROOT="$2"
+    . "$VALISE_MODULE_ROOT/plans/bash.sh"
+    printf "before=%s ledger=%s\n" "$(review_common)" "${_valise_plan_owned:-}"
+    VALISE_MODULE_ROOT="$3"
+    VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh" 2>"$4"
+    printf "rc=%s after=%s ledger=%s\n" "$?" "$(review_common)" "${_valise_plan_owned:-}"
+    shopt -q nocasematch && printf "opt=on\n" || printf "opt=off\n"
+  ' -- "$_nc_mode" "$_tmp/nc-rel-a" "$_tmp/nc-rel-b" "$_tmp/nc-$_nc_mode.err" 2>/dev/null || :)
+  if printf '%s\n' "$_nc_out" | grep -Fx 'before=A ledger=caseMod:review_common' >/dev/null &&
+    printf '%s\n' "$_nc_out" | grep -Fx 'rc=1 after=A ledger=caseMod:review_common' >/dev/null &&
+    printf '%s\n' "$_nc_out" | grep -Fx "opt=$_nc_mode" >/dev/null &&
+    grep -F 'declared export already exists before load: review_common' "$_tmp/nc-$_nc_mode.err" >/dev/null; then
+    pass "provider ownership ledger stays byte-exact with nocasematch $_nc_mode"
+  else
+    fail "provider ownership ledger conflated case-distinct providers with nocasematch $_nc_mode"
+    printf '%s\n' "$_nc_out" >&2
+    cat "$_tmp/nc-$_nc_mode.err" >&2 2>/dev/null || :
+  fi
+done
+
 # Phase migration across a release switch: a module that was env-phase in the
 # release this process loaded and is interactive-phase in the next one must be
 # reloaded when the block re-sources. The reload decision is per RELEASE, not
@@ -537,7 +588,7 @@ done
 rm -rf "$_tmp/migrate-rel-a" "$_tmp/migrate-rel-b"
 ( cd "$_mig_env" && "$_valise" build "$_tmp/migrate-rel-a" ) >/dev/null 2>&1
 ( cd "$_mig_int" && "$_valise" build "$_tmp/migrate-rel-b" ) >/dev/null 2>&1
-VALISE_MODULE_ROOT="$_tmp/migrate-rel-a" /bin/bash -c '
+VALISE_MODULE_ROOT="$_tmp/migrate-rel-a" "$_bash_bin" -c '
   VALISE_RELOAD=1 . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "before=%s\n" "$(mover_fn)"
   VALISE_MODULE_ROOT="'"$_tmp"'/migrate-rel-b"
@@ -565,7 +616,7 @@ fi
 
 # Runtime proof: the env plan loads env exports only and stays silent; the
 # interactive plan loads the interactive export after the env plan.
-if VALISE_MODULE_ROOT="$_tmp/release-phase" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-phase" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   if command -v phase_env_loaded >/dev/null && ! command -v phase_interactive_loaded >/dev/null; then
     printf "env-only=yes\n"
@@ -580,7 +631,7 @@ else
   fail "sourcing the env plan loads env modules and stays silent"
   cat "$_tmp/phase-env.out" "$_tmp/phase-env.err" >&2
 fi
-if VALISE_MODULE_ROOT="$_tmp/release-phase" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-phase" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   . "$VALISE_MODULE_ROOT/plans/bash-interactive.sh"
   if command -v phase_env_loaded >/dev/null && command -v phase_interactive_loaded >/dev/null; then
@@ -599,7 +650,7 @@ fi
 # Fixed-point proof: sourcing the env plan twice in one shell yields a
 # byte-identical exported environment, and after a simulated path_helper
 # reorder re-sourcing restores the compiled PATH order front-most.
-if VALISE_MODULE_ROOT="$_tmp/release-phase" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-phase" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   env | LC_ALL=C sort >"'"$_tmp"'/fp1.env"
   PATH="/usr/bin:/bin:/reordered/helper:$PATH"
@@ -631,7 +682,7 @@ else
 fi
 
 # Strict mode stops at the first failing module and names it.
-if VALISE_MODULE_ROOT="$_tmp/release-behavior" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-behavior" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   _status=$?
   printf "status=%s\n" "$_status"
@@ -655,7 +706,7 @@ else
 fi
 
 # Permissive mode reports the failure, continues, and returns success, as the loader does.
-if ! VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-behavior" /bin/bash -c '
+if ! VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-behavior" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   _status=$?
   printf "status=%s\n" "$_status"
@@ -678,7 +729,7 @@ else
 fi
 
 # A declared but missing export is reported with the module and export names.
-if VALISE_MODULE_ROOT="$_tmp/release-missing" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-missing" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
 ' >"$_tmp/missing.out" 2>"$_tmp/missing.err"; then
   fail "missing export fails the plan"
@@ -694,7 +745,7 @@ fi
 
 # Dependency-only meta modules compile, order their dependencies, and load no body.
 if grep -F '# order=meta_child meta_parent' "$_tmp/release-meta/plans/bash.sh" >/dev/null &&
-  VALISE_MODULE_ROOT="$_tmp/release-meta" /bin/bash -c '
+  VALISE_MODULE_ROOT="$_tmp/release-meta" "$_bash_bin" -c '
     . "$VALISE_MODULE_ROOT/plans/bash.sh"
     command -v meta_child_loaded >/dev/null
   ' >"$_tmp/meta.out" 2>"$_tmp/meta.err"; then
@@ -706,7 +757,7 @@ fi
 
 # A root declared for another platform fails strict with a named diagnostic, as
 # the loader does, and is skipped in permissive mode.
-if VALISE_MODULE_ROOT="$_tmp/release-platform" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-platform" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
 ' >"$_tmp/platform.out" 2>"$_tmp/platform.err"; then
   fail "strict plan fails on an unsupported root"
@@ -716,7 +767,7 @@ else
   fail "strict plan fails on an unsupported root and names it"
   cat "$_tmp/platform.err" >&2
 fi
-if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-platform" /bin/bash -c '
+if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-platform" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "status=%s\n" "$?"
   if command -v platform_other_loaded >/dev/null; then printf "platform=loaded\n"; else printf "platform=skipped\n"; fi
@@ -731,7 +782,7 @@ fi
 
 # The cross-platform form: optional dependencies. Strict mode succeeds on any
 # host, the host's module loads first, and the expected absence prints nothing.
-if VALISE_MODULE_ROOT="$_tmp/release-optional" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-optional" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   _status=$?
   printf "status=%s\n" "$_status"
@@ -754,7 +805,7 @@ else
 fi
 
 # A failing optional dependency is reported and does not fail strict mode.
-if VALISE_MODULE_ROOT="$_tmp/release-optional-fail" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-optional-fail" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   command -v opt_fail_user_loaded >/dev/null
 ' >"$_tmp/optional-fail.out" 2>"$_tmp/optional-fail.err" &&
@@ -766,7 +817,7 @@ else
 fi
 
 # An optional cycle cannot deadlock the plan; a required cycle still fails.
-if VALISE_MODULE_ROOT="$_tmp/release-optional-cycle" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-optional-cycle" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   command -v cycle_a_loaded >/dev/null && command -v cycle_b_loaded >/dev/null
 ' >"$_tmp/optional-cycle.out" 2>"$_tmp/optional-cycle.err"; then
@@ -777,7 +828,7 @@ else
 fi
 
 # An optional edge into a required cycle is quarantined, as the loader does.
-if VALISE_MODULE_ROOT="$_tmp/release-optional-required-cycle" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-optional-required-cycle" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   command -v opt_req_cycle_user_loaded >/dev/null &&
     ! command -v opt_req_cycle_a_loaded >/dev/null &&
@@ -805,7 +856,7 @@ fi
 # A platform-unsupported module in the required closure stops a strict plan before
 # anything that depends on it runs.
 : >"$_tmp/blocked.trace"
-if VALISE_MODULE_ROOT="$_tmp/release-blocked-platform" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-blocked-platform" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   _status=$?
   printf "status=%s\n" "$_status"
@@ -825,7 +876,7 @@ fi
 
 # Permissive mode skips the whole dependent chain and still loads unrelated modules.
 : >"$_tmp/blocked.trace"
-if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-platform" /bin/bash -c '
+if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-platform" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "status=%s\n" "$?"
   command -v later_ok_loaded >/dev/null && printf "later=loaded\n"
@@ -844,7 +895,7 @@ fi
 
 # Permissive mode does not run a dependent of a failed module.
 : >"$_tmp/blocked.trace"
-VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-failed" /bin/bash -c '
+VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-failed" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "status=%s\n" "$?"
   command -v later_ok_loaded >/dev/null && printf "later=loaded\n"
@@ -860,7 +911,7 @@ else
 fi
 
 # A meta module's platforms= gates it too, so its dependents are blocked.
-if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-meta" /bin/bash -c '
+if VALISE_MODE=permissive VALISE_MODULE_ROOT="$_tmp/release-blocked-meta" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   ! command -v meta_other_user_loaded >/dev/null
 ' >"$_tmp/blocked-meta.out" 2>"$_tmp/blocked-meta.err" &&
@@ -873,7 +924,7 @@ fi
 
 # A layer meta module has no body, so the plan must not source a directory.
 if ! grep -F 'layers/demo/"' "$_tmp/release-layer-meta/plans/bash.sh" >/dev/null &&
-  VALISE_MODULE_ROOT="$_tmp/release-layer-meta" /bin/bash -c '
+  VALISE_MODULE_ROOT="$_tmp/release-layer-meta" "$_bash_bin" -c '
     . "$VALISE_MODULE_ROOT/plans/bash.sh" && command -v contrib_demo_child_loaded >/dev/null
   ' >"$_tmp/layer-meta.out" 2>"$_tmp/layer-meta.err"; then
   pass "layer meta module compiles without a load path"
@@ -883,7 +934,7 @@ else
 fi
 
 # Capability functions remain available after the plan finishes.
-if VALISE_MODULE_ROOT="$_tmp/release-capability" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-capability" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   capability_user_loaded >/dev/null
   command -v sp_cap_os >/dev/null
@@ -898,7 +949,7 @@ fi
 rm -rf "$_tmp/release-prelude-failure"
 cp -R "$_tmp/release-capability" "$_tmp/release-prelude-failure"
 printf '%s\n' 'bad ((' >"$_tmp/release-prelude-failure/runtime/capabilities.sh"
-if VALISE_MODULE_ROOT="$_tmp/release-prelude-failure" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-prelude-failure" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   _status=$?
   printf "status=%s\n" "$_status"
@@ -919,7 +970,7 @@ else
 fi
 
 # Re-sourcing with VALISE_RELOAD=1 clears the plan's declared exports.
-if VALISE_MODULE_ROOT="$_tmp/release-reload" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-reload" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   printf "first=%s\n" "$?"
   VALISE_RELOAD=1
@@ -944,7 +995,7 @@ mkdir -p "$_tmp/fakebin"
 printf '%s\n' '#!/bin/sh' 'exit 0' >"$_tmp/fakebin/wrapper_probe"
 printf '%s\n' '#!/bin/sh' 'exit 0' >"$_tmp/fakebin/wrapper_missing_probe"
 chmod +x "$_tmp/fakebin/wrapper_probe" "$_tmp/fakebin/wrapper_missing_probe"
-if PATH="$_tmp/fakebin:$PATH" VALISE_MODULE_ROOT="$_tmp/release-wrapper-ok" /bin/bash -c '
+if PATH="$_tmp/fakebin:$PATH" VALISE_MODULE_ROOT="$_tmp/release-wrapper-ok" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
   [ "$(command -v wrapper_probe)" = wrapper_probe ]
 ' >"$_tmp/wrapper-ok.out" 2>"$_tmp/wrapper-ok.err"; then
@@ -953,12 +1004,12 @@ else
   fail "wrapper export replaces an external command with a function"
   cat "$_tmp/wrapper-ok.err" >&2
 fi
-if PATH="$_tmp/fakebin:$PATH" VALISE_MODULE_ROOT="$_tmp/release-wrapper-missing" /bin/bash -c '
+if PATH="$_tmp/fakebin:$PATH" VALISE_MODULE_ROOT="$_tmp/release-wrapper-missing" "$_bash_bin" -c '
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
 ' >"$_tmp/wrapper-missing.out" 2>"$_tmp/wrapper-missing.err"; then
   fail "unprovided wrapper export fails the plan"
 else
-  if grep -F 'wrapper_missing: declared export was not provided by module: wrapper_missing_probe' \
+  if grep -F 'wrapper_missing: declared export missing: wrapper_missing_probe' \
     "$_tmp/wrapper-missing.err" >/dev/null; then
     pass "unprovided wrapper export is reported"
   else
@@ -969,7 +1020,7 @@ fi
 
 # Existing functions and aliases are rejected before the module body runs.
 rm -f "$_tmp/conflict-function.trace"
-if VALISE_MODULE_ROOT="$_tmp/release-conflict-function" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-conflict-function" "$_bash_bin" -c '
   existing_probe() { :; }
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
 ' >"$_tmp/conflict-function.out" 2>"$_tmp/conflict-function.err"; then
@@ -985,7 +1036,7 @@ else
   fi
 fi
 rm -f "$_tmp/conflict-alias.trace"
-if VALISE_MODULE_ROOT="$_tmp/release-conflict-alias" /bin/bash -c '
+if VALISE_MODULE_ROOT="$_tmp/release-conflict-alias" "$_bash_bin" -c '
   shopt -s expand_aliases
   alias existing_alias_probe=/bin/true
   . "$VALISE_MODULE_ROOT/plans/bash.sh"
@@ -1089,7 +1140,7 @@ _parity_loader() {
   _pl_out=$3
   _pl_err=$4
   PARITY_MODE=$_pl_mode PARITY_WANTED=$_pl_wanted PARITY_PROBES=$_parity_probes PARITY_ROOT=$_project \
-    /bin/bash -c '
+    "$_bash_bin" -c '
       . "$1/lib/metadata.sh"
       . "$1/lib/loader.sh"
       _status=0
@@ -1112,7 +1163,7 @@ _parity_plan() {
   _pp_out=$3
   _pp_err=$4
   VALISE_MODE=$_pp_mode VALISE_MODULE_ROOT=$_pp_release PARITY_PROBES=$_parity_probes \
-    /bin/bash -c '
+    "$_bash_bin" -c '
       . "$VALISE_MODULE_ROOT/plans/bash.sh"
       _status=$?
       printf "status=%s\n" "$_status"
@@ -1198,6 +1249,235 @@ fi
 
 _parity_case 'optional dependencies permissive' permissive "$_tmp/release-optional" 'cross_user' \
   'cross_user_loaded cross_here_loaded platform_other_loaded' 0
+
+# Every POSIX runtime must apply the same export and failure contract. These
+# fixtures use only POSIX bodies; loading their compiled bash plans directly
+# isolates plan semantics from startup-file selection (tested separately).
+_contract="$_tmp/runtime-contract"
+mkdir -p "$_contract/module.d" "$_contract/modules" "$_tmp/contract-bin"
+: >"$_contract/valise.conf"
+printf 'variant\tdescription\texcluded\ndefault\tall\t\n' >"$_contract/variants.tsv"
+: >"$_contract/bundles.tsv"
+_contract_module() {
+  printf '%s\n' "name=$1" 'version=' "requires=$2" "exports=$3" "phase=$4" \
+    "optional=$5" "side_effect=$6" 'shells=posix' 'platforms=any' "load=modules/$1.sh" \
+    >"$_contract/module.d/$1.meta"
+  printf '%s\n' "$7" >"$_contract/modules/$1.sh"
+}
+_contract_module case_mod '' case_upper env '' read-only 'case_upper() { printf upper; }'
+_contract_module case_lower_mod '' case_lower env '' read-only 'case_lower() { printf lower; }'
+_contract_module case_dep '' '' env '' read-only 'return 41'
+_contract_module case_dep_lower '' case_dep_fn env '' read-only '[ "${FAIL_CASE_DEP:-0}" != 1 ] || return 42
+case_dep_fn() { :; }'
+_contract_module case_root '' '' env case_dep read-only ':'
+_contract_module case_int case_dep_lower case_int_fn interactive '' read-only 'case_int_fn() { printf dependent; }'
+_contract_module wrapper '' contract_wrapper env '' read-only '[ "${FAIL_CONTRACT_RELOAD:-0}" != 1 ] || return 42
+contract_wrapper() { printf wrapped; }'
+_contract_module externalonly '' contract_external env '' read-only ':'
+_contract_module pathonly valise_path contract_external env '' path-env 'valise_path_prepend "$CONTRACT_BIN"'
+_contract_module aliasonly '' 'contract_one contract_alias' env '' read-only 'contract_one() { :; }
+alias contract_alias="printf alias-only"'
+_contract_module failpair '' 'contract_one contract_two' env '' read-only 'contract_one() { :; }
+contract_two() { :; }
+return 42'
+_contract_module missingpair '' 'contract_one contract_two' env '' read-only 'contract_one() { :; }'
+_contract_module guardfunction '' 'contract_keep contract_new' env '' read-only 'printf body >"$CONTRACT_TRACE"
+contract_keep() { :; }
+contract_new() { :; }'
+_contract_module guardalias '' contract_alias env '' read-only 'printf body >"$CONTRACT_TRACE"
+contract_alias() { :; }'
+_contract_module guardbuiltin '' true env '' read-only 'printf body >"$CONTRACT_TRACE"
+true() { return 99; }'
+for _ct_bundle in order dependency wrapper externalonly pathonly aliasonly failpair missingpair guardfunction guardalias guardbuiltin; do
+  case "$_ct_bundle" in
+  order) _ct_roots='case_mod case_lower_mod' ;;
+  dependency) _ct_roots='case_root case_int' ;;
+  *) _ct_roots=$_ct_bundle ;;
+  esac
+  printf '%s\tbash\t%s\n' "$_ct_bundle" "$_ct_roots" >>"$_contract/bundles.tsv"
+done
+for _ct_bundle in order dependency wrapper externalonly pathonly aliasonly failpair missingpair guardfunction guardalias guardbuiltin; do
+  if ! "$_valise" -C "$_contract" build --bundle="$_ct_bundle" "$_tmp/contract-$_ct_bundle" \
+    >"$_tmp/contract-build.out" 2>&1; then
+    fail "build runtime contract fixture $_ct_bundle"
+    cat "$_tmp/contract-build.out" >&2
+    exit 1
+  fi
+done
+for _ct_cmd in contract_wrapper contract_external; do
+  printf '#!/bin/sh\nprintf external\n' >"$_tmp/contract-bin/$_ct_cmd"
+  chmod 0755 "$_tmp/contract-bin/$_ct_cmd"
+done
+cat >"$_tmp/contract-runner.sh" <<'EOF'
+if [ -n "${BASH_VERSION-}" ]; then
+  if [ "$CONTRACT_NOCASE" = on ]; then shopt -s nocasematch; else shopt -u nocasematch; fi
+fi
+_ct_options=$(set +o)
+_ct_bash_options=${BASHOPTS-}
+_ct_path=$PATH
+_ct_load() { . "$VALISE_MODULE_ROOT/plans/bash.sh"; }
+_ct_unowned() {
+  case " ${_valise_plan_owned:-} " in *" $1:"*) return 1 ;; esac
+}
+_ct_absent() {
+  ! (PATH=/dev/null; command -v "$1") >/dev/null 2>&1
+}
+case "$CONTRACT_CASE" in
+order)
+  _ct_load || exit 11
+  [ "$(case_upper):$(case_lower)" = upper:lower ] || exit 12
+  [ "${_valise_plan_owned:-}" = 'case_lower_mod:case_lower case_mod:case_upper' ] || exit 13
+  ;;
+dependency-present|dependency-missing)
+  FAIL_CASE_DEP=0
+  [ "$CONTRACT_CASE" != dependency-missing ] || FAIL_CASE_DEP=1
+  _ct_env=0
+  _ct_load || _ct_env=$?
+  _ct_int=0
+  . "$VALISE_MODULE_ROOT/plans/bash-interactive.sh" || _ct_int=$?
+  if [ "$FAIL_CASE_DEP" -eq 0 ]; then
+    [ "$_ct_env:$_ct_int:$(case_int_fn)" = 0:0:dependent ] || exit 21
+  else
+    [ "$_ct_env:$_ct_int" = 42:1 ] && _ct_absent case_int_fn || exit 22
+  fi
+  ;;
+wrapper)
+  [ "$(command contract_wrapper)" = external ] || exit 31
+  _ct_load || exit 32
+  [ "$(contract_wrapper)" = wrapped ] || exit 33
+  [ "${_valise_plan_owned:-}" = wrapper:contract_wrapper ] || exit 34
+  ;;
+reload|reload-failure)
+  _ct_load || exit 35
+  VALISE_RELOAD=1
+  if [ "$CONTRACT_CASE" = reload ]; then
+    contract_wrapper() { printf caller-replacement; }
+    _ct_load || exit 36
+    [ "$(contract_wrapper)" = wrapped ] &&
+      [ "${_valise_plan_owned:-}" = wrapper:contract_wrapper ] || exit 37
+  else
+    FAIL_CONTRACT_RELOAD=1
+    _ct_rc=0
+    _ct_load || _ct_rc=$?
+    [ "$_ct_rc" -eq 42 ] && _ct_absent contract_wrapper && _ct_unowned wrapper || exit 38
+    FAIL_CONTRACT_RELOAD=0
+    contract_wrapper() { printf caller; }
+    _ct_rc=0
+    _ct_load || _ct_rc=$?
+    [ "$_ct_rc" -eq 1 ] && [ "$(contract_wrapper)" = caller ] && _ct_unowned wrapper || exit 39
+  fi
+  ;;
+externalonly|pathonly)
+  if [ "$CONTRACT_CASE" = pathonly ]; then
+    command -v contract_external >/dev/null 2>&1 && exit 41
+  else
+    [ "$(command contract_external)" = external ] || exit 42
+  fi
+  _ct_rc=0
+  _ct_load || _ct_rc=$?
+  [ "$_ct_rc" -eq 1 ] && _ct_unowned "$CONTRACT_CASE" && _ct_absent contract_external || exit 43
+  [ "$(command contract_external)" = external ] || exit 44
+  if [ "$CONTRACT_CASE" = pathonly ]; then _ct_path=$CONTRACT_BIN:$_ct_path; fi
+  ;;
+aliasonly)
+  _ct_rc=0
+  _ct_load || _ct_rc=$?
+  [ "$_ct_rc" -eq 1 ] && _ct_unowned aliasonly && _ct_absent contract_one || exit 51
+  ;;
+failpair|missingpair)
+  _ct_want=42
+  [ "$CONTRACT_CASE" != missingpair ] || _ct_want=1
+  _ct_rc=0
+  _ct_load || _ct_rc=$?
+  [ "$_ct_rc" -eq "$_ct_want" ] && _ct_unowned "$CONTRACT_CASE" &&
+    _ct_absent contract_one && _ct_absent contract_two || exit 61
+  ;;
+guardfunction)
+  contract_keep() { printf caller; }
+  _ct_rc=0
+  _ct_load || _ct_rc=$?
+  [ "$_ct_rc" -eq 1 ] && [ ! -e "$CONTRACT_TRACE" ] &&
+    [ "$(contract_keep)" = caller ] && _ct_absent contract_new && _ct_unowned guardfunction || exit 71
+  ;;
+guardalias)
+  alias contract_alias='printf caller-alias'
+  _ct_alias=$(alias contract_alias)
+  _ct_rc=0
+  _ct_load || _ct_rc=$?
+  [ "$_ct_rc" -eq 1 ] && [ ! -e "$CONTRACT_TRACE" ] &&
+    [ "$(alias contract_alias)" = "$_ct_alias" ] && _ct_unowned guardalias || exit 72
+  ;;
+guardbuiltin)
+  _ct_rc=0
+  _ct_load || _ct_rc=$?
+  [ "$_ct_rc" -eq 1 ] && [ ! -e "$CONTRACT_TRACE" ] && true && _ct_unowned guardbuiltin || exit 73
+  ;;
+invalid-mode)
+  for VALISE_MODE in STRICT PERMISSIVE; do
+    _ct_rc=0
+    _ct_load || _ct_rc=$?
+    [ "$_ct_rc" -eq 1 ] && _ct_absent case_upper && _ct_unowned case_mod || exit 81
+  done
+  ;;
+*) exit 91 ;;
+esac
+[ "$PATH" = "$_ct_path" ] || exit 92
+[ "$(set +o)" = "$_ct_options" ] || exit 93
+[ "${BASHOPTS-}" = "$_ct_bash_options" ] || exit 94
+printf '%s:ok\n' "$CONTRACT_CASE"
+EOF
+for _ct_name in sh dash bash zsh ksh busybox; do
+  _ct_shell=$(command -v "$_ct_name" 2>/dev/null || :)
+  _ct_arg=
+  _ct_label=$_ct_name
+  if [ "$_ct_name" = busybox ]; then _ct_arg=ash; _ct_label=busybox-ash; fi
+  if [ -z "$_ct_shell" ] || [ ! -x "$_ct_shell" ]; then
+    case ",${VALISE_REQUIRED_PARSERS:-}," in
+    *",$_ct_label,"*) fail "compiled-plan runtime $_ct_label is required but unavailable" ;;
+    *) skip "compiled-plan runtime $_ct_label is unavailable" ;;
+    esac
+    continue
+  fi
+  for _ct_case in order dependency-present dependency-missing wrapper reload reload-failure externalonly pathonly aliasonly failpair missingpair guardfunction guardalias guardbuiltin invalid-mode; do
+    case "$_ct_case" in
+    dependency-*) _ct_bundle=dependency ;;
+    reload*) _ct_bundle=wrapper ;;
+    invalid-mode) _ct_bundle=order ;;
+    *) _ct_bundle=$_ct_case ;;
+    esac
+    _ct_path=/usr/bin:/bin
+    case "$_ct_case" in wrapper|externalonly) _ct_path=.:$_ct_path ;; esac
+    # A relative PATH component is deliberate: some command -v implementations
+    # return a bare filename for it, which used to look like a shell function.
+    _ct_rc=0
+    (cd "$_tmp/contract-bin" && env -i PATH="$_ct_path" HOME="$_tmp" \
+      CONTRACT_BIN="$_tmp/contract-bin" CONTRACT_TRACE="$_tmp/contract-body.trace" \
+      CONTRACT_CASE="$_ct_case" CONTRACT_NOCASE=on VALISE_MODULE_ROOT="$_tmp/contract-$_ct_bundle" \
+      "$_ct_shell" ${_ct_arg:+"$_ct_arg"} "$_tmp/contract-runner.sh") \
+      >"$_tmp/contract.out" 2>"$_tmp/contract.err" || _ct_rc=$?
+    if [ "$_ct_rc" -eq 0 ] && grep -Fx "$_ct_case:ok" "$_tmp/contract.out" >/dev/null; then
+      pass "compiled-plan $_ct_case preserves state and contract under $_ct_label"
+    else
+      fail "compiled-plan $_ct_case under $_ct_label (status $_ct_rc)"
+      cat "$_tmp/contract.out" "$_tmp/contract.err" >&2
+    fi
+    rm -f "$_tmp/contract-body.trace"
+  done
+done
+# The case-sensitive Bash baseline proves the on-option lanes use the same
+# fixtures, rather than depending on the option itself to make them valid.
+for _ct_case in order dependency-present dependency-missing invalid-mode; do
+  case "$_ct_case" in dependency-*) _ct_bundle=dependency ;; *) _ct_bundle=order ;; esac
+  if env -i PATH=/usr/bin:/bin HOME="$_tmp" CONTRACT_CASE="$_ct_case" CONTRACT_NOCASE=off \
+    VALISE_MODULE_ROOT="$_tmp/contract-$_ct_bundle" "$_bash_bin" "$_tmp/contract-runner.sh" \
+    >"$_tmp/contract.out" 2>"$_tmp/contract.err" &&
+    grep -Fx "$_ct_case:ok" "$_tmp/contract.out" >/dev/null; then
+    pass "compiled-plan $_ct_case with Bash nocasematch off"
+  else
+    fail "compiled-plan $_ct_case with Bash nocasematch off"
+    cat "$_tmp/contract.out" "$_tmp/contract.err" >&2
+  fi
+done
 
 printf '\n=== compiler-plan summary ===\n'
 printf 'Total: %d  Pass: %d  Skip: %d  Fail: %d\n' "$_total" "$_pass" "$_skip" "$_fail"

@@ -8,10 +8,11 @@
 _prev_tmp=""
 _dry_tmp=""
 _un_tmp=""
-_install_txn=0
-_txn_old_target=""
-_txn_had_previous=0
-_txn_old_previous=""
+_transaction_active=0
+_transaction_dir=
+_transaction_keep=0
+_transaction_reported=0
+_transaction_restore_tmp=
 _txn_changed=""
 
 # The startup files valise may write a managed block into.
@@ -58,6 +59,7 @@ gui_env_file() {
 # the caller's PATH, and a forged one could make uninstall delete a foreign
 # file.
 bridge_is_valise_owned() {
+  [ -f "${2:-}" ] && [ ! -L "${2:-}" ] || return 1
   _bivo_awk=$(trusted_utility_path awk) || return 1
   _bivo_marker=
   case "${1:-}" in
@@ -115,6 +117,20 @@ gui_env_bridge_shell() {
   esac
 }
 
+# Keep failed-cleanup staging names registered for central EXIT cleanup. These
+# files can contain environment secrets and must never be silently forgotten.
+gui_env_stage_discard() {
+  [ -n "${_gui_stage:-}" ] || return 0
+  _gsd_rm=$(trusted_utility_path rm 2>/dev/null || :)
+  [ -z "$_gsd_rm" ] || "$_gsd_rm" -f "$_gui_stage" 2>/dev/null || :
+  if [ -e "$_gui_stage" ] || [ -L "$_gui_stage" ]; then
+    printf 'valise: error: GUI environment staging file preserved at %s\n' "$_gui_stage" >&2
+    _cleanup_failed=1
+    return 1
+  fi
+  _gui_stage=
+}
+
 # gui_env_bridge_stage <release-dir>
 # Prepare the GUI-session bridge the release declares, WITHOUT changing anything
 # a user can observe. Sets:
@@ -128,6 +144,7 @@ gui_env_bridge_shell() {
 # outgoing release AND its bridge in place and consistent instead of switching
 # the release and silently keeping the old bridge.
 gui_env_bridge_stage() {
+  gui_env_stage_discard || return 1
   _gbs_release=${1:-}
   _gui_action=none
   _gui_mode=
@@ -235,24 +252,20 @@ gui_env_bridge_stage() {
     return 1
   }
   _gui_target="$_gbs_parent/${_gui_target##*/}"
-  _gui_stage=$(trusted_mktemp_at "$_gbs_parent" file "$_gbs_parent/.valise-gui.XXXXXX") || {
+  trusted_mktemp_assign _gui_stage file "$_gbs_parent/.valise-gui.XXXXXX" "$_gbs_parent" || {
     _gui_mode= _gui_target=
     unset _gbs_release _gbs_mode _gbs_shell _gbs_capture _gbs_format _gbs_parent _gbs_mkdir
     return 1
   }
   if ! env_export_emit "$_gbs_format" "$_gbs_capture" >"$_gui_stage"; then
-    _gbs_rm=$(trusted_utility_path rm 2>/dev/null || :)
-    [ -z "$_gbs_rm" ] || "$_gbs_rm" -f "$_gui_stage" 2>/dev/null || :
-    _gui_stage=
+    gui_env_stage_discard || :
     _gui_mode= _gui_target=
     printf 'valise: error: cannot render the %s GUI env bridge\n' "$_gbs_mode" >&2
     unset _gbs_release _gbs_mode _gbs_shell _gbs_capture _gbs_format _gbs_parent _gbs_mkdir _gbs_rm
     return 1
   fi
   _gbs_chmod=$(trusted_utility_path chmod) || {
-    _gbs_rm=$(trusted_utility_path rm 2>/dev/null || :)
-    [ -z "$_gbs_rm" ] || "$_gbs_rm" -f "$_gui_stage" 2>/dev/null || :
-    _gui_stage=
+    gui_env_stage_discard || :
     _gui_mode= _gui_target=
     unset _gbs_release _gbs_mode _gbs_shell _gbs_capture _gbs_format _gbs_parent _gbs_mkdir
     return 1
@@ -262,9 +275,7 @@ gui_env_bridge_stage() {
   # explicit 0644 would publish that value world-readable over a restrictive
   # umask, so the bridge is owner-only.
   if ! "$_gbs_chmod" 0600 "$_gui_stage"; then
-    _gbs_rm=$(trusted_utility_path rm 2>/dev/null || :)
-    [ -z "$_gbs_rm" ] || "$_gbs_rm" -f "$_gui_stage" 2>/dev/null || :
-    _gui_stage=
+    gui_env_stage_discard || :
     _gui_mode= _gui_target=
     unset _gbs_release _gbs_mode _gbs_shell _gbs_capture _gbs_format _gbs_parent _gbs_mkdir _gbs_chmod _gbs_rm
     return 1
@@ -283,11 +294,16 @@ gui_env_bridge_publish() {
     return 0
     ;;
   remove)
-    remove_gui_env_bridge
-    _gbp_rc=$?
+    _gbp_rc=0
+    remove_gui_env_bridge || _gbp_rc=$?
     _gui_action=none
     _gui_mode= _gui_target=
     unset _gbp_mv _gbp_rm _gbp_mode _gbp_target
+    # Exit 2 means Phase 1 removed every public bridge file (committed) and
+    # only post-commit deletion of a .valise-remove.* backup failed. Rolling
+    # back the active release would be inconsistent because earlier backups
+    # may already have been deleted.
+    if [ "$_gbp_rc" -eq 2 ]; then _cleanup_failed=1; return 0; fi
     return "$_gbp_rc"
     ;;
   publish)
@@ -300,9 +316,7 @@ gui_env_bridge_publish() {
     else
       # A failed publish must not leave the 0600 staging file (it can hold
       # values read from protected files) in the bridge directory.
-      _gbp_rm=$(trusted_utility_path rm 2>/dev/null || :)
-      [ -z "$_gbp_rm" ] || "$_gbp_rm" -f "$_gui_stage" 2>/dev/null || :
-      _gui_stage=
+      gui_env_stage_discard || :
     fi
     _gui_action=none
     _gui_mode= _gui_target=
@@ -337,88 +351,80 @@ _rgb_candidate() {
   return 1
 }
 
-# remove_gui_env_bridge: remove every valise-owned bridge file, as one set. The
-# two files can coexist (a migrated or shared home), so a removal that fails on
-# the second file must not have already deleted the first. Phase 1 renames each
-# owned file aside, and a failed rename puts the renamed files back; phase 2
-# deletes the set-aside files, and reports any delete that fails with its path.
+# Restore an aside only when it still contains the owned bytes we moved. A
+# failed rename leaves mktemp's empty placeholder, which must never replace the
+# original bridge. Every surviving aside is reported explicitly.
+_rgb_restore_aside() {
+  _rra_path=$1 _rra_aside=$2 _rra_sha=$3
+  [ -n "$_rra_aside" ] || return 0
+  if commands_file_is "$_rra_aside" "$_rra_sha"; then
+    if [ ! -e "$_rra_path" ] && [ ! -L "$_rra_path" ] || commands_file_is "$_rra_path" "$_rra_sha"; then
+      "$_rgb_mv" -f "$_rra_aside" "$_rra_path" 2>/dev/null || :
+      if commands_file_is "$_rra_path" "$_rra_sha" && [ ! -e "$_rra_aside" ]; then return 0; fi
+    fi
+  elif [ -f "$_rra_aside" ] && [ ! -L "$_rra_aside" ] && [ ! -s "$_rra_aside" ] &&
+    commands_file_is "$_rra_path" "$_rra_sha"; then
+    "$_rgb_rm" -f "$_rra_aside" 2>/dev/null || :
+    [ -e "$_rra_aside" ] || [ -L "$_rra_aside" ] || return 0
+  fi
+  printf 'valise: error: GUI bridge recovery file preserved at %s\n' "$_rra_aside" >&2
+  _cleanup_failed=1
+  return 1
+}
+
+# Remove the owned bridge set in two phases. Record every aside before moving
+# its file, and defer signals until either all renames are restored or deletion
+# is committed. Phase-2 failure returns 2: the public removal remains committed.
 remove_gui_env_bridge() {
-  if ! _rgb_rm=$(trusted_utility_path rm); then
-    printf 'valise: error: no trusted rm utility is available to remove the GUI env bridge\n' >&2
-    return 1
-  fi
-  if ! _rgb_mv=$(trusted_utility_path mv); then
-    printf 'valise: error: no trusted mv utility is available to remove the GUI env bridge\n' >&2
-    unset _rgb_rm
-    return 1
-  fi
-  _rgb_sys=$(gui_env_file systemd 2>/dev/null) || _rgb_sys=
-  _rgb_lad=$(gui_env_file launchd 2>/dev/null) || _rgb_lad=
-  _rgb_sys_aside=
-  _rgb_lad_aside=
+  _rgb_rm=$(trusted_utility_path rm) || return 1
+  _rgb_mv=$(trusted_utility_path mv) || return 1
+  _rgb_signals_before=$_signals_deferred
+  _signals_deferred=1
+  _rgb_sys= _rgb_lad= _rgb_sys_aside= _rgb_lad_aside= _rgb_sys_sha= _rgb_lad_sha=
   _rgb_rc=0
-  # The aside name comes from mktemp in the SAME parent directory, so it is
-  # unpredictable and exclusive: a pre-existing file at that name can never be
-  # clobbered by the rename, and the name is freed when the removal fails.
-  if [ -n "$_rgb_sys" ] && _rgb_candidate systemd "$_rgb_sys"; then
-    _rgb_sys_parent=$(path_parent "$_rgb_sys")
-    if _rgb_sys_aside=$(trusted_mktemp_at "$_rgb_sys_parent" file "$_rgb_sys_parent/.valise-remove.XXXXXX"); then
-      "$_rgb_mv" -f "$_rgb_sys" "$_rgb_sys_aside" 2>/dev/null || {
-        printf 'valise: error: cannot remove the systemd GUI env bridge: %s\n' "$_rgb_sys" >&2
-        "$_rgb_rm" -f "$_rgb_sys_aside" 2>/dev/null || :
-        _rgb_sys_aside=
-        _rgb_rc=1
-      }
-    else
-      printf 'valise: error: cannot create a staging name for the systemd GUI env bridge: %s\n' "$_rgb_sys" >&2
+  for _rgb_mode in systemd launchd; do
+    _rgb_path=$(gui_env_file "$_rgb_mode" 2>/dev/null) || continue
+    _rgb_candidate "$_rgb_mode" "$_rgb_path" || continue
+    _rgb_sha=$(file_sha256 "$_rgb_path") || { _rgb_rc=1; break; }
+    _rgb_parent=$(path_parent "$_rgb_path")
+    trusted_mktemp_assign _rgb_aside file "$_rgb_parent/.valise-remove.XXXXXX" "$_rgb_parent" || {
+      printf 'valise: error: cannot create a staging name for the %s GUI env bridge: %s\n' "$_rgb_mode" "$_rgb_path" >&2
       _rgb_rc=1
-    fi
-  fi
-  if [ "$_rgb_rc" -eq 0 ] && [ -n "$_rgb_lad" ] && _rgb_candidate launchd "$_rgb_lad"; then
-    _rgb_lad_parent=$(path_parent "$_rgb_lad")
-    if _rgb_lad_aside=$(trusted_mktemp_at "$_rgb_lad_parent" file "$_rgb_lad_parent/.valise-remove.XXXXXX"); then
-      "$_rgb_mv" -f "$_rgb_lad" "$_rgb_lad_aside" 2>/dev/null || {
-        printf 'valise: error: cannot remove the launchd GUI env bridge: %s\n' "$_rgb_lad" >&2
-        "$_rgb_rm" -f "$_rgb_lad_aside" 2>/dev/null || :
-        _rgb_lad_aside=
-        _rgb_rc=1
-      }
-    else
-      printf 'valise: error: cannot create a staging name for the launchd GUI env bridge: %s\n' "$_rgb_lad" >&2
+      break
+    }
+    case $_rgb_mode in
+      systemd) _rgb_sys=$_rgb_path _rgb_sys_aside=$_rgb_aside _rgb_sys_sha=$_rgb_sha ;;
+      launchd) _rgb_lad=$_rgb_path _rgb_lad_aside=$_rgb_aside _rgb_lad_sha=$_rgb_sha ;;
+    esac
+    "$_rgb_mv" -f "$_rgb_path" "$_rgb_aside" 2>/dev/null || :
+    if [ -e "$_rgb_path" ] || [ -L "$_rgb_path" ] || ! commands_file_is "$_rgb_aside" "$_rgb_sha"; then
+      printf 'valise: error: cannot remove the %s GUI env bridge: %s\n' "$_rgb_mode" "$_rgb_path" >&2
       _rgb_rc=1
+      break
     fi
-  fi
+    if [ -n "$_pending_signal" ]; then _rgb_rc=1; break; fi
+  done
   if [ "$_rgb_rc" -ne 0 ]; then
-    # Phase 1 failed: put back every file already set aside, so no bridge is
-    # removed while the other one remains.
-    if [ -n "$_rgb_sys_aside" ] && ! "$_rgb_mv" -f "$_rgb_sys_aside" "$_rgb_sys" 2>/dev/null; then
-      printf 'valise: error: the systemd GUI env bridge was moved aside and could not be put back: %s\n' "$_rgb_sys_aside" >&2
-    fi
-    if [ -n "$_rgb_lad_aside" ] && ! "$_rgb_mv" -f "$_rgb_lad_aside" "$_rgb_lad" 2>/dev/null; then
-      printf 'valise: error: the launchd GUI env bridge was moved aside and could not be put back: %s\n' "$_rgb_lad_aside" >&2
-    fi
-    unset _rgb_rm _rgb_mv _rgb_sys _rgb_lad _rgb_sys_aside _rgb_lad_aside _rgb_sys_parent _rgb_lad_parent _rgb_rc
-    return 1
+    run_ignoring_int_term _rgb_restore_aside "$_rgb_sys" "$_rgb_sys_aside" "$_rgb_sys_sha" || _cleanup_failed=1
+    run_ignoring_int_term _rgb_restore_aside "$_rgb_lad" "$_rgb_lad_aside" "$_rgb_lad_sha" || _cleanup_failed=1
+  else
+    # All public names have gone. Never roll this set back after deleting one
+    # of the copies: finish cleanup even if INT/TERM arrives during deletion.
+    for _rgb_aside in "$_rgb_sys_aside" "$_rgb_lad_aside"; do
+      [ -n "$_rgb_aside" ] || continue
+      run_ignoring_int_term "$_rgb_rm" -f "$_rgb_aside" 2>/dev/null || :
+      if [ -e "$_rgb_aside" ] || [ -L "$_rgb_aside" ]; then
+        printf 'valise: error: GUI bridge cleanup file preserved at %s\n' "$_rgb_aside" >&2
+        _rgb_rc=2
+      fi
+    done
+    [ -z "$_rgb_sys" ] || info "removed the systemd bridge: $_rgb_sys"
+    [ -z "$_rgb_lad" ] || info "removed the launchd bridge: $_rgb_lad"
   fi
-  # Phase 2: the set is committed. A delete that fails leaves its moved file
-  # behind, and that path is named.
-  if [ -n "$_rgb_sys_aside" ]; then
-    if "$_rgb_rm" -f "$_rgb_sys_aside"; then
-      info "removed the systemd bridge: $_rgb_sys"
-    else
-      printf 'valise: error: cannot remove the systemd GUI env bridge: %s\n' "$_rgb_sys_aside" >&2
-      _rgb_rc=1
-    fi
-  fi
-  if [ -n "$_rgb_lad_aside" ]; then
-    if "$_rgb_rm" -f "$_rgb_lad_aside"; then
-      info "removed the launchd bridge: $_rgb_lad"
-    else
-      printf 'valise: error: cannot remove the launchd GUI env bridge: %s\n' "$_rgb_lad_aside" >&2
-      _rgb_rc=1
-    fi
-  fi
-  unset _rgb_rm _rgb_mv _rgb_sys _rgb_lad _rgb_sys_aside _rgb_lad_aside _rgb_sys_parent _rgb_lad_parent
+  _signals_deferred=$_rgb_signals_before
+  if [ "$_signals_deferred" -eq 0 ] && [ -n "$_pending_signal" ]; then exit "$_pending_signal"; fi
+  unset _rgb_rm _rgb_mv _rgb_sys _rgb_lad _rgb_sys_aside _rgb_lad_aside _rgb_sys_sha _rgb_lad_sha \
+    _rgb_mode _rgb_path _rgb_sha _rgb_parent _rgb_aside _rgb_signals_before _rra_path _rra_aside _rra_sha
   return "$_rgb_rc"
 }
 
@@ -475,7 +481,7 @@ record_integration_installed() {
   [ ! -L "$_rii_record" ] || die "integration record must not be a symlink: $_rii_record"
   _rii_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
   "$_rii_mkdir" -p "$VALISE_XDG_STATE" || die "cannot create state directory: $VALISE_XDG_STATE"
-  _rii_tmp=$(trusted_mktemp_at "$VALISE_XDG_STATE" file "$VALISE_XDG_STATE/.integration.XXXXXX") ||
+  trusted_mktemp_assign _rii_tmp file "$VALISE_XDG_STATE/.integration.XXXXXX" "$VALISE_XDG_STATE" ||
     die "cannot create integration record staging file"
   _rii_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
   printf '%s\n' 'valise integration installed' >"$_rii_tmp" &&
@@ -508,7 +514,7 @@ write_previous_record() {
   [ ! -L "$_wpr_record" ] || die "previous-release record must not be a symlink: $_wpr_record"
   _wpr_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
   "$_wpr_mkdir" -p "$VALISE_XDG_STATE" || die "cannot create state directory: $VALISE_XDG_STATE"
-  _prev_tmp=$(trusted_mktemp_at "$VALISE_XDG_STATE" file "$VALISE_XDG_STATE/.previous.XXXXXX") ||
+  trusted_mktemp_assign _prev_tmp file "$VALISE_XDG_STATE/.previous.XXXXXX" "$VALISE_XDG_STATE" ||
     die "cannot create previous-release staging file"
   printf '%s\n' "$1" >"$_prev_tmp" || die "cannot write previous-release record"
   _wpr_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
@@ -522,8 +528,17 @@ write_previous_record() {
 # read_previous_record: print the recorded previous release, or fail.
 read_previous_record() {
   _rpr_record=$(previous_record_path)
-  [ -f "$_rpr_record" ] && [ ! -L "$_rpr_record" ] || return 1
-  IFS= read -r _rpr_id <"$_rpr_record" || [ -n "${_rpr_id:-}" ] || return 1
+  if [ -L "$_rpr_record" ]; then
+    printf 'valise: error: previous-release record must not be a symlink: %s\n' "$_rpr_record" >&2
+    return 1
+  fi
+  [ -f "$_rpr_record" ] && [ -r "$_rpr_record" ] || return 1
+  _rpr_cat=$(trusted_utility_path cat) || return 1
+  _rpr_id=$("$_rpr_cat" "$_rpr_record" && printf '.') || return 1
+  _rpr_id=${_rpr_id%.}
+  _rpr_nl='
+'
+  _rpr_id=${_rpr_id%"$_rpr_nl"}
   release_name_valid "$_rpr_id" || return 1
   printf '%s\n' "$_rpr_id"
 }
@@ -533,296 +548,412 @@ read_previous_record() {
 # installed release and the switch changed it.
 note_switch() {
   [ -n "$1" ] && [ "$1" != "$2" ] || return 0
-  case "$1" in
-  "$VALISE_RELEASES_DIR"/*) _ns_id=${1#"$VALISE_RELEASES_DIR"/} ;;
+  _ns_old=$1
+  _ns_root=$VALISE_RELEASES_DIR
+  if [ "${_transaction_active:-0}" -eq 1 ] && [ "$1" = "$_transaction_old_target" ]; then
+    _ns_old=$_transaction_old_dir
+    _ns_root=$_transaction_store_dir
+  fi
+  case "$_ns_old" in
+  "$_ns_root"/*) _ns_id=${_ns_old#"$_ns_root"/} ;;
   *) return 0 ;;
   esac
   case "$_ns_id" in */*) unset _ns_id; return 0 ;; esac
   release_name_valid "$_ns_id" || { unset _ns_id; return 0; }
   write_previous_record "$_ns_id"
-  unset _ns_id
+  unset _ns_id _ns_old _ns_root
 }
 
-# release_activate <release-id>
-# Verify an installed release, make it active, and move the command stubs to
-# it when install published them. Used by release use and release rollback.
+# A transaction holds copies of the state it may change, not references to the
+# outgoing release. An unreadable/deleted outgoing manifest therefore cannot
+# turn recovery into an empty command set. Signals are deferred until a complete
+# mutation/bookkeeping step, and the one EXIT handler owns final cleanup.
+transaction_checkpoint() {
+  [ -z "${_pending_signal:-}" ] || exit "$_pending_signal"
+}
+
+# Ownership journals are TSV. Reject unrepresentable path fields before any
+# live mutation, instead of recording a row that recovery cannot read back.
+transaction_record_path_check() {
+  _trpc_tab=$(printf '\t')
+  _trpc_lf='
+'
+  case $1 in
+    *"$_trpc_tab"*|*"$_trpc_lf"*) die "$2 cannot contain TAB or newline in activation records" ;;
+  esac
+  unset _trpc_tab _trpc_lf
+}
+
+# Use the same physical parent as bridge staging. A lexical alias (for example
+# /tmp on macOS) must not make the predecessor and incoming bridge look like
+# two different destinations. Preserve newlines so preflight can reject them.
+transaction_bridge_path() {
+  _tbp_file=$(gui_env_file "$1") || return 1
+  _tbp_parent=$(path_parent "$_tbp_file")
+  if [ -d "$_tbp_parent" ]; then
+    _tbp_parent=$(cd -P "$_tbp_parent" 2>/dev/null && pwd -P && printf '.') || return 1
+    _tbp_parent=${_tbp_parent%.}
+    _tbp_lf='
+'
+    _tbp_parent=${_tbp_parent%"$_tbp_lf"}
+    _tbp_file=${_tbp_parent%/}/${_tbp_file##*/}
+  fi
+  printf '%s\n' "$_tbp_file"
+}
+
+transaction_preflight() {
+  _tp_had_link=0
+  _tp_target=
+  if [ -L "$VALISE_ACTIVE_LINK" ]; then
+    _tp_had_link=1
+    # Keep the literal target, including trailing newlines, for restoration.
+    # readlink_target_assign captures byte-exact: a plain $(readlink_target ...)
+    # would still lose the target's trailing newlines to command substitution.
+    readlink_target_assign _tp_target "$VALISE_ACTIVE_LINK" ||
+      die "cannot read active pointer: $VALISE_ACTIVE_LINK"
+    [ -n "$_tp_target" ] || die "cannot read active pointer: $VALISE_ACTIVE_LINK"
+  elif [ -e "$VALISE_ACTIVE_LINK" ]; then
+    die "active path exists and is not a symlink: $VALISE_ACTIVE_LINK"
+  fi
+  _tp_previous=$(previous_record_path)
+  if [ -L "$_tp_previous" ]; then
+    die "previous-release record must not be a symlink: $_tp_previous"
+  elif [ -e "$_tp_previous" ]; then
+    [ -f "$_tp_previous" ] && [ -r "$_tp_previous" ] ||
+      die "previous-release record must be a readable regular file: $_tp_previous"
+    read_previous_record >/dev/null || die "cannot read previous-release record: $_tp_previous"
+  fi
+  commands_ledger_validate "$(commands_ledger_path)" || die "cannot read command ledger"
+  # Inspect the raw setting before commands_bin_dir's printing/capture could
+  # strip a trailing newline. Every published stub and staging name shares it.
+  transaction_record_path_check "${VALISE_BIN_DIR:-${XDG_BIN_HOME:-${HOME:-}/.local/bin}}" "command directory"
+  for _tp_mode in systemd launchd; do
+    _tp_bridge=$(transaction_bridge_path "$_tp_mode") || continue
+    transaction_record_path_check "$_tp_bridge" "GUI bridge path"
+  done
+  unset _tp_previous _tp_mode _tp_bridge
+}
+
+# transaction_begin <install|release> <commands 0|1> <bridges 0|1>
+# Call with the store lock held and the incoming bridge already staged.
+transaction_begin() {
+  _signals_deferred=1
+  transaction_preflight
+  _transaction_kind=$1
+  _transaction_commands=$2
+  _transaction_bridges=$3
+  _transaction_had_link=$_tp_had_link
+  _transaction_old_target=$_tp_target
+  # This identity is only for the successful switch's previous record. Exact
+  # rollback uses the literal target even when its directory no longer exists.
+  _transaction_old_dir=
+  _transaction_store_dir=$(cd "$VALISE_RELEASES_DIR" 2>/dev/null && pwd -P) ||
+    die "release root unavailable"
+  if [ "$_transaction_had_link" -eq 1 ]; then
+    _transaction_old_dir=$(cd "$VALISE_ACTIVE_LINK" 2>/dev/null && pwd -P) || _transaction_old_dir=
+  fi
+  _transaction_commands_started=0
+  _transaction_bridge_started=0
+  _transaction_keep=0
+  _transaction_reported=0
+  _transaction_had_previous=0
+  _transaction_previous_mode=
+  _transaction_ledger_had=0
+  _transaction_ledger_mode=
+  _txn_changed=
+  _tx_cat=$(trusted_utility_path cat) || die "no trusted cat utility available"
+  _tx_rm=$(trusted_utility_path rm) || die "no trusted rm utility available"
+  _tx_ln=$(trusted_utility_path ln) || die "no trusted ln utility available"
+  _tx_mv=$(trusted_utility_path mv) || die "no trusted mv utility available"
+  _tx_chmod=$(trusted_utility_path chmod) || die "no trusted chmod utility available"
+  _tx_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  _tx_cmp=$(trusted_utility_path cmp) || die "no trusted cmp utility available"
+  trusted_mktemp_assign _transaction_dir dir "$VALISE_XDG_STATE/.transaction.XXXXXX" "$VALISE_XDG_STATE" ||
+    die "cannot create activation recovery directory"
+  "$_tx_chmod" 0700 "$_transaction_dir" || die "cannot protect activation recovery directory"
+  printf '%s' "$_transaction_old_target" >"$_transaction_dir/active-target" || die "cannot snapshot active pointer"
+  printf 'kind=%s\nhad_active=%s\n' "$_transaction_kind" "$_transaction_had_link" >"$_transaction_dir/state" ||
+    die "cannot snapshot activation state"
+  _tb_previous=$(previous_record_path)
+  if [ -f "$_tb_previous" ]; then
+    _transaction_had_previous=1
+    _transaction_previous_mode=$(file_mode "$_tb_previous") || die "cannot read previous-release record mode"
+    "$_tx_cat" "$_tb_previous" >"$_transaction_dir/previous" || die "cannot snapshot previous-release record"
+  fi
+  if [ "$_transaction_commands" -eq 1 ]; then
+    commands_txn_snapshot
+  fi
+  : >"$_transaction_dir/bridges.tsv" || die "cannot snapshot GUI bridges"
+  _tb_number=0
+  if [ "$_transaction_bridges" -eq 1 ]; then
+    for _tb_mode in systemd launchd; do
+      _tb_path=$(transaction_bridge_path "$_tb_mode" 2>/dev/null) || continue
+      transaction_record_path_check "$_tb_path" "GUI bridge path"
+      bridge_is_valise_owned "$_tb_mode" "$_tb_path" || continue
+      _tb_number=$((_tb_number + 1))
+      _tb_copy=bridge-$_tb_number
+      _tb_permissions=$(file_mode "$_tb_path") || die "cannot read GUI bridge mode: $_tb_path"
+      _tb_digest=$(file_sha256 "$_tb_path") || die "cannot read GUI bridge: $_tb_path"
+      "$_tx_cat" "$_tb_path" >"$_transaction_dir/$_tb_copy" || die "cannot snapshot GUI bridge: $_tb_path"
+      [ "$(file_sha256 "$_transaction_dir/$_tb_copy")" = "$_tb_digest" ] ||
+        die "GUI bridge changed while being snapshotted: $_tb_path"
+      printf '%s\t%s\t%s\t%s\n' "$_tb_path" "$_tb_copy" "$_tb_permissions" "$_tb_digest" >>"$_transaction_dir/bridges.tsv" ||
+        die "cannot snapshot GUI bridge ownership"
+    done
+  fi
+  _transaction_gui_target=${_gui_target:-}
+  _transaction_gui_digest=
+  if [ "${_gui_action:-none}" = publish ]; then
+    _transaction_gui_digest=$(file_sha256 "$_gui_stage") || die "cannot read staged GUI bridge"
+  fi
+  printf 'had_previous=%s\nprevious_mode=%s\nhad_ledger=%s\nledger_mode=%s\n' \
+    "$_transaction_had_previous" "$_transaction_previous_mode" "$_transaction_ledger_had" \
+    "${_transaction_ledger_mode:-}" >>"$_transaction_dir/state" || die "cannot snapshot activation state"
+  transaction_checkpoint
+  _transaction_active=1
+  unset _tp_had_link _tp_target _tb_previous _tb_number _tb_mode _tb_path _tb_copy _tb_permissions _tb_digest
+}
+
+# transaction_restore_file <snapshot> <destination> <mode> [replace|create]
+# Recovery never consumes its only backup. Check the resulting bytes as well as
+# the utility status: a signal can interrupt a wait after rename already ran.
+transaction_restore_file() {
+  _trf_source=$1 _trf_target=$2 _trf_mode=$3 _trf_action=${4:-replace}
+  [ ! -L "$_trf_target" ] || return 1
+  [ ! -e "$_trf_target" ] || [ -f "$_trf_target" ] || return 1
+  if [ -f "$_trf_target" ] && "$_tx_cmp" -s "$_trf_source" "$_trf_target" &&
+    [ "$(file_mode "$_trf_target")" = "$_trf_mode" ]; then
+    return 0
+  fi
+  _trf_parent=$(path_parent "$_trf_target")
+  trusted_mktemp_assign _transaction_restore_tmp file "$_trf_parent/.valise-restore.XXXXXX" "$_trf_parent" || return 1
+  if ! "$_tx_cat" "$_trf_source" >"$_transaction_restore_tmp" ||
+    ! "$_tx_chmod" "$_trf_mode" "$_transaction_restore_tmp"; then
+    transaction_restore_temp_cleanup
+    return 1
+  fi
+  if [ "$_trf_action" = create ]; then
+    "$_tx_ln" "$_transaction_restore_tmp" "$_trf_target" 2>/dev/null || :
+  else
+    "$_tx_mv" -f "$_transaction_restore_tmp" "$_trf_target" 2>/dev/null || :
+  fi
+  transaction_restore_temp_cleanup
+  [ -f "$_trf_target" ] && [ ! -L "$_trf_target" ] &&
+    "$_tx_cmp" -s "$_trf_source" "$_trf_target" && [ "$(file_mode "$_trf_target")" = "$_trf_mode" ]
+}
+
+transaction_restore_temp_cleanup() {
+  "$_tx_rm" -f "$_transaction_restore_tmp" 2>/dev/null || :
+  if [ -e "$_transaction_restore_tmp" ] || [ -L "$_transaction_restore_tmp" ]; then
+    printf 'valise: error: recovery staging file preserved at %s\n' "$_transaction_restore_tmp" >&2
+    _transaction_keep=1
+    _cleanup_failed=1
+  fi
+  # The path was either removed or explicitly named; the source snapshot is
+  # retained whenever cleanup failed, so later restores may use this variable.
+  _transaction_restore_tmp=
+}
+
+transaction_restore_bridges() {
+  _trb_status=0
+  _trb_tab=$(printf '\t')
+  _trb_had_target=0
+  while IFS="$_trb_tab" read -r _trb_path _trb_copy _trb_mode _trb_digest; do
+    [ -n "$_trb_path" ] || continue
+    [ "$_trb_path" != "$_transaction_gui_target" ] || _trb_had_target=1
+    if [ -e "$_trb_path" ] || [ -L "$_trb_path" ]; then
+      if ! commands_file_is "$_trb_path" "$_trb_digest" &&
+        { [ "$_trb_path" != "$_transaction_gui_target" ] ||
+          [ -z "$_transaction_gui_digest" ] || ! commands_file_is "$_trb_path" "$_transaction_gui_digest"; }; then
+        printf 'valise: error: GUI bridge changed during activation; leaving it: %s\n' "$_trb_path" >&2
+        _trb_status=1
+        continue
+      fi
+    fi
+    if ! transaction_restore_file "$_transaction_dir/$_trb_copy" "$_trb_path" "$_trb_mode"; then
+      printf 'valise: error: cannot restore GUI bridge: %s\n' "$_trb_path" >&2
+      _trb_status=1
+    fi
+  done <"$_transaction_dir/bridges.tsv" || _trb_status=1
+  if [ "$_trb_had_target" -eq 0 ] && [ -n "$_transaction_gui_target" ] &&
+    { [ -e "$_transaction_gui_target" ] || [ -L "$_transaction_gui_target" ]; }; then
+    if [ -n "$_transaction_gui_digest" ] && commands_file_is "$_transaction_gui_target" "$_transaction_gui_digest"; then
+      "$_tx_rm" -f "$_transaction_gui_target" 2>/dev/null || :
+      if [ -e "$_transaction_gui_target" ] || [ -L "$_transaction_gui_target" ]; then
+        printf 'valise: error: cannot remove the newly published GUI bridge: %s\n' "$_transaction_gui_target" >&2
+        _trb_status=1
+      fi
+    else
+      printf 'valise: error: GUI bridge changed during activation; leaving it: %s\n' "$_transaction_gui_target" >&2
+      _trb_status=1
+    fi
+  fi
+  return "$_trb_status"
+}
+
+# Called only by the central EXIT handler. It records errors and returns; it
+# never exits or re-enters cleanup when another signal arrives during restore.
+transaction_abort() {
+  _signals_deferred=1
+  _transaction_active=0
+  # Only the parent handles signals and owns final cleanup. The worker and its
+  # utilities ignore INT/TERM, including a second process-group signal during
+  # recovery. Any worker failure retains the parent's original snapshots.
+  while :; do
+    _ta_worker_status=0
+    run_ignoring_int_term transaction_restore || _ta_worker_status=$?
+    case $_ta_worker_status in
+      0) break ;;
+      # A group signal can kill the worker before its first trap instruction.
+      # No recovery operation has started then; retry with the same snapshots.
+      130|143) continue ;;
+      *) _transaction_keep=1; _cleanup_failed=1; break ;;
+    esac
+  done
+}
+
+transaction_restore() {
+  _transaction_rolled=0
+  if [ "$_transaction_had_link" -eq 1 ]; then
+    readlink_target_assign _ta_current "$VALISE_ACTIVE_LINK" 2>/dev/null || _ta_current=
+    if [ ! -L "$VALISE_ACTIVE_LINK" ] || [ "$_ta_current" != "$_transaction_old_target" ]; then
+      if [ ! -e "$VALISE_ACTIVE_LINK" ] || [ -L "$VALISE_ACTIVE_LINK" ]; then
+        "$_tx_ln" -sfn "$_transaction_old_target" "$VALISE_ACTIVE_LINK" 2>/dev/null || :
+      fi
+    fi
+    readlink_target_assign _ta_current "$VALISE_ACTIVE_LINK" 2>/dev/null || _ta_current=
+    if [ -L "$VALISE_ACTIVE_LINK" ] && [ "$_ta_current" = "$_transaction_old_target" ]; then
+      _transaction_rolled=1
+    fi
+  else
+    # Only a symlink belongs to the switch; never unlink a foreign regular file.
+    if [ -L "$VALISE_ACTIVE_LINK" ]; then "$_tx_rm" -f "$VALISE_ACTIVE_LINK" 2>/dev/null || :; fi
+    if [ ! -e "$VALISE_ACTIVE_LINK" ] && [ ! -L "$VALISE_ACTIVE_LINK" ]; then _transaction_rolled=1; fi
+  fi
+  if [ "$_transaction_rolled" -eq 1 ]; then
+    _ta_previous=$(previous_record_path)
+    if [ "$_transaction_had_previous" -eq 1 ]; then
+      if ! transaction_restore_file "$_transaction_dir/previous" "$_ta_previous" "$_transaction_previous_mode"; then
+        printf 'valise: error: cannot restore the previous-release record\n' >&2
+        _transaction_keep=1
+      fi
+    elif [ -L "$_ta_previous" ] || { [ -e "$_ta_previous" ] && [ ! -f "$_ta_previous" ]; }; then
+      printf 'valise: error: previous-release record changed type during activation; leaving it: %s\n' "$_ta_previous" >&2
+      _transaction_keep=1
+    else
+      "$_tx_rm" -f "$_ta_previous" 2>/dev/null || :
+      if [ -e "$_ta_previous" ]; then
+        printf 'valise: error: cannot remove the previous-release record\n' >&2
+        _transaction_keep=1
+      fi
+    fi
+    if [ "$_transaction_commands_started" -eq 1 ]; then
+      commands_txn_restore || _transaction_keep=1
+    fi
+    if [ "$_transaction_bridge_started" -eq 1 ]; then
+      transaction_restore_bridges || _transaction_keep=1
+    fi
+    if [ "$_transaction_kind" = install ]; then
+      if [ "$_transaction_had_link" -eq 1 ]; then
+        printf 'valise: install failed; the active release is back to %s\n' "${_transaction_old_target##*/}" >&2
+      else
+        printf 'valise: install failed; no release is active, as before the install\n' >&2
+      fi
+    else
+      printf 'valise: error: the active release was restored to %s\n' "${_transaction_old_target:-no release}" >&2
+    fi
+  else
+    # Forward reconciliation may have stopped part-way. Do not publish the old
+    # bridge or previous record while the link still names the incoming release.
+    printf 'valise: error: cannot restore the active link; previous record, command stubs, and GUI bridges were left in their current state\n' >&2
+    _transaction_keep=1
+  fi
+  if [ "$_transaction_kind" = install ] && [ -n "$_txn_changed" ]; then
+    printf 'valise: already updated (they load whichever release is active):%s\n' "$_txn_changed" >&2
+  fi
+  [ "$_transaction_keep" -eq 0 ] || _cleanup_failed=1
+  unset _ta_current _ta_previous
+  [ "$_transaction_keep" -eq 0 ]
+}
+
+# Release the temporary hard links and recovery copies after a successful
+# commit/restore. A recovery error preserves the entire directory for inspection.
+transaction_cleanup() {
+  [ -n "${_transaction_dir:-}" ] || return 0
+  if [ "${_transaction_keep:-0}" -eq 0 ]; then
+    run_ignoring_int_term commands_txn_discard || { _transaction_keep=1; _cleanup_failed=1; }
+  fi
+  if [ "${_transaction_keep:-0}" -eq 0 ]; then
+    if run_ignoring_int_term "$_tx_rm" -rf "$_transaction_dir" 2>/dev/null && [ ! -e "$_transaction_dir" ]; then
+      _transaction_dir=
+      return 0
+    fi
+    _transaction_keep=1
+    _cleanup_failed=1
+  fi
+  if [ "${_transaction_reported:-0}" -eq 0 ]; then
+    printf 'valise: error: activation recovery files preserved at %s\n' "$_transaction_dir" >&2
+    _transaction_reported=1
+  fi
+  return 1
+}
+
+transaction_commit() {
+  transaction_checkpoint
+  _transaction_active=0
+  transaction_cleanup || :
+  transaction_checkpoint
+  _signals_deferred=0
+}
+
+# release_activate <release-id>: activation and install use the same snapshots,
+# restore order and signal policy. There is no private subshell rollback state.
 release_activate() {
   _ra_id=$1
   release_name_valid "$_ra_id" || die "invalid release name: $_ra_id"
+  # This also protects allocation/result bookkeeping before the state snapshot
+  # is armed, including manifest and GUI staging files.
+  _signals_deferred=1
   _ra_dir="$VALISE_RELEASES_DIR/$_ra_id"
-  [ -e "$_ra_dir" ] || die "release not found: $_ra_id"
-  [ -d "$_ra_dir" ] || die "release target is not a directory: $_ra_id"
-  [ ! -L "$_ra_dir" ] || die "release target must not be a symlink: $_ra_id"
+  [ -d "$_ra_dir" ] && [ ! -L "$_ra_dir" ] || die "release target is not a regular directory: $_ra_id"
+  acquire_lock
+  transaction_preflight
   _ra_root=$(cd "$VALISE_RELEASES_DIR" 2>/dev/null && pwd -P) || die "release root unavailable"
   _ra_parent=$(cd "$(path_parent "$_ra_dir")" 2>/dev/null && pwd -P) || die "release target parent unavailable"
-  case "$_ra_parent/" in
-  "$_ra_root/"*) : ;;
-  *) die "release target escapes release root: $_ra_id" ;;
-  esac
+  [ "$_ra_parent" = "$_ra_root" ] || die "release target escapes release root: $_ra_id"
   _ra_manifest="$_ra_dir/.valise-manifest"
-  [ -f "$_ra_manifest" ] && [ ! -L "$_ra_manifest" ] ||
-    die "release manifest snapshot is missing or not a regular file: $_ra_id"
+  [ -f "$_ra_manifest" ] && [ ! -L "$_ra_manifest" ] || die "release manifest snapshot is missing or not a regular file: $_ra_id"
   prepare_manifest_rows "$_ra_manifest" || die "cannot snapshot the release manifest"
   validate_manifest "$_manifest_rows" || die "invalid release manifest snapshot"
   verify_release_dir "$_ra_dir" "$_manifest_rows" "$_ra_id"
-  release_commands "$_ra_dir" >/dev/null || die "release $_ra_id lists an invalid command name"
-  _ra_config_parent=$(path_parent "$VALISE_ACTIVE_LINK")
-  if [ ! -d "$_ra_config_parent" ]; then
-    _ra_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
-    "$_ra_mkdir" -p "$_ra_config_parent" || die "cannot create $_ra_config_parent"
-  fi
-  acquire_lock
-  # Prepare the GUI env bridge BEFORE the active link moves. A capture or render
-  # failure then leaves the outgoing release active with its own bridge, instead
-  # of switching to a release whose env the GUI session will never see.
+  release_commands "$_ra_dir" >/dev/null || die "release $_ra_id lists invalid commands"
+  _ra_mkdir=$(trusted_utility_path mkdir) || die "no trusted mkdir utility available"
+  "$_ra_mkdir" -p "$VALISE_XDG_CONFIG" || die "cannot create configuration directory"
+  _ra_commands=0
+  [ ! -f "$(commands_ledger_path)" ] || _ra_commands=1
   _ra_bridge=0
-  if integration_installed; then
-    case "$(gui_env_mode "$_ra_dir")" in
-    off | systemd | launchd) _ra_bridge=1 ;;
-    *)
-      # An unknown value is reported, as the write path reports it, rather than
-      # leaving the outgoing release's bridge in place without a word.
-      info "warning: gui_env=$(gui_env_mode "$_ra_dir") is not off, systemd, or launchd; skipping the GUI env bridge"
-      ;;
-    esac
+  _gui_action=none
+  if integration_installed && [ -n "${HOME:-}" ] && [ "$(cli_os_name)" != unknown ]; then
+    gui_env_bridge_stage "$_ra_dir" || die "cannot prepare the GUI env bridge for $_ra_id"
+    [ "${_gui_action:-none}" = none ] || _ra_bridge=1
   fi
-  if [ "$_ra_bridge" -eq 1 ] && [ -n "${HOME:-}" ] && [ "$(cli_os_name)" != unknown ]; then
-    gui_env_bridge_stage "$_ra_dir" ||
-      die "cannot prepare the GUI env bridge for $_ra_id; the active release was not changed"
-  else
-    _gui_action=none
-  fi
-  # Remember the outgoing target so a publish failure can undo the switch: with
-  # `release use` there is no install transaction to do it.
-  _ra_old_target=
-  _ra_had_link=0
-  if [ -L "$VALISE_ACTIVE_LINK" ]; then
-    _ra_old_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
-    [ -n "$_ra_old_target" ] && _ra_had_link=1
-  fi
-  # The switch rewrites the previous-release record to the outgoing release. If
-  # the bridge publish then fails, that record is put back as well as the link.
-  _ra_had_previous=0
-  _ra_old_previous=
-  if _ra_old_previous=$(read_previous_record); then
-    _ra_had_previous=1
-  fi
-  # The OUTGOING release's bridge is moved aside before anything changes, so a
-  # rollback can put back the exact bytes that described the outgoing release.
-  # Without this, a publish that succeeded followed by a failed reconcile left
-  # the link on the old release and the bridge on the new one.
-  # At most two owned bridges exist for one home (systemd and launchd), so each
-  # aside is tracked with the path it came from in parallel variables. The
-  # asides live in the SAME directory as their bridge, so mv is a rename and
-  # cannot fail across filesystems.
-  _ra_aside=
-  _ra_aside_tgt=
-  _ra_aside2=
-  _ra_aside2_tgt=
-  _ra_rm=$(trusted_utility_path rm 2>/dev/null || :)
-  _ra_ln=$(trusted_utility_path ln 2>/dev/null || :)
-  _ra_mv=$(trusted_utility_path mv 2>/dev/null || :)
-  _ra_published=0
-  if [ "${_gui_action:-none}" = remove ]; then
-    # The INCOMING release wants no bridge (gui_env=off, or a mode this platform
-    # cannot write, which stages as `remove`). gui_env_bridge_stage leaves
-    # _gui_target EMPTY for that action, so a guard keyed on _gui_target cannot
-    # see the OUTGOING bridge - and remove_gui_env_bridge would then delete it
-    # for good. A failing reconcile afterwards would roll the link back to a
-    # release whose bridge is already gone: the exact inconsistency this
-    # transaction exists to prevent, in the other direction. Both owned
-    # candidates are therefore set aside first.
-    for _ra_cand_mode in systemd launchd; do
-      _ra_cand=$(gui_env_file "$_ra_cand_mode" 2>/dev/null) || _ra_cand=
-      [ -n "$_ra_cand" ] || continue
-      [ -f "$_ra_cand" ] && [ ! -L "$_ra_cand" ] || continue
-      bridge_is_valise_owned "$_ra_cand_mode" "$_ra_cand" || continue
-      [ -n "$_ra_mv" ] || continue
-      _ra_cand_parent=$(path_parent "$_ra_cand")
-      _ra_new_aside=$(trusted_mktemp_at "$_ra_cand_parent" file "$_ra_cand_parent/.valise-outgoing.XXXXXX") || _ra_new_aside=
-      [ -n "$_ra_new_aside" ] || continue
-      if ! "$_ra_mv" -f "$_ra_cand" "$_ra_new_aside" 2>/dev/null; then
-        # mktemp created the file; never strand it.
-        [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_new_aside" 2>/dev/null || :
-        continue
-      fi
-      if [ -z "$_ra_aside" ]; then
-        _ra_aside=$_ra_new_aside
-        _ra_aside_tgt=$_ra_cand
-      else
-        _ra_aside2=$_ra_new_aside
-        _ra_aside2_tgt=$_ra_cand
-      fi
-    done
-    unset _ra_cand_mode _ra_cand _ra_cand_parent _ra_new_aside
-  elif [ "${_gui_action:-none}" != none ] && [ -n "${_gui_target:-}" ] && [ -n "$_ra_mv" ] &&
-    [ -f "$_gui_target" ] && bridge_is_valise_owned "$_gui_mode" "$_gui_target"; then
-    _ra_aside_parent=$(path_parent "$_gui_target")
-    _ra_aside=$(trusted_mktemp_at "$_ra_aside_parent" file "$_ra_aside_parent/.valise-outgoing.XXXXXX") || _ra_aside=
-    if [ -n "$_ra_aside" ]; then
-      # trusted_mktemp_at already CREATED the file. If the move then fails (an
-      # immutable bridge is the deterministic case: BSD refuses to rename it),
-      # clearing the variable would strand that empty file in the bridge
-      # directory forever, so it is removed here first.
-      if "$_ra_mv" -f "$_gui_target" "$_ra_aside" 2>/dev/null; then
-        _ra_aside_tgt=$_gui_target
-      else
-        [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_aside" 2>/dev/null || :
-        _ra_aside=
-      fi
-    fi
-  fi
-  # A rollback below must leave the link, the previous-release record, the
-  # bridge and the stubs describing ONE release. That is why the outgoing
-  # bridge is moved aside first, and why a staged 0600 file (which can hold a
-  # value read from a protected file) is always removed.
-  # The bridge path and mode are saved here because gui_env_bridge_publish
-  # CLEARS _gui_target/_gui_mode on every path; a rollback after a successful
-  # publish needs them to put the outgoing bytes back.
-  _ra_gui_target=${_gui_target:-}
-  # gui_env_bridge_publish sets _gui_action=none on every path, so the action
-  # that was performed is captured here for the rollback to reason about.
-  _ra_action=${_gui_action:-none}
-  _ra_reconcile_err=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-reconcile.XXXXXX") || _ra_reconcile_err=
+  transaction_checkpoint
+  transaction_begin release "$_ra_commands" "$_ra_bridge"
   switch_active_link "$_ra_dir"
-  _ra_publish_failed=0
-  if [ "${_gui_action:-none}" != none ]; then
-    if gui_env_bridge_publish; then
-      _ra_published=1
-    else
-      _ra_publish_failed=1
-    fi
+  transaction_checkpoint
+  if [ "$_ra_bridge" -eq 1 ]; then
+    _transaction_bridge_started=1
+    gui_env_bridge_publish || die "cannot publish the GUI env bridge for $_ra_id"
+    transaction_checkpoint
   fi
-  _ra_reconcile_failed=0
-  if [ "$_ra_publish_failed" -eq 0 ] && [ -f "$(commands_ledger_path)" ]; then
-    # reconcile_commands reports failures with `die`, which EXITS the process;
-    # running it in a subshell is what lets this activation roll back instead of
-    # leaving the link and the bridge on different releases. Its staging files
-    # are removed by the subshell's own EXIT trap.
-    # A failed mktemp must not turn the redirection itself into an error, so the
-    # diagnostic goes to /dev/null in that case; the rollback still happens.
-    if [ -n "$_ra_reconcile_err" ]; then
-      _ra_rc_err_target=$_ra_reconcile_err
-    else
-      _ra_rc_err_target=/dev/null
-    fi
-    if ! (
-      trap 'for _ra_t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do
-        [ -z "$_ra_t" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_ra_t" 2>/dev/null
-      done' EXIT
-      reconcile_commands "$_ra_dir"
-    ) >/dev/null 2>"$_ra_rc_err_target"; then
-      _ra_reconcile_failed=1
-      cat "$_ra_rc_err_target" >&2 2>/dev/null || :
-    fi
+  if [ "$_ra_commands" -eq 1 ]; then
+    _transaction_commands_started=1
+    reconcile_commands "$_ra_dir"
+    transaction_checkpoint
   fi
-  # The captured diagnostic has been reported (or was never produced); the file
-  # must not outlive this function on either the rollback or the commit path.
-  [ -z "$_ra_reconcile_err" ] || [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_reconcile_err" 2>/dev/null || :
-  _ra_reconcile_err=
-  if [ "$_ra_publish_failed" -eq 1 ] || [ "$_ra_reconcile_failed" -eq 1 ]; then
-    [ -z "${_gui_stage:-}" ] || [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_gui_stage" 2>/dev/null || :
-    _gui_stage= _gui_action=none _gui_mode= _gui_target=
-    _ra_rolled=0
-    if [ "$_ra_had_link" -eq 1 ] && [ -n "$_ra_old_target" ] && [ -n "$_ra_ln" ] &&
-      "$_ra_ln" -sfn "$_ra_old_target" "$VALISE_ACTIVE_LINK" 2>/dev/null; then
-      _ra_rolled=1
-      _ra_restored="${_ra_old_target##*/}"
-    elif [ "$_ra_had_link" -eq 0 ] && [ -n "$_ra_rm" ] &&
-      "$_ra_rm" -f "$VALISE_ACTIVE_LINK" 2>/dev/null; then
-      _ra_rolled=1
-      _ra_restored="no release"
-    fi
-    if [ "$_ra_rolled" -eq 1 ]; then
-      ( restore_previous_record "$_ra_had_previous" "$_ra_old_previous" ) >/dev/null 2>&1 ||
-        printf 'valise: cannot restore the previous-release record\n' >&2
-      # Reconcile also removes stubs, so a run that failed part way may already
-      # have dropped some. Bringing the stubs back to the release that is active
-      # again is what makes the restored store describe ONE release; a failure
-      # here is reported but does not replace the primary diagnostic.
-      if [ "$_ra_had_link" -eq 1 ] && [ -n "$_ra_old_target" ] && [ -f "$(commands_ledger_path)" ]; then
-        if ! (
-          trap 'for _ra_t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do
-            [ -z "$_ra_t" ] || [ -z "${_ra_rm:-}" ] || "$_ra_rm" -f "$_ra_t" 2>/dev/null
-          done' EXIT
-          reconcile_commands "$_ra_old_target"
-        ) >/dev/null 2>&1; then
-          printf 'valise: error: the command stubs could not be brought back to the restored release\n' >&2
-        fi
-      fi
-      # The bridge follows the release that is active again. Each aside goes
-      # back to the exact path it was taken from, which is the only correct
-      # destination for a remove-direction backup (there _gui_target is empty).
-      if [ -n "$_ra_aside" ] && [ -n "$_ra_aside_tgt" ] && [ -n "$_ra_mv" ] &&
-        "$_ra_mv" -f "$_ra_aside" "$_ra_aside_tgt" 2>/dev/null; then
-        _ra_aside= _ra_aside_tgt=
-      elif [ -n "$_ra_aside" ]; then
-        printf 'valise: error: the outgoing GUI env bridge could not be put back: %s\n' "$_ra_aside" >&2
-      elif [ "$_ra_published" -eq 1 ] && [ -n "$_ra_rm" ] && [ -n "$_ra_gui_target" ] &&
-        [ "$_ra_action" != remove ]; then
-        # No predecessor existed, so the bridge this activation wrote must go.
-        "$_ra_rm" -f "$_ra_gui_target" 2>/dev/null || :
-      fi
-      if [ -n "$_ra_aside2" ] && [ -n "$_ra_aside2_tgt" ] && [ -n "$_ra_mv" ] &&
-        "$_ra_mv" -f "$_ra_aside2" "$_ra_aside2_tgt" 2>/dev/null; then
-        _ra_aside2= _ra_aside2_tgt=
-      elif [ -n "$_ra_aside2" ]; then
-        printf 'valise: error: the outgoing GUI env bridge could not be put back: %s\n' "$_ra_aside2" >&2
-      fi
-    fi
-    # Whatever happened above, an aside must not outlive this function
-    # silently. This also covers _ra_rolled=0, where the link rollback itself
-    # failed and the bridge bytes are the only record of the outgoing release
-    # left: moving them back is attempted, and if that is impossible the path is
-    # named rather than stranded (deleting it would destroy the only surviving
-    # copy of the outgoing release's bridge).
-    for _ra_pair in 1 2; do
-      if [ "$_ra_pair" -eq 1 ]; then
-        _ra_a=$_ra_aside _ra_t=$_ra_aside_tgt
-      else
-        _ra_a=$_ra_aside2 _ra_t=$_ra_aside2_tgt
-      fi
-      [ -n "$_ra_a" ] || continue
-      if [ -n "$_ra_mv" ] && [ -n "$_ra_t" ] &&
-        "$_ra_mv" -f "$_ra_a" "$_ra_t" 2>/dev/null; then
-        continue
-      fi
-      printf 'valise: error: the outgoing GUI env bridge is preserved at %s\n' "$_ra_a" >&2
-    done
-    unset _ra_pair _ra_a _ra_t
-    if [ "$_ra_publish_failed" -eq 1 ]; then
-      _ra_fail_msg="cannot publish the GUI env bridge for $_ra_id"
-    else
-      _ra_fail_msg="cannot reconcile the command stubs for $_ra_id"
-    fi
-    if [ "$_ra_rolled" -eq 1 ]; then
-      die "$_ra_fail_msg; the active release was left as $_ra_restored"
-    fi
-    die "$_ra_fail_msg; the active release was changed"
-  fi
-  # Committed: both aside copies are no longer needed.
-  for _ra_pair in "$_ra_aside" "$_ra_aside2"; do
-    [ -z "$_ra_pair" ] || [ -z "$_ra_rm" ] || "$_ra_rm" -f "$_ra_pair" 2>/dev/null || :
-  done
-  unset _ra_pair
-  _ra_aside= _ra_aside_tgt= _ra_aside2= _ra_aside2_tgt=
+  transaction_commit
   release_lock
-  unset _ra_id _ra_dir _ra_root _ra_parent _ra_manifest _ra_config_parent _ra_mkdir _ra_bridge _ra_old_target _ra_ln _ra_rm _ra_mv _ra_had_link
-  unset _ra_had_previous _ra_old_previous _ra_aside _ra_aside_parent _ra_published
-  unset _ra_publish_failed _ra_reconcile_failed _ra_rolled _ra_restored _ra_fail_msg _ra_gui_target _ra_reconcile_err _ra_rc_err_target _ra_t
-  unset _ra_aside_tgt _ra_aside2 _ra_aside2_tgt _ra_action
-}
-
-# restore_previous_record <had 0|1> <release-id>: put the previous-release record
-# back to what it was before a switch; remove it when none existed.
-restore_previous_record() {
-  if [ "$1" -eq 1 ]; then
-    write_previous_record "$2"
-  else
-    _rpr_rm=$(trusted_utility_path rm 2>/dev/null || :)
-    [ -z "$_rpr_rm" ] || "$_rpr_rm" -f "$(previous_record_path)" 2>/dev/null || :
-    unset _rpr_rm
-  fi
+  unset _ra_id _ra_dir _ra_root _ra_parent _ra_manifest _ra_mkdir _ra_commands _ra_bridge
 }
 
 cmd_release_rollback() {
@@ -831,84 +962,12 @@ cmd_release_rollback() {
   '') ;;
   *) die "unknown release rollback option: $1" ;;
   esac
+  acquire_lock
   _rr_id=$(read_previous_record) ||
     die "no previous release is recorded (one is recorded each time the active release changes)"
   release_activate "$_rr_id"
   info "rolled back to release $_rr_id"
   unset _rr_id
-}
-
-# --- Install transaction ---
-
-# install_txn_begin: remember what an install may have to restore.
-install_txn_begin() {
-  _txn_old_target=
-  if [ -L "$VALISE_ACTIVE_LINK" ]; then
-    _txn_old_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null || :)
-  fi
-  _txn_had_previous=0
-  _txn_old_previous=
-  if _txn_old_previous=$(read_previous_record); then
-    _txn_had_previous=1
-  fi
-  _txn_changed=
-}
-
-# install_txn_abort: run from the exit and signal handlers while an install
-# that has switched the active link is unfinished. Puts the previous active
-# release back and says what had already changed. It must not call die.
-install_txn_abort() {
-  _install_txn=0
-  _ita_ln=$(trusted_utility_path ln 2>/dev/null || :)
-  _ita_rm=$(trusted_utility_path rm 2>/dev/null || :)
-  if [ -n "$_txn_old_target" ]; then
-    if [ -n "$_ita_ln" ] && "$_ita_ln" -sfn "$_txn_old_target" "$VALISE_ACTIVE_LINK" 2>/dev/null; then
-      printf 'valise: install failed; the active release is back to %s\n' "${_txn_old_target##*/}" >&2
-    else
-      printf 'valise: install failed and the previous active release could not be restored: %s\n' "$_txn_old_target" >&2
-    fi
-  else
-    if [ -n "$_ita_rm" ] && "$_ita_rm" -f "$VALISE_ACTIVE_LINK" 2>/dev/null; then
-      printf 'valise: install failed; no release is active, as before the install\n' >&2
-    else
-      printf 'valise: install failed and the new active link could not be removed: %s\n' "$VALISE_ACTIVE_LINK" >&2
-    fi
-  fi
-  if [ "$_txn_had_previous" -eq 1 ]; then
-    (
-      trap '[ -z "${_prev_tmp:-}" ] || [ -z "$_ita_rm" ] || "$_ita_rm" -f "$_prev_tmp"' EXIT
-      write_previous_record "$_txn_old_previous"
-    ) >/dev/null 2>&1 ||
-      printf 'valise: cannot restore the previous-release record\n' >&2
-  elif [ -n "$_ita_rm" ]; then
-    "$_ita_rm" -f "$(previous_record_path)" 2>/dev/null || :
-  fi
-  # The subshells remove their own staging files: a die inside them exits
-  # the subshell, and this process's lock handler never saw those names.
-  if [ -f "$(commands_ledger_path)" ]; then
-    if [ -n "$_txn_old_target" ] && [ -d "$_txn_old_target" ]; then
-      (
-        trap 'for _t in "${_rc_tmp:-}" "${_rc_stub:-}" "${_rc_pub:-}"; do [ -z "$_t" ] || [ -z "$_ita_rm" ] || "$_ita_rm" -f "$_t"; done' EXIT
-        reconcile_commands "$_txn_old_target"
-      ) >/dev/null 2>&1 ||
-        printf 'valise: cannot move the command stubs back to the restored release\n' >&2
-    elif [ -z "$_txn_old_target" ]; then
-      # No release was active before, so no stub may point at one now.
-      (remove_owned_commands) >/dev/null 2>&1 ||
-        printf 'valise: cannot remove the command stubs this install published\n' >&2
-    fi
-  fi
-  if [ -n "$_txn_changed" ]; then
-    printf 'valise: already updated (they load whichever release is active):%s\n' "$_txn_changed" >&2
-  fi
-  # A staged but unpublished bridge (gui_env_bridge_stage wrote it) must not
-  # survive an aborted install: the staging file is mode 0600 and can hold
-  # values read from protected files.
-  if [ -n "${_gui_stage:-}" ] && [ -f "$_gui_stage" ]; then
-    [ -z "$_ita_rm" ] || "$_ita_rm" -f "$_gui_stage" 2>/dev/null || :
-  fi
-  _gui_stage= _gui_action=none _gui_mode= _gui_target=
-  unset _ita_ln _ita_rm
 }
 
 # The line a managed block carries when install appended it to a file whose
@@ -1111,7 +1170,7 @@ uninstall_strip_block() {
     die "unpaired valise managed block markers in $_usb_target (restore or remove the BEGIN and END lines, then retry)"
   _usb_awk=$(trusted_utility_path awk) || die "no trusted awk utility available"
   _usb_parent=$(path_parent "$_usb_target")
-  _un_tmp=$(trusted_mktemp_at "$_usb_parent" file "$_usb_parent/.valise-uninstall.XXXXXX") ||
+  trusted_mktemp_assign _un_tmp file "$_usb_parent/.valise-uninstall.XXXXXX" "$_usb_parent" ||
     die "cannot create uninstall staging file in $_usb_parent"
   # A block carrying the no-newline note was appended to a last line that
   # had no newline; when nothing follows the block, that newline goes too.
@@ -1287,7 +1346,7 @@ cmd_uninstall() {
 _dry_render_compare() {
   _drc_target=$1
   shift
-  _dry_tmp=$(trusted_mktemp file "${TMPDIR:-/tmp}/valise-dry-run.XXXXXX") || die "cannot create preview file"
+  trusted_mktemp_assign _dry_tmp file "${TMPDIR:-/tmp}/valise-dry-run.XXXXXX" || die "cannot create preview file"
   "$@" >"$_dry_tmp" || die "cannot render $_drc_target"
   _drc_cmp=$(trusted_utility_path cmp) || die "no trusted cmp utility available"
   if [ -f "$_drc_target" ] && "$_drc_cmp" -s "$_dry_tmp" "$_drc_target"; then
@@ -1482,7 +1541,8 @@ EOF
       _ip_path="$_ip_bin/$_ip_name"
       _ip_sha=
       [ ! -f "$_ip_ledger" ] ||
-        _ip_sha=$("$_ip_awk" -F '\t' -v n="$_ip_name" -v p="$_ip_path" '$1 == n && $2 == p { print $3; exit }' "$_ip_ledger")
+        _ip_sha=$(VALISE_LEDGER_NAME="$_ip_name" VALISE_LEDGER_PATH="$_ip_path" "$_ip_awk" -F '\t' \
+          '$1 == ENVIRON["VALISE_LEDGER_NAME"] && $2 == ENVIRON["VALISE_LEDGER_PATH"] { print $3; exit }' "$_ip_ledger")
       if [ -n "$_ip_sha" ] && commands_file_is "$_ip_path" "$_ip_sha"; then
         printf '  current: %s\n' "$_ip_path"
         _ip_any=1

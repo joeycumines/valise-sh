@@ -9,12 +9,19 @@
 
 set -eu
 
+# This suite promises not to touch the caller's PATH directories or startup
+# files. Ambient VALISE_* settings would break that promise through the direct
+# "$_valise" invocations below (e.g. make-manifest), so discard them before any
+# helper is defined or called. (_v and _v_caller already isolate via env -i.)
+unset VALISE_CALLER_PATH VALISE_BIN_DIR
+
 _total=0
 _pass=0
 _fail=0
 
 pass() { _total=$((_total + 1)); _pass=$((_pass + 1)); printf '  PASS: %s\n' "$1"; }
 fail() { _total=$((_total + 1)); _fail=$((_fail + 1)); printf '  FAIL: %s\n' "$1" >&2; }
+skip() { _total=$((_total + 1)); printf '  SKIP: %s\n' "$1"; }
 
 _repo=$(cd "$(dirname "$0")/.." && pwd -P)
 _valise="$_repo/bin/valise"
@@ -42,6 +49,20 @@ _v() {
   env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
     XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
     "$_valise" -C "$_v_project" "$@"
+}
+
+# _v_caller <caller-path> <project> <args...>: like _v, but with an explicit
+# caller PATH for diagnostics. The value goes through env -i, never through a
+# prefix assignment to a shell function, which persists after the call in some
+# POSIX shells (including macOS /bin/sh, bash 3.2) and leaks into later tests.
+_v_caller() {
+  _vc_path=$1
+  _vc_project=$2
+  shift 2
+  env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+    XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+    VALISE_CALLER_PATH="$_vc_path" \
+    "$_valise" -C "$_vc_project" "$@"
 }
 
 # _run <command...>: run with only the command directory and the system on PATH.
@@ -230,6 +251,394 @@ else
   fail "doctor reports published commands, the collision, and the PATH gap"
   cat "$_tmp/doctor.out" >&2
 fi
+
+# A caller that sanitizes PATH for the engine can pass the original for PATH
+# diagnostics. It must suppress a false gap warning without changing lookup.
+# The baseline apply is the positive control: without a caller PATH it MUST
+# warn, or the suppression assertion below proves nothing.
+if grep -F "warning: $_bin is not on PATH; add it to use the published commands" "$_tmp/apply.out" >/dev/null; then
+  pass "apply reports the PATH gap when no caller PATH is supplied"
+else
+  fail "apply reports the PATH gap when no caller PATH is supplied"
+  cat "$_tmp/apply.out" >&2
+fi
+# Assert on the diagnostic lines, not on doctor's exit status: doctor has other
+# checks whose status is irrelevant to PATH matching.
+_v_caller "$_bin:/usr/bin:/bin" "$_proj" doctor >"$_tmp/doctor-caller.out" 2>&1 || :
+if grep -F "ok: command directory is on PATH: $_bin" "$_tmp/doctor-caller.out" >/dev/null &&
+  ! grep -F "not on PATH: $_bin" "$_tmp/doctor-caller.out" >/dev/null; then
+  pass "VALISE_CALLER_PATH is used for doctor's PATH diagnostic"
+else
+  fail "VALISE_CALLER_PATH is used for doctor's PATH diagnostic"
+  cat "$_tmp/doctor-caller.out" >&2
+fi
+_vc_rc=0
+_v_caller "$_bin:/usr/bin:/bin" "$_proj" apply >"$_tmp/apply-caller.out" 2>&1 || _vc_rc=$?
+if [ "$_vc_rc" -eq 0 ] &&
+  ! grep -F "is not on PATH; add it to use the published commands" "$_tmp/apply-caller.out" >/dev/null; then
+  pass "VALISE_CALLER_PATH suppresses a false install PATH warning"
+else
+  fail "VALISE_CALLER_PATH suppresses a false install PATH warning"
+  cat "$_tmp/apply-caller.out" >&2
+fi
+
+# PATH entries are normalized before matching: a trailing slash and a doubled
+# separator must still name the command directory.
+_v_caller "$_bin/:/usr/bin:/bin" "$_proj" doctor >"$_tmp/doctor-slash.out" 2>&1 || :
+_v_caller "$_home//.local/bin:/usr/bin:/bin" "$_proj" doctor >"$_tmp/doctor-double.out" 2>&1 || :
+if grep -F "ok: command directory is on PATH: $_bin" "$_tmp/doctor-slash.out" >/dev/null &&
+  grep -F "ok: command directory is on PATH: $_bin" "$_tmp/doctor-double.out" >/dev/null; then
+  pass "PATH entries are normalized before matching"
+else
+  fail "PATH entries are normalized before matching"
+  cat "$_tmp/doctor-slash.out" "$_tmp/doctor-double.out" >&2
+fi
+
+# Relative caller PATH entries are interpreted from the directory where valise
+# was invoked, before -C changes to the project. Run from the home, whose
+# .local/bin is the command directory, and assert both the match and a negative
+# control against a same-named directory inside the project.
+(cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_CALLER_PATH=".local/bin" \
+  "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-relative.out" 2>&1 || :
+mkdir -p "$_proj/.local/bin"
+(cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR="$_proj/.local/bin" VALISE_CALLER_PATH=".local/bin" \
+  "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-relative-neg.out" 2>&1 || :
+if grep -F "ok: command directory is on PATH: $_bin" "$_tmp/doctor-relative.out" >/dev/null &&
+  grep -F "warn: command directory is not on PATH: $_proj/.local/bin" "$_tmp/doctor-relative-neg.out" >/dev/null; then
+  pass "relative caller PATH entries resolve from the invocation directory, not -C"
+else
+  fail "relative caller PATH entries resolved against the project directory"
+  cat "$_tmp/doctor-relative.out" "$_tmp/doctor-relative-neg.out" >&2
+fi
+
+# An empty caller PATH entry denotes the caller's directory. Test both a match
+# and a negative control so the assertion is not vacuous.
+(cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR="$_home" VALISE_CALLER_PATH=":" \
+  "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-empty-cwd.out" 2>&1 || :
+(cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR="$_proj" VALISE_CALLER_PATH=":" \
+  "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-empty-cwd-neg.out" 2>&1 || :
+if grep -F "ok: command directory is on PATH: $_home" "$_tmp/doctor-empty-cwd.out" >/dev/null &&
+  grep -F "warn: command directory is not on PATH: $_proj" "$_tmp/doctor-empty-cwd-neg.out" >/dev/null; then
+  pass "an empty caller PATH entry resolves from the invocation directory"
+else
+  fail "an empty caller PATH entry did not resolve from the invocation directory"
+  cat "$_tmp/doctor-empty-cwd.out" "$_tmp/doctor-empty-cwd-neg.out" >&2
+fi
+
+# A pathname can end in more than one LF. Preserve those bytes when recording
+# the invocation directory, and distinguish the newline-free sibling. A shell
+# case compares the whole diagnostic literally; grep would split the pattern
+# at each embedded newline and could pass on an unrelated fragment.
+_cwd_plain="$_tmp/caller"
+_cwd_nl=$(printf '%s\n\nx' "$_cwd_plain")
+_cwd_nl=${_cwd_nl%x}
+mkdir -p "$_cwd_plain/bin" "$_cwd_nl/bin"
+_cwd_positive=$(cd "$_cwd_nl" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  _valise_cwd=/inherited _valise_cwd_unavailable=1 \
+  VALISE_BIN_DIR="$_cwd_nl/bin" VALISE_CALLER_PATH=bin \
+  "$_valise" -C "$_proj" doctor 2>&1) || :
+_cwd_negative=$(cd "$_cwd_nl" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR="$_cwd_plain/bin" VALISE_CALLER_PATH=bin \
+  "$_valise" -C "$_proj" doctor 2>&1) || :
+if case "$_cwd_positive" in *"ok: command directory is on PATH: $_cwd_nl/bin"*) true ;; *) false ;; esac &&
+  case "$_cwd_negative" in *"warn: command directory is not on PATH: $_cwd_plain/bin"*) true ;; *) false ;; esac; then
+  pass "caller CWD capture preserves trailing newlines and ignores inherited private state"
+else
+  fail "caller CWD capture changed trailing newlines or trusted inherited private state"
+  printf '%s\n' "$_cwd_positive" "$_cwd_negative" >&2
+fi
+
+# Resolve symlinks before '..', as the filesystem does. Lexically deleting
+# link/.. would turn the negative control into a false match. Two different
+# symlinks naming the same directory must also compare equal.
+_phys_root="$_tmp/path-identity"
+mkdir -p "$_phys_root/lexical/bin" "$_phys_root/physical/deep" "$_phys_root/physical/bin"
+ln -s "$_phys_root/physical/deep" "$_phys_root/lexical/link"
+ln -s "$_phys_root/physical/bin" "$_phys_root/alias-one"
+ln -s "$_phys_root/physical/bin" "$_phys_root/alias-two"
+for _phys_case in negative positive aliases; do
+  case "$_phys_case" in
+  negative) _phys_path="$_phys_root/lexical/link/../bin"; _phys_target="$_phys_root/lexical/bin"; _phys_expect='warn: command directory is not on PATH' ;;
+  positive) _phys_path="$_phys_root/lexical/link/../bin"; _phys_target="$_phys_root/physical/bin"; _phys_expect='ok: command directory is on PATH' ;;
+  aliases) _phys_path="$_phys_root/alias-one"; _phys_target="$_phys_root/alias-two"; _phys_expect='ok: command directory is on PATH' ;;
+  esac
+  env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+    XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+    VALISE_BIN_DIR="$_phys_target" VALISE_CALLER_PATH="$_phys_path" \
+    "$_valise" -C "$_proj" doctor >"$_tmp/doctor-physical-$_phys_case.out" 2>&1 || :
+  if grep -Fx "  $_phys_expect: $_phys_target" "$_tmp/doctor-physical-$_phys_case.out" >/dev/null; then
+    pass "PATH diagnostics use directory identity across symlinks ($_phys_case)"
+  else
+    fail "PATH diagnostics misidentified a directory across symlinks ($_phys_case)"
+    cat "$_tmp/doctor-physical-$_phys_case.out" >&2
+  fi
+done
+
+# A deleted invocation directory must not abort informational commands, and
+# relative or empty caller PATH entries must not be rebound to -C's project.
+_deleted_cwd="$_tmp/deleted-cwd"
+mkdir -p "$_deleted_cwd"
+_deleted_rc=0
+(
+  cd "$_deleted_cwd"
+  rmdir "$_deleted_cwd"
+  env -i HOME="$_home" PATH=/usr/bin:/bin "$_valise" --help >"$_tmp/deleted-help.out" 2>"$_tmp/deleted-help.err" &&
+    env -i HOME="$_home" PATH=/usr/bin:/bin "$_valise" --version >"$_tmp/deleted-version.out" 2>"$_tmp/deleted-version.err" &&
+    env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+      XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+      VALISE_BIN_DIR="$_proj" VALISE_CALLER_PATH=.: \
+      "$_valise" -C "$_proj" doctor >"$_tmp/deleted-doctor.out" 2>&1
+) || _deleted_rc=$?
+if [ "$_deleted_rc" -eq 0 ] && [ ! -e "$_deleted_cwd" ] && [ -s "$_tmp/deleted-help.out" ] &&
+  grep -Fx '0.4.1' "$_tmp/deleted-version.out" >/dev/null &&
+  grep -Fx "  warn: command directory is not on PATH: $_proj" "$_tmp/deleted-doctor.out" >/dev/null; then
+  pass "a deleted invocation directory permits help/version/-C and skips relative PATH entries"
+else
+  fail "a deleted invocation directory aborted a command or rebound relative PATH entries to -C"
+  cat "$_tmp/deleted-help.err" "$_tmp/deleted-version.err" "$_tmp/deleted-doctor.out" >&2 2>/dev/null || :
+fi
+
+# The caller CWD is diagnostic context only: it must not leak into generated
+# content, env capture, or child processes. Run from inside $_home so the
+# recorded caller directory is a real value, check the exit status (a crash or
+# empty output must not pass vacuously), inspect a child process's environment,
+# and pre-export the diagnostic variables to prove their export attributes are
+# dropped. --keep-env is necessary: the default quarantine would hide a leak.
+# HOME and an explicit witness prove that the inline script actually ran.
+_cwd_leak_rc=0
+(cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_CALLER_CWD=/pre-exported-leak _valise_cwd=/pre-exported-leak _valise_cwd_unavailable=1 \
+  "$_valise" -C "$_proj" env export environment.d) >"$_tmp/env-export-cwd.out" 2>&1 || _cwd_leak_rc=$?
+_cwd_child_rc=0
+(cd "$_home" && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_CALLER_CWD=/pre-exported-leak _valise_cwd=/pre-exported-leak _valise_cwd_unavailable=1 \
+  "$_valise" -C "$_proj" run --keep-env -- 'env; printf "ENV_PROBE=ran\n"') >"$_tmp/env-child-cwd.out" 2>&1 || _cwd_child_rc=$?
+if [ "$_cwd_leak_rc" -eq 0 ] && [ "$_cwd_child_rc" -eq 0 ] &&
+   ! grep -F 'VALISE_CALLER_CWD' "$_tmp/env-export-cwd.out" >/dev/null &&
+   ! grep -F "$_home" "$_tmp/env-export-cwd.out" >/dev/null &&
+   grep -Fx "HOME=$_home" "$_tmp/env-child-cwd.out" >/dev/null &&
+   grep -Fx 'ENV_PROBE=ran' "$_tmp/env-child-cwd.out" >/dev/null &&
+   ! grep -E '^(VALISE_CALLER_CWD|_valise_cwd|_valise_cwd_unavailable)=' "$_tmp/env-child-cwd.out" >/dev/null &&
+   ! grep -F '/pre-exported-leak' "$_tmp/env-child-cwd.out" >/dev/null; then
+  pass "the recorded caller directory does not leak into generated content or child processes"
+else
+  fail "the recorded caller directory leaked into generated content or a child process"
+  cat "$_tmp/env-export-cwd.out" "$_tmp/env-child-cwd.out" >&2
+fi
+
+# The caller PATH takes precedence: a real PATH that contains the command dir
+# must not silence a gap reported by the caller PATH.
+env -i HOME="$_home" PATH="$_bin:/usr/bin:/bin" XDG_DATA_HOME="$_home/.local/share" \
+  XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_CALLER_PATH=/usr/bin:/bin \
+  "$_valise" -C "$_proj" doctor >"$_tmp/doctor-precedence.out" 2>&1 || :
+if grep -F "warn: command directory is not on PATH: $_bin" "$_tmp/doctor-precedence.out" >/dev/null; then
+  pass "VALISE_CALLER_PATH takes precedence over the real PATH"
+else
+  fail "VALISE_CALLER_PATH takes precedence over the real PATH"
+  cat "$_tmp/doctor-precedence.out" >&2
+fi
+
+# An explicitly empty caller PATH means the caller has no PATH entries, so the
+# gap is still reported even though the real PATH contains the command dir.
+env -i HOME="$_home" PATH="$_bin:/usr/bin:/bin" XDG_DATA_HOME="$_home/.local/share" \
+  XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_CALLER_PATH= \
+  "$_valise" -C "$_proj" doctor >"$_tmp/doctor-empty.out" 2>&1 || :
+if grep -F "warn: command directory is not on PATH: $_bin" "$_tmp/doctor-empty.out" >/dev/null; then
+  pass "an empty VALISE_CALLER_PATH still reports the PATH gap"
+else
+  fail "an empty VALISE_CALLER_PATH still reports the PATH gap"
+  cat "$_tmp/doctor-empty.out" >&2
+fi
+
+# A PATH entry with glob characters must be matched literally, not expanded.
+# The lookalike sibling makes an unmatched pattern expansion observable: with
+# globbing on, glob*[x] would expand to globax and break both assertions.
+_glob_bin="$_tmp/glob*[x]"
+_glob_lookalike="$_tmp/globax"
+mkdir -p "$_glob_bin" "$_glob_lookalike"
+env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+  XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR="$_glob_bin" VALISE_CALLER_PATH="$_glob_bin:/usr/bin:/bin" \
+  "$_valise" -C "$_proj" doctor >"$_tmp/doctor-glob.out" 2>&1 || :
+if grep -F "ok: command directory is on PATH: $_glob_bin" "$_tmp/doctor-glob.out" >/dev/null &&
+  ! grep -F "not on PATH: $_glob_bin" "$_tmp/doctor-glob.out" >/dev/null; then
+  pass "PATH matching treats glob characters literally"
+else
+  fail "PATH matching treats glob characters literally"
+  cat "$_tmp/doctor-glob.out" >&2
+fi
+env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+  XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR="$_glob_lookalike" VALISE_CALLER_PATH="$_glob_bin:/usr/bin:/bin" \
+  "$_valise" -C "$_proj" doctor >"$_tmp/doctor-glob-lookalike.out" 2>&1 || :
+if grep -F "warn: command directory is not on PATH: $_glob_lookalike" "$_tmp/doctor-glob-lookalike.out" >/dev/null; then
+  pass "a glob entry does not match a lookalike directory"
+else
+  fail "a glob entry does not match a lookalike directory"
+  cat "$_tmp/doctor-glob-lookalike.out" >&2
+fi
+
+# The caller PATH is diagnostic-only: a directory on it is never used for
+# command publication, command lookup, or generated profile content.
+_sentinel="$_tmp/caller-only"
+mkdir -p "$_sentinel"
+printf '#!/bin/sh\necho caller-only\n' >"$_sentinel/hello"
+chmod 0755 "$_sentinel/hello"
+cp "$_sentinel/hello" "$_tmp/sentinel.hello.orig"
+# A tool that would corrupt the release ledger if utility lookup used the
+# caller PATH. The sentinel is off the real PATH, so it must never be found.
+printf '#!/bin/sh\nprintf "CORRUPT\\n"\n' >"$_sentinel/awk"
+chmod 0755 "$_sentinel/awk"
+_as_rc=0
+_v_caller "$_sentinel:/usr/bin:/bin" "$_proj" apply >"$_tmp/apply-sentinel.out" 2>&1 || _as_rc=$?
+_ds_rc=0
+_v_caller "$_sentinel:/usr/bin:/bin" "$_proj" doctor >"$_tmp/doctor-sentinel.out" 2>&1 || _ds_rc=$?
+_ee_base_rc=0
+env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+  XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  "$_valise" -C "$_proj" env export environment.d >"$_tmp/env-export-base.out" 2>"$_tmp/env-export-base.err" || _ee_base_rc=$?
+_ee_caller_rc=0
+env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+  XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_CALLER_PATH="$_sentinel" \
+  "$_valise" -C "$_proj" env export environment.d >"$_tmp/env-export-caller.out" 2>"$_tmp/env-export-caller.err" || _ee_caller_rc=$?
+# `valise env` emits real KEY=value lines, so comparing it with and without the
+# caller PATH is a non-vacuous check that nothing diagnostic leaks into output.
+_env_base_rc=0
+env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+  XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  "$_valise" -C "$_proj" env >"$_tmp/env-base.out" 2>/dev/null || _env_base_rc=$?
+_env_caller_rc=0
+env -i HOME="$_home" PATH=/usr/bin:/bin XDG_DATA_HOME="$_home/.local/share" \
+  XDG_CONFIG_HOME="$_home/.config" XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_CALLER_PATH="$_sentinel" \
+  "$_valise" -C "$_proj" env >"$_tmp/env-caller.out" 2>/dev/null || _env_caller_rc=$?
+if [ "$_as_rc" -eq 0 ] && [ "$_ds_rc" -eq 0 ] &&
+   [ "$_ee_base_rc" -eq 0 ] && [ "$_ee_caller_rc" -eq 0 ] &&
+   [ "$_env_base_rc" -eq 0 ] && [ "$_env_caller_rc" -eq 0 ] &&
+   [ ! -e "$_sentinel/mode_probe" ] && [ ! -e "$_sentinel/greet" ] &&
+   cmp -s "$_sentinel/hello" "$_tmp/sentinel.hello.orig" &&
+   ! grep -F "CORRUPT" "$_tmp/apply-sentinel.out" "$_tmp/doctor-sentinel.out" >/dev/null &&
+   grep -F "ok: command published: $_bin/hello" "$_tmp/doctor-sentinel.out" >/dev/null &&
+   cmp -s "$_tmp/env-export-base.out" "$_tmp/env-export-caller.out" &&
+   grep -F "VALISE_VERSION=" "$_tmp/env-base.out" >/dev/null &&
+   cmp -s "$_tmp/env-base.out" "$_tmp/env-caller.out" &&
+   ! grep -F "$_sentinel" "$_tmp/env-caller.out" >/dev/null &&
+   [ "$(_run hello a b 2>&1)" = 'hello:a b:dep' ]; then
+  pass "VALISE_CALLER_PATH does not affect lookup or generated profile content"
+else
+  fail "VALISE_CALLER_PATH does not affect lookup or generated profile content"
+  cat "$_tmp/apply-sentinel.out" "$_tmp/doctor-sentinel.out" \
+    "$_tmp/env-export-base.out" "$_tmp/env-export-caller.out" \
+    "$_tmp/env-base.out" "$_tmp/env-caller.out" >&2
+fi
+# Positive control for the repeat-apply suppression: a repeat apply whose
+# caller PATH lacks the command dir MUST still warn, proving the suppression
+# above is caused by VALISE_CALLER_PATH and not by apply skipping the check.
+if grep -F "warning: $_bin is not on PATH; add it to use the published commands" "$_tmp/apply-sentinel.out" >/dev/null; then
+  pass "a repeat apply still warns when the caller PATH lacks the command dir"
+else
+  fail "a repeat apply still warns when the caller PATH lacks the command dir"
+  cat "$_tmp/apply-sentinel.out" >&2
+fi
+# apply consults VALISE_CALLER_PATH too: with the command dir on the caller
+# PATH the repeat apply exits 0 and stays silent about the gap.
+_ac_rc=0
+_v_caller "$_bin:/usr/bin:/bin" "$_proj" apply >"$_tmp/apply-caller2.out" 2>&1 || _ac_rc=$?
+if [ "$_ac_rc" -eq 0 ] &&
+  ! grep -F "is not on PATH; add it to use the published commands" "$_tmp/apply-caller2.out" >/dev/null; then
+  pass "apply uses VALISE_CALLER_PATH for its PATH-gap warning"
+else
+  fail "apply uses VALISE_CALLER_PATH for its PATH-gap warning"
+  cat "$_tmp/apply-caller2.out" >&2
+fi
+# Command substitution strips trailing newlines, so an entry that ends in one
+# must NOT match the newline-free command directory.
+_nl='
+'
+_v_caller "$_bin$_nl:/usr/bin:/bin" "$_proj" doctor >"$_tmp/doctor-nl.out" 2>&1 || :
+_v_caller "$_bin$_nl" "$_proj" doctor >"$_tmp/doctor-nl-only.out" 2>&1 || :
+if grep -F "warn: command directory is not on PATH: $_bin" "$_tmp/doctor-nl.out" >/dev/null &&
+   grep -F "warn: command directory is not on PATH: $_bin" "$_tmp/doctor-nl-only.out" >/dev/null; then
+  pass "a trailing newline in a caller PATH entry does not falsely match"
+else
+  fail "a trailing newline in a caller PATH entry does not falsely match"
+  cat "$_tmp/doctor-nl.out" "$_tmp/doctor-nl-only.out" >&2
+fi
+# Parameter-expansion splitting must not break on whitespace inside an entry.
+# Empty entries resolve to the caller's invocation directory when valise
+# records one (bin/valise always does), so "::$_bin", "$_bin:" and
+# "/usr/bin::$_bin" all match, while a value of only empty entries ("::") does
+# not match the command directory. Library-only callers that leave
+# VALISE_CALLER_CWD unset skip empty entries instead of resolving them against
+# the directory valise runs in after -C.
+_sp="$_tmp/dir with space"
+mkdir -p "$_sp"
+_v_caller "$_sp:/usr/bin:/bin" "$_proj" doctor >"$_tmp/doctor-space.out" 2>&1 || :
+_v_caller ":$_bin" "$_proj" doctor >"$_tmp/doctor-lead.out" 2>&1 || :
+_v_caller "$_bin:" "$_proj" doctor >"$_tmp/doctor-trail.out" 2>&1 || :
+_v_caller "/usr/bin::$_bin" "$_proj" doctor >"$_tmp/doctor-double2.out" 2>&1 || :
+_v_caller "::" "$_proj" doctor >"$_tmp/doctor-empty-only.out" 2>&1 || :
+if grep -F "warn: command directory is not on PATH: $_bin" "$_tmp/doctor-space.out" >/dev/null &&
+   grep -F "ok: command directory is on PATH: $_bin" "$_tmp/doctor-lead.out" >/dev/null &&
+   grep -F "ok: command directory is on PATH: $_bin" "$_tmp/doctor-trail.out" >/dev/null &&
+   grep -F "ok: command directory is on PATH: $_bin" "$_tmp/doctor-double2.out" >/dev/null &&
+   grep -F "warn: command directory is not on PATH: $_bin" "$_tmp/doctor-empty-only.out" >/dev/null; then
+  pass "whitespace entries are not split and empty entries resolve to the caller directory"
+else
+  fail "whitespace entries are not split and empty entries resolve to the caller directory"
+  cat "$_tmp/doctor-space.out" "$_tmp/doctor-lead.out" "$_tmp/doctor-trail.out" \
+    "$_tmp/doctor-double2.out" "$_tmp/doctor-empty-only.out" >&2
+fi
+
+# Invoked from the root directory, an empty or relative caller PATH entry must
+# join with exactly one separator: VALISE_CALLER_CWD=/ must not produce the
+# POSIX implementation-defined leading "//".
+# Doctor only reads these paths; this check does not require root or a writable /.
+_root_rc=0
+(cd / && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR=/ VALISE_CALLER_PATH=":" \
+  "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-root-empty.out" 2>&1 || _root_rc=$?
+_root_rel_rc=0
+(cd / && env -i HOME="$_home" PATH=/usr/bin:/bin \
+  XDG_DATA_HOME="$_home/.local/share" XDG_CONFIG_HOME="$_home/.config" \
+  XDG_STATE_HOME="$_home/.local/state" SHELL=/bin/sh \
+  VALISE_BIN_DIR=/usr/bin VALISE_CALLER_PATH="usr/bin" \
+  "$_valise" -C "$_proj" doctor) >"$_tmp/doctor-root-rel.out" 2>&1 || _root_rel_rc=$?
+if [ "$_root_rc" -eq 0 ] &&
+   grep -F "ok: command directory is on PATH: /" "$_tmp/doctor-root-empty.out" >/dev/null &&
+   [ "$_root_rel_rc" -eq 0 ] &&
+   grep -F "ok: command directory is on PATH: /usr/bin" "$_tmp/doctor-root-rel.out" >/dev/null; then
+  pass "an empty or relative caller PATH entry invoked from / joins without a leading //"
+else
+  fail "a caller PATH entry invoked from / did not resolve without a leading //"
+  cat "$_tmp/doctor-root-empty.out" "$_tmp/doctor-root-rel.out" >&2
+fi
+
 if [ "$(stat -c %a "$_home/.config/valise/active/bin/hello" 2>/dev/null ||
   stat -f %Lp "$_home/.config/valise/active/bin/hello")" = 555 ]; then
   pass "installed launchers are sealed 0555"

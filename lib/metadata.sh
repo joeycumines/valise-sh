@@ -68,9 +68,10 @@ sp_metadata_validate_identifier_list() {
     fi
     if [ "$_spm_label" = export ]; then
       # Exports become function definitions. A shell reserved word is a valid
-      # identifier but not a valid function name.
+      # identifier but not a valid function name. Quote the patterns: Bash 3.2
+      # otherwise parses esac here as the end of the case statement.
       case "$_spm_word" in
-      case|do|done|elif|else|esac|fi|for|if|in|then|until|while|time)
+      'case'|'do'|'done'|'elif'|'else'|'esac'|'fi'|'for'|'if'|'in'|'then'|'until'|'while'|'time')
         sp_metadata_error "invalid export (reserved word): $_spm_word"
         if [ "$_spm_list_ifs_was_set" -eq 1 ]; then
           IFS=$_spm_list_ifs

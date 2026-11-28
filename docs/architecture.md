@@ -44,17 +44,26 @@ contract, [module-abi.md](module-abi.md) the metadata,
    switches the active link, writes the startup-file blocks and the Fish
    hook, and publishes command stubs. When the project sets `gui_env` to
    `systemd` or `launchd`, install also writes the GUI-session bridge file
-   (see [projects.md](projects.md)). If any step fails, install restores
-   the previous state.
+   (see [projects.md](projects.md)). Install and release activation snapshot
+   the active pointer, previous record, command ownership, owned stubs, and
+   owned bridges before changing them. A failed activation restores those
+   snapshots; a failed restore preserves recovery files and reports their
+   location. Already-written startup blocks remain and follow the active
+   pointer. See [activation recovery](installation.md#activation-recovery).
 5. At startup, the POSIX block picks the plan for the running shell class
-   (`bash`, `zsh`, `ksh`, or `sh`) and sources it. The block is two-stage:
+   (`bash`, `zsh`, `ksh`, or `sh`) using isolated builtin probes and sources it.
+   Inherited version variables and lookalike commands cannot select another
+   shell's plan. The block is two-stage:
    stage 1 always sources `plans/<class>.sh` (the convergent env plan,
    guarded by a release-id-keyed load guard), and stage 2 sources
    `plans/<class>-interactive.sh` only when `$-` contains `i`. Stage 2 is
    written only into the shell's rc-stage file (`~/.bashrc`, `~/.zshrc`, or
    the `$ENV` shim) and into the one file a login bash reads
    (`~/.bash_profile`, else `~/.bash_login`, else `~/.profile`), placed last,
-   because a login bash never reads `~/.bashrc`. It is never written into
+   because a login bash never reads `~/.bashrc`. The `.profile` fallback
+   enables stage 2 only for native Bash: an actual `sh` invocation leaves
+   interactive setup to `$ENV`. A custom executable name such as `sh-as-sh`
+   is still native Bash and needs the login-file stage. It is never written into
    `~/.zshenv` or `~/.zprofile`: an interactive zsh already has `i` in `$-`
    while it reads `~/.zshenv`, and running interactive setup there would
    precede the user's own `.zshrc`. Stage 1 goes into every entry point that
@@ -79,7 +88,7 @@ run.
 ## The env re-evaluation contract
 
 The env plan is a convergent projection, not a once-per-session increment:
-after any startup file evaluates, the exported environment equals the
+when the guard triggers evaluation, the exported environment converges to the
 compiled intended environment regardless of what `/etc/profile`, macOS
 `path_helper`, or an outer shell did. Concretely:
 
@@ -90,9 +99,13 @@ compiled intended environment regardless of what `/etc/profile`, macOS
   entry point, the interactive plan on a release switch or an explicit
   `source ~/.bashrc`) and a raw assignment duplicates on each evaluation.
 - The load guard `_valise_profile_loaded` records the active release id, so
-  the same shell with the same release is a no-op, a switched release forces
-  a reload, and a fresh nested shell always re-runs the env plan — which is
-  what repairs `path_helper` damage in new tmux panes.
+  re-reading a startup file in the same shell with the same release is a no-op
+  unless `VALISE_RELOAD=1` is set, the one-shot login repair ticket is armed,
+  or `PATH` changed since the last successful env evaluation; arbitrary edits
+  to other exported scalars in the same shell do not trigger re-evaluation on
+  their own. A switched release forces a reload, and a fresh nested shell
+  always re-runs the env plan — which is what repairs `path_helper` damage in
+  new tmux panes.
 - Sourcing the env plan twice in one process yields byte-identical exported
   env (fixed point; no PATH growth).
 - Contexts with no user startup file at all (cron, systemd services,
@@ -103,9 +116,9 @@ compiled intended environment regardless of what `/etc/profile`, macOS
 - The bridge is a partial environment, deliberately. `PATH` and the four XDG
   root variables are **not** bridged: a GUI session's `PATH` is set by launchd
   or the systemd user manager, not by the profile, and copying the installer's
-  `PATH` into every application would be wrong. `valise env export` names every
-  excluded variable on stderr, so the omission is visible at the point of use
-  rather than silently implied by the docs.
+  `PATH` into every application would be wrong. `TMPDIR` is also excluded.
+  `valise env export` names changes to these excluded variables on stderr.
+  Unchanged baseline values and private capture bookkeeping are omitted.
 - A required dependency in the other phase is still enforced. A module marked
   `phase=interactive` may require an env module (the env plan loads first), and
   when that env module fails, the interactive dependent does not run: the env
@@ -164,6 +177,12 @@ Run `make check-fast` while developing and `make check` for the full suite.
 Extended runtime lanes run when their tools are installed; missing tools are
 visible skips locally and failures in CI. Set `VALISE_REQUIRE_TOOLING=1` to
 require them on a developer machine.
+
+The Linux CI job runs the full strict gate, including BusyBox ash. The native
+macOS job runs the native shell, startup, lifecycle, packaging, and documentation
+gates with system Bash 3.2 and BSD utilities. Its required parser list omits
+BusyBox, which the Linux job covers. Both successful jobs are release evidence;
+a local skip or an unexecuted workflow is not a passed compatibility check.
 
 The Makefile and the tests live in the source repository. The npm package
 ships the runtime, the docs, and the examples.

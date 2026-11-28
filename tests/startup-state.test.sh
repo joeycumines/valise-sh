@@ -19,6 +19,13 @@ pass() { _total=$((_total + 1)); _pass=$((_pass + 1)); printf '  PASS: %s\n' "$1
 fail() { _total=$((_total + 1)); _fail=$((_fail + 1)); printf '  FAIL: %s\n' "$1" >&2; }
 skip() { _total=$((_total + 1)); _skip=$((_skip + 1)); printf '  SKIP: %s\n' "$1"; }
 
+missing_runtime() {
+  case ",${VALISE_REQUIRED_PARSERS:-}," in
+  *",$1,"*) fail "$2 ($1 is required but unavailable)" ;;
+  *) skip "$2 ($1 is unavailable)" ;;
+  esac
+}
+
 # Every scenario below drives a real interpreter. Absence skips only the lanes
 # that need that shell: a bash-only host still runs the bash and doctor
 # scenarios, and each interpreter is resolved from PATH rather than guessed at
@@ -28,10 +35,10 @@ _bash_bin=$(command -v bash 2>/dev/null || :)
 if [ -n "$_zsh_bin" ] && [ ! -x "$_zsh_bin" ]; then _zsh_bin=; fi
 if [ -n "$_bash_bin" ] && [ ! -x "$_bash_bin" ]; then _bash_bin=; fi
 if [ -z "$_zsh_bin" ]; then
-  skip "zsh scenarios (env-only, rc-chain login, path_helper repair, dangling login file, legacy doctor): no zsh is installed"
+  missing_runtime zsh "zsh startup scenarios"
 fi
 if [ -z "$_bash_bin" ]; then
-  skip "bash scenarios (bash-only login file, dangling .bash_profile, bash stage 2): no bash is installed"
+  missing_runtime bash "bash startup scenarios"
 fi
 
 _repo=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -192,16 +199,132 @@ pass "build the startup fixture bundle"
 # read that file, which is how a broken block can pass a single lane.
 _block="$_tmp/block.sh"
 (cd "$_tmp/release-a" && _home_env "$_tmp" -- "$_valise" init posix >"$_block") 2>/dev/null
-for _syntax_shell in /bin/sh /bin/bash /bin/zsh /bin/ksh; do
-  [ -x "$_syntax_shell" ] || continue
-  if "$_syntax_shell" -n "$_block" 2>"$_tmp/syntax.err"; then
-    pass "the managed block parses under $_syntax_shell"
+for _syntax_name in sh dash bash zsh ksh busybox; do
+  _syntax_shell=$(command -v "$_syntax_name" 2>/dev/null || :)
+  _syntax_arg=
+  _syntax_label=$_syntax_name
+  if [ "$_syntax_name" = busybox ]; then _syntax_arg=ash; _syntax_label=busybox-ash; fi
+  if [ -z "$_syntax_shell" ] || [ ! -x "$_syntax_shell" ]; then
+    missing_runtime "$_syntax_label" "the managed block parses under $_syntax_label"
+    continue
+  fi
+  if "$_syntax_shell" ${_syntax_arg:+"$_syntax_arg"} -n "$_block" 2>"$_tmp/syntax.err"; then
+    pass "the managed block parses under $_syntax_label"
   else
-    fail "the managed block does not parse under $_syntax_shell"
+    fail "the managed block does not parse under $_syntax_label"
     cat "$_tmp/syntax.err" >&2
   fi
 done
-unset _syntax_shell
+unset _syntax_shell _syntax_name _syntax_arg _syntax_label
+
+# Each class gets a different env body. Identical POSIX bodies would let a
+# wrong-class detector pass. Probe names are supplied as executable files,
+# cached commands, functions AND aliases; none may run during detection, and
+# every caller setting must survive the generated block.
+_det_project="$_tmp/detection-project"
+mkdir -p "$_det_project/module.d" "$_det_project/modules" "$_tmp/detection-bin"
+: >"$_det_project/valise.conf"
+: >"$_det_project/bundles.tsv"
+for _det_class in sh bash zsh ksh; do
+  printf 'name=witness_%s\nside_effect=path-env\nshells=%s\nplatforms=any\nexports=\nload=modules/%s.sh\n' \
+    "$_det_class" "$_det_class" "$_det_class" >"$_det_project/module.d/witness_$_det_class.meta"
+  printf 'DETECTED_ENV=%s\nexport DETECTED_ENV\n' "$_det_class" >"$_det_project/modules/$_det_class.sh"
+  printf 'default\t%s\twitness_%s\n' "$_det_class" "$_det_class" >>"$_det_project/bundles.tsv"
+done
+"$_valise" -C "$_det_project" build "$_tmp/detection-release" >"$_tmp/detection-build.out" 2>&1 || {
+  fail "build shell-specific detection witnesses"
+  cat "$_tmp/detection-build.out" >&2
+  exit 1
+}
+for _det_command in shopt emulate whence builtin; do
+  printf '#!/bin/sh\nprintf "external\\n" >>"$HOME/probe-called"\nexit 0\n' >"$_tmp/detection-bin/$_det_command"
+  chmod 0755 "$_tmp/detection-bin/$_det_command"
+done
+cat >"$_tmp/detection-runner.sh" <<'EOF'
+case "$PROBE_MODE" in emulated*) emulate -L sh ;; esac
+if [ "$EXPECTED_CLASS" = bash ]; then shopt -s nocasematch; fi
+case "$PROBE_MODE" in *spoof)
+  hash shopt 2>/dev/null || :
+  hash emulate 2>/dev/null || :
+  hash whence 2>/dev/null || :
+  hash builtin 2>/dev/null || :
+  shopt() { printf 'function\n' >>"$HOME/probe-called"; printf 'shopt-function\n'; }
+  emulate() { printf 'function\n' >>"$HOME/probe-called"; printf 'emulate-function\n'; }
+  whence() { printf 'function\n' >>"$HOME/probe-called"; printf 'whence-function\n'; }
+  builtin() { printf 'function\n' >>"$HOME/probe-called"; printf 'builtin-function\n'; }
+  alias shopt='printf alias-shopt'
+  alias emulate='printf alias-emulate'
+  alias whence='printf alias-whence'
+  alias builtin='printf alias-builtin'
+  # Bash can make a function readonly. Its builtin-only probe must bypass it,
+  # because attempting to remove it is neither necessary nor permitted.
+  if [ "$EXPECTED_CLASS" = bash ]; then readonly -f builtin; fi
+  ;;
+esac
+_before_path=$PATH
+_before_options=$(set +o)
+_before_bash_options=${BASHOPTS-}
+_before_aliases=$(alias)
+. "$TEST_BLOCK"
+[ "${DETECTED_ENV-}" = "$EXPECTED_CLASS" ] || exit 81
+[ "$PATH" = "$_before_path" ] || exit 82
+[ "$(set +o)" = "$_before_options" ] || exit 83
+[ "${BASHOPTS-}" = "$_before_bash_options" ] || exit 84
+[ "$(alias)" = "$_before_aliases" ] || exit 85
+[ ! -e "$HOME/probe-called" ] || exit 86
+case "$PROBE_MODE" in *spoof)
+  [ "$("shopt")" = shopt-function ] || exit 87
+  [ "$("emulate")" = emulate-function ] || exit 88
+  [ "$("whence")" = whence-function ] || exit 89
+  [ "$("builtin")" = builtin-function ] || exit 90
+  ;;
+esac
+printf 'class=%s state=preserved probes=not-executed\n' "$DETECTED_ENV"
+EOF
+for _det_name in sh dash bash zsh ksh busybox; do
+  _det_bin=$(command -v "$_det_name" 2>/dev/null || :)
+  _det_arg=
+  _det_label=$_det_name
+  _det_class=$_det_name
+  case "$_det_name" in
+  dash) _det_class=sh ;;
+  busybox) _det_arg=ash; _det_label=busybox-ash; _det_class=sh ;;
+  esac
+  if [ -z "$_det_bin" ] || [ ! -x "$_det_bin" ]; then
+    missing_runtime "$_det_label" "runtime class and state under $_det_label"
+    continue
+  fi
+  if [ "$_det_name" = sh ]; then
+    # /bin/sh is Bash on macOS and dash on many Linux hosts. In this clean
+    # process no inherited marker can impersonate the implementation.
+    _det_class=$(env -i PATH=/usr/bin:/bin "$_det_bin" -c '
+      if [ -n "${BASH_VERSION-}" ]; then printf bash
+      elif [ -n "${ZSH_VERSION-}" ]; then printf zsh
+      elif [ -n "${KSH_VERSION-}" ]; then printf ksh
+      else printf sh; fi')
+  fi
+  for _det_mode in clean spoof emulated emulated-spoof; do
+    case "$_det_mode" in emulated*) [ "$_det_name" = zsh ] || continue ;; esac
+    _det_home="$_tmp/detection-$_det_name-$_det_mode"
+    mkdir -p "$_det_home/.config/valise"
+    ln -s "$_tmp/detection-release" "$_det_home/.config/valise/active"
+    _home_env "$_det_home" -- "$_valise" init posix >"$_det_home/block.sh"
+    _det_path=/usr/bin:/bin
+    case "$_det_mode" in *spoof) _det_path="$_tmp/detection-bin:$_det_path" ;; esac
+    if env -i HOME="$_det_home" PATH="$_det_path" BASH_VERSION=forged ZSH_VERSION=forged KSH_VERSION=forged \
+      EXPECTED_CLASS="$_det_class" PROBE_MODE="$_det_mode" TEST_BLOCK="$_det_home/block.sh" \
+      "$_det_bin" ${_det_arg:+"$_det_arg"} "$_tmp/detection-runner.sh" \
+      >"$_det_home/out" 2>"$_det_home/err" &&
+      grep -Fx "class=$_det_class state=preserved probes=not-executed" "$_det_home/out" >/dev/null &&
+      [ ! -s "$_det_home/err" ]; then
+      pass "$_det_label selects its real class and preserves caller state ($_det_mode probes, inherited versions)"
+    else
+      fail "$_det_label misidentified the shell, executed a spoofed probe, or changed caller state ($_det_mode)"
+      cat "$_det_home/out" "$_det_home/err" >&2
+    fi
+  done
+done
+unset _det_project _det_class _det_command _det_name _det_bin _det_arg _det_label _det_mode _det_home _det_path
 
 _home="$_tmp/home"
 
@@ -433,6 +556,124 @@ else
   cat "$_tmp/s13.err" >&2
 fi
 
+# A bash login can inherit ZSH_VERSION/KSH_VERSION from its parent and can be
+# launched with shell options such as `verbose` enabled. The bash-login stage
+# must still run: it gates on the running shell, and its POSIX-mode probe must
+# not mistake `verbose on` after `posix off` for POSIX mode.
+_reset_home "$_home"
+_install "$_tmp/release-a" "$_home" "$_bash_bin"
+_home_env "$_home" ZSH_VERSION=5.9 KSH_VERSION=1.0 SHELLOPTS=verbose \
+  -- "$_bash_bin" --login -i -c ':' >"$_tmp/s13b.out" 2>"$_tmp/s13b.err" || :
+if [ "$(_marker_count "$_home/intdep.log")" -eq 1 ]; then
+  pass "bash login with inherited shell versions and verbose option loads the interactive stage once"
+else
+  fail "bash login with inherited shell versions or verbose option skipped the interactive stage"
+  cat "$_tmp/s13b.err" >&2
+fi
+
+# The same lane with a bash-ONLY witness: the startup bundle's intdep module is
+# posix-class, so a wrong plan class (ksh/zsh) would still load it and pass
+# silently. A bash-only module proves plans/bash*.sh actually ran: with
+# KSH_VERSION inherited, the old version-variable precedence picked ksh, no
+# bash plan existed, and the interactive module never loaded.
+if [ -n "$_bash_bin" ]; then
+  _bproj="$_tmp/project-bashonly"
+  mkdir -p "$_bproj/module.d" "$_bproj/modules"
+  : >"$_bproj/valise.conf"
+  printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_bproj/variants.tsv"
+  printf 'name=bashwitness\nversion=\nside_effect=read-only\nrequires=\noptional=\nshells=bash\nplatforms=any\nexports=\nload=modules/bashwitness.sh\nphase=interactive\n' >"$_bproj/module.d/bashwitness.meta"
+  printf 'echo ran >>"$HOME/bashwitness.log"\n' >"$_bproj/modules/bashwitness.sh"
+  printf '# bundle\tshell\troots\ndefault\tbash\tbashwitness\n' >"$_bproj/bundles.tsv"
+  rm -rf "$_tmp/release-bashonly"
+  (cd "$_bproj" && "$_valise" build "$_tmp/release-bashonly") >/dev/null 2>&1
+  _reset_home "$_home"
+  _install "$_tmp/release-bashonly" "$_home" "$_bash_bin"
+  _home_env "$_home" KSH_VERSION=1.0 ZSH_VERSION=5.9 \
+    -- "$_bash_bin" --login -i -c ':' >"$_tmp/s13c.out" 2>"$_tmp/s13c.err" || :
+  if [ "$(_marker_count "$_home/bashwitness.log")" -eq 1 ]; then
+    pass "bash login with inherited KSH_VERSION/ZSH_VERSION loads the bash-only interactive plan"
+  else
+    fail "bash login with inherited KSH_VERSION/ZSH_VERSION did not load the bash plan"
+    cat "$_tmp/s13c.err" >&2
+  fi
+
+  # A real sh invocation reads the env stage in .profile, then stage 2 in
+  # ENV. Observe BOTH boundaries: zero total interactive loads would be a bug.
+  for _sh_kind in sh-symlink login-argv0; do
+    _reset_home "$_home"
+    _install "$_tmp/release-a" "$_home" "$_bash_bin"
+    mkdir -p "$_tmp/bash-invocations"
+    _sh_link="$_tmp/bash-invocations/sh"
+    ln -sf "$_bash_bin" "$_sh_link"
+    printf '\ncommand -v intdep_fn >/dev/null 2>&1 && echo profile-stage2=early || echo profile-stage2=absent\n' >>"$_home/.profile"
+    printf '\ncommand -v intdep_fn >/dev/null 2>&1 && echo env-stage2=present || echo env-stage2=missing\n' >>"$_home/.config/valise/env.sh"
+    _sh_rc=0
+    if [ "$_sh_kind" = login-argv0 ]; then
+      # A leading '-' on argv[0] is the login convention. It differs from
+      # an absolute executable path whose basename is -sh (the native lane).
+      _home_env "$_home" -- "$_bash_bin" -c 'exec -a -sh "$@"' -- "$_bash_bin" -i -c \
+        'command -v intdep_fn >/dev/null 2>&1 && echo body-stage2=present' \
+        >"$_tmp/s13d.out" 2>"$_tmp/s13d.err" || _sh_rc=$?
+    else
+      _home_env "$_home" -- "$_sh_link" -l -i -c \
+        'command -v intdep_fn >/dev/null 2>&1 && echo body-stage2=present' \
+        >"$_tmp/s13d.out" 2>"$_tmp/s13d.err" || _sh_rc=$?
+    fi
+    _sh_expected=$(printf 'profile-stage2=absent\nenv-stage2=present\nbody-stage2=present\n')
+    if [ "$_sh_rc" -eq 0 ] && [ "$(_marker_count "$_home/intdep.log")" -eq 1 ] &&
+      [ "$(cat "$_tmp/s13d.out")" = "$_sh_expected" ]; then
+      pass "bash $_sh_kind defers stage 2 from .profile to ENV and loads it exactly once"
+    else
+      fail "bash $_sh_kind loaded stage 2 at the wrong startup boundary"
+      cat "$_tmp/s13d.out" "$_tmp/s13d.err" >&2
+    fi
+  done
+
+  # These executable names all remain native Bash. In particular, suffix -sh
+  # is not special; nor is an absolute path whose basename happens to be -sh.
+  # nocasematch must not make uppercase SH compare equal to the special sh.
+  for _native_name in sh-as-sh SH -sh; do
+    _reset_home "$_home"
+    # BASHOPTS is not imported by Bash 3.2; set the option before the managed
+    # block and observe it afterwards so the case-insensitivity control is real.
+    printf 'shopt -s nocasematch\n' >"$_home/.profile"
+    _install "$_tmp/release-a" "$_home" "$_bash_bin"
+    ln -sf "$_bash_bin" "$_tmp/bash-invocations/$_native_name"
+    printf '\ncommand -v intdep_fn >/dev/null 2>&1 && echo profile-stage2=present || echo profile-stage2=missing\n' >>"$_home/.profile"
+    printf '\necho unexpected-env-startup\n' >>"$_home/.config/valise/env.sh"
+    _native_rc=0
+    _home_env "$_home" -- "$_tmp/bash-invocations/$_native_name" -l -i -c \
+      'command -v intdep_fn >/dev/null 2>&1 && echo body-stage2=present; shopt -q nocasematch && echo nocasematch=on' \
+      >"$_tmp/native-name.out" 2>"$_tmp/native-name.err" || _native_rc=$?
+    if [ "$_native_rc" -eq 0 ] && [ "$(_marker_count "$_home/intdep.log")" -eq 1 ] &&
+      [ "$(cat "$_tmp/native-name.out")" = "$(printf 'profile-stage2=present\nbody-stage2=present\nnocasematch=on\n')" ]; then
+      pass "native Bash named $_native_name loads stage 2 in .profile with nocasematch enabled"
+    else
+      fail "native Bash named $_native_name lost its interactive login stage"
+      cat "$_tmp/native-name.out" "$_tmp/native-name.err" >&2
+    fi
+  done
+  unset _sh_kind _sh_link _sh_rc _sh_expected _native_name _native_rc
+fi
+
+# A non-bash shell that inherits an exported BASH_VERSION must not be mistaken
+# for native bash. zsh is the available non-bash login shell here.
+if [ -n "$_zsh_bin" ]; then
+  _reset_home "$_home"
+  _install "$_tmp/release-a" "$_home" "$_zsh_bin"
+  _home_env "$_home" BASH_VERSION=5.3.20 \
+    -- "$_zsh_bin" -l -i -c ':' >"$_tmp/s13e.out" 2>"$_tmp/s13e.err" || :
+  # The class-specific fixture above proves selection; this real login proves
+  # the complete startup chain still loads the interactive body once.
+  if [ "$(_marker_count "$_home/intdep.log")" -eq 1 ]; then
+    pass "zsh login with inherited BASH_VERSION loads the interactive body exactly once"
+  else
+    fail "zsh login with inherited BASH_VERSION picked the wrong plan class or ran stage 2 in .profile"
+    cat "$_tmp/s13e.err" >&2
+    grep -n '_valise_plan=' "$_home/.zshenv" >&2 2>/dev/null || :
+  fi
+fi
+
 # Scenario 14: control. A non-login interactive bash reads .bashrc, and a
 # non-interactive `bash -c` stays silent and loads no interactive module.
 _reset_home "$_home"
@@ -543,6 +784,137 @@ else
   fail "doctor did not report a genuine single-stage block in every file"
   cat "$_tmp/s16b.out" >&2
 fi
+fi
+
+# Scenario 20: fresh zsh-default home (no .bash_profile, no .bash_login, no
+# .bashrc) must still load interactive modules in `bash --login -i` via the
+# .profile fallback, without creating .bashrc.
+if [ -n "$_bash_bin" ]; then
+  _reset_home "$_home"
+  _install "$_tmp/release-a" "$_home" "${_zsh_bin:-/bin/zsh}"
+  if [ ! -e "$_home/.bashrc" ] && grep -q '_valise_bash_native' "$_home/.profile" 2>/dev/null; then
+    pass "fresh zsh-default home: .profile carries bash-login stage without creating .bashrc"
+  else
+    fail "fresh zsh-default home: .profile missing bash-login stage or .bashrc was created"
+  fi
+  _home_env "$_home" -- "$_bash_bin" --login -i -c ':' >"$_tmp/s20.out" 2>"$_tmp/s20.err" || :
+  if [ "$(_marker_count "$_home/intdep.log")" -eq 1 ]; then
+    pass "fresh zsh-default home: bash --login -i loads interactive module exactly once"
+  else
+    fail "fresh zsh-default home: bash --login -i ran interactive module $(_marker_count "$_home/intdep.log") times"
+    cat "$_tmp/s20.err" >&2
+  fi
+fi
+
+# Scenario 21: startup must never adopt a foreign regular file or symlink at
+# $XDG_CONFIG_HOME/valise/env.sh into ENV.
+_reset_home "$_home"
+mkdir -p "$_home/.config/valise"
+printf 'printf "foreign-code-ran\\n"\n' >"$_home/.config/valise/env.sh"
+_install "$_tmp/release-a" "$_home" "${_bash_bin:-/bin/sh}"
+_s21_reg=$(_home_env "$_home" -- /bin/sh -c '
+  unset ENV
+  . "$HOME/.profile"
+  printf "ENV=%s\n" "${ENV-unset}"
+  /bin/sh -ic ":"
+' 2>&1 || :)
+if printf '%s\n' "$_s21_reg" | grep -Fx 'ENV=unset' >/dev/null &&
+  ! printf '%s\n' "$_s21_reg" | grep -F 'foreign-code-ran' >/dev/null; then
+  pass "startup refuses to adopt a foreign regular file as the ENV shim"
+else
+  fail "startup adopted or executed a foreign regular file as ENV shim"
+  printf '%s\n' "$_s21_reg" >&2
+fi
+
+_reset_home "$_home"
+mkdir -p "$_home/.config/valise"
+printf '# BEGIN valise managed block\nprintf "symlink-code-ran\\n"\n# END valise managed block\n' >"$_tmp/foreign-shim-target.sh"
+ln -s "$_tmp/foreign-shim-target.sh" "$_home/.config/valise/env.sh"
+_install "$_tmp/release-a" "$_home" "${_bash_bin:-/bin/sh}"
+_s21_sym=$(_home_env "$_home" -- /bin/sh -c '
+  unset ENV
+  . "$HOME/.profile"
+  printf "ENV=%s\n" "${ENV-unset}"
+  /bin/sh -ic ":"
+' 2>&1 || :)
+if printf '%s\n' "$_s21_sym" | grep -Fx 'ENV=unset' >/dev/null &&
+  ! printf '%s\n' "$_s21_sym" | grep -F 'symlink-code-ran' >/dev/null; then
+  pass "startup refuses to adopt a symlink as the ENV shim"
+else
+  fail "startup adopted or executed a symlink as ENV shim"
+  printf '%s\n' "$_s21_sym" >&2
+fi
+
+# Scenario 22: A -> partially failed B -> A and A -> env-only B -> A must
+# invalidate _valise_interactive_loaded so returning to A restores A's exports.
+if [ -n "$_bash_bin" ]; then
+  _pfa="$_tmp/proj-pf-a"
+  _pfb="$_tmp/proj-pf-b"
+  _pfc="$_tmp/proj-pf-c"
+  for _pfd in "$_pfa" "$_pfb" "$_pfc"; do
+    mkdir -p "$_pfd/module.d" "$_pfd/modules"
+    : >"$_pfd/valise.conf"
+    printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_pfd/variants.tsv"
+    printf 'name=envbase\nversion=\nside_effect=read-only\nrequires=\noptional=\nshells=posix\nplatforms=any\nexports=\nload=modules/envbase.sh\n' >"$_pfd/module.d/envbase.meta"
+    printf ': envbase\n' >"$_pfd/modules/envbase.sh"
+  done
+  # Release A: interactive intone (returns A) + inttwo (succeeds)
+  printf 'name=intone\nversion=\nside_effect=read-only\nphase=interactive\nrequires=\noptional=\nshells=posix\nplatforms=any\nexports=review_value\nload=modules/intone.sh\n' >"$_pfa/module.d/intone.meta"
+  printf 'review_value() { printf "A\\n"; }\n' >"$_pfa/modules/intone.sh"
+  printf 'name=inttwo\nversion=\nside_effect=read-only\nphase=interactive\nrequires=intone\noptional=\nshells=posix\nplatforms=any\nexports=\nload=modules/inttwo.sh\n' >"$_pfa/module.d/inttwo.meta"
+  printf ': ok\n' >"$_pfa/modules/inttwo.sh"
+  printf '# bundle\tshell\troots\ndefault\tbash\tenvbase inttwo\ndefault\tzsh\tenvbase inttwo\n' >"$_pfa/bundles.tsv"
+  # Release B: interactive intone (returns B) + inttwo (fails 42)
+  printf 'name=intone\nversion=\nside_effect=read-only\nphase=interactive\nrequires=\noptional=\nshells=posix\nplatforms=any\nexports=review_value\nload=modules/intone.sh\n' >"$_pfb/module.d/intone.meta"
+  printf 'review_value() { printf "B\\n"; }\n' >"$_pfb/modules/intone.sh"
+  printf 'name=inttwo\nversion=\nside_effect=read-only\nphase=interactive\nrequires=intone\noptional=\nshells=posix\nplatforms=any\nexports=\nload=modules/inttwo.sh\n' >"$_pfb/module.d/inttwo.meta"
+  printf 'return 42\n' >"$_pfb/modules/inttwo.sh"
+  printf '# bundle\tshell\troots\ndefault\tbash\tenvbase inttwo\ndefault\tzsh\tenvbase inttwo\n' >"$_pfb/bundles.tsv"
+  # Release C: intone moved to env phase (returns C)
+  printf 'name=intone\nversion=\nside_effect=read-only\nphase=env\nrequires=\noptional=\nshells=posix\nplatforms=any\nexports=review_value\nload=modules/intone.sh\n' >"$_pfc/module.d/intone.meta"
+  printf 'review_value() { printf "C\\n"; }\n' >"$_pfc/modules/intone.sh"
+  printf '# bundle\tshell\troots\ndefault\tbash\tenvbase intone\ndefault\tzsh\tenvbase intone\n' >"$_pfc/bundles.tsv"
+
+  rm -rf "$_tmp/rel-pf-a" "$_tmp/rel-pf-b" "$_tmp/rel-pf-c"
+  (cd "$_pfa" && "$_valise" build "$_tmp/rel-pf-a") >/dev/null 2>&1
+  (cd "$_pfb" && "$_valise" build "$_tmp/rel-pf-b") >/dev/null 2>&1
+  (cd "$_pfc" && "$_valise" build "$_tmp/rel-pf-c") >/dev/null 2>&1
+
+  _reset_home "$_home"
+  printf '# user\n' >"$_home/.bash_profile"
+  _install "$_tmp/rel-pf-b" "$_home" "$_bash_bin"
+  _pf_b_id=$(basename "$(readlink "$_home/.config/valise/active")")
+  _install "$_tmp/rel-pf-c" "$_home" "$_bash_bin"
+  _pf_c_id=$(basename "$(readlink "$_home/.config/valise/active")")
+  _install "$_tmp/rel-pf-a" "$_home" "$_bash_bin"
+  _pf_a_id=$(basename "$(readlink "$_home/.config/valise/active")")
+
+  _s22_out=$(_home_env "$_home" -- "$_bash_bin" -i -c '
+    . "$HOME/.bashrc"
+    printf "initial=%s\n" "$(review_value)"
+    "'"$_valise"'" release use "'"$_pf_b_id"'" >/dev/null 2>&1
+    . "$HOME/.bashrc" 2>/dev/null
+    printf "failed_B=%s\n" "$(review_value)"
+    "'"$_valise"'" release rollback >/dev/null 2>&1
+    . "$HOME/.bashrc"
+    printf "rollback_A=%s\n" "$(review_value)"
+    "'"$_valise"'" release use "'"$_pf_c_id"'" >/dev/null 2>&1
+    . "$HOME/.profile"
+    printf "envonly_C=%s\n" "$(review_value)"
+    "'"$_valise"'" release use "'"$_pf_a_id"'" >/dev/null 2>&1
+    . "$HOME/.bashrc"
+    printf "back_from_C=%s\n" "$(review_value)"
+  ' 2>/dev/null || :)
+  if printf '%s\n' "$_s22_out" | grep -Fx 'initial=A' >/dev/null &&
+    printf '%s\n' "$_s22_out" | grep -Fx 'failed_B=B' >/dev/null &&
+    printf '%s\n' "$_s22_out" | grep -Fx 'rollback_A=A' >/dev/null &&
+    printf '%s\n' "$_s22_out" | grep -Fx 'envonly_C=C' >/dev/null &&
+    printf '%s\n' "$_s22_out" | grep -Fx 'back_from_C=A' >/dev/null; then
+    pass "interactive success marker is invalidated across partially failed and env-only release switches"
+  else
+    fail "interactive reload retained stale definitions after failed or env-only switch"
+    printf '%s\n' "$_s22_out" >&2
+  fi
 fi
 
 printf '\n%s: %d total, %d pass, %d fail, %d skip\n' "startup-state" "$_total" "$_pass" "$_fail" "$_skip"

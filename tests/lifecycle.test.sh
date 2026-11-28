@@ -80,7 +80,11 @@ _mode() {
 }
 
 _active_id() {
-  _ai=$(cd "$_home/.config/valise/active" 2>/dev/null && pwd -P) || return 1
+  _ai=$(cd "$_home/.config/valise/active" 2>/dev/null && pwd -P) || {
+    # A dangling active link cannot be cd'd into; fall back to the literal
+    # symlink target's basename, which is the release name it names.
+    _ai=$(readlink "$_home/.config/valise/active" 2>/dev/null) || return 1
+  }
   printf '%s\n' "${_ai##*/}"
 }
 
@@ -196,45 +200,38 @@ done
 _bin_override=
 chmod 755 "$_tmp/ro-bin"
 
-# --- A failure after the switch restores the previous release ---
+# --- Invalid ownership records fail before activation ---
 
 _use_home txn
 _v "$_proj" apply --variant=lean >/dev/null 2>&1
 _lean_id=$(_active_id)
 _profile_before=$(cksum <"$_home/.profile")
-# The command ledger path is a directory, which preflight does not inspect,
-# so publishing hello fails after the active link has moved.
 _ledger="$_home/.local/state/valise/commands.tsv"
 rm -f "$_ledger"
 mkdir -p "$_ledger/x"
 _txn_rc=0
 _v "$_proj" apply >/dev/null 2>"$_tmp/txn.err" || _txn_rc=$?
-rm -rf "$_ledger"
-if [ "$_txn_rc" -eq 0 ]; then
-  fail "a failure after the switch leaves the previous release active"
-elif [ "$(_active_id)" = "$_lean_id" ] &&
-  grep -F "install failed; the active release is back to $_lean_id" "$_tmp/txn.err" >/dev/null &&
-  [ ! -e "$_home/.local/state/valise/previous" ] &&
+if [ "$_txn_rc" -ne 0 ] && [ "$(_active_id)" = "$_lean_id" ] &&
+  grep -F 'command ledger must be a readable regular file' "$_tmp/txn.err" >/dev/null &&
+  [ -d "$_ledger/x" ] && [ ! -e "$_home/.local/state/valise/previous" ] &&
   [ "$(cksum <"$_home/.profile")" = "$_profile_before" ]; then
-  pass "a failure after the switch leaves the previous release active"
+  pass "an invalid ledger stops install before active or startup state changes"
 else
-  fail "a failure after the switch leaves the previous release active"
+  fail "an invalid ledger did not stop install before active or startup state changes"
   cat "$_tmp/txn.err" >&2
 fi
+rm -rf "$_ledger"
 _use_home txn-first
 mkdir -p "$_home/.local/state/valise/commands.tsv/x"
 _txn_rc=0
 _v "$_proj" apply >/dev/null 2>"$_tmp/txn-first.err" || _txn_rc=$?
-rm -rf "$_home/.local/state/valise/commands.tsv"
-if [ "$_txn_rc" -eq 0 ]; then
-  fail "a failed first install leaves no active release"
-elif [ ! -e "$_home/.config/valise/active" ] && [ ! -L "$_home/.config/valise/active" ] &&
-  grep -F 'install failed; no release is active, as before the install' "$_tmp/txn-first.err" >/dev/null &&
-  grep -F 'already updated (they load whichever release is active):' "$_tmp/txn-first.err" |
-  grep -F " $_home/.profile" >/dev/null; then
-  pass "a failed first install leaves no active release and names the files it wrote"
+if [ "$_txn_rc" -ne 0 ] &&
+  [ ! -e "$_home/.config/valise/active" ] && [ ! -L "$_home/.config/valise/active" ] &&
+  [ ! -e "$_home/.profile" ] && [ -d "$_home/.local/state/valise/commands.tsv/x" ] &&
+  grep -F 'command ledger must be a readable regular file' "$_tmp/txn-first.err" >/dev/null; then
+  pass "an invalid ledger stops the first install before startup files are written"
 else
-  fail "a failed first install leaves no active release and names the files it wrote"
+  fail "an invalid ledger did not stop the first install before startup files are written"
   cat "$_tmp/txn-first.err" >&2
 fi
 
@@ -409,11 +406,13 @@ _shim="$_home/.config/valise/env.sh"
 # The shim is the RC-STAGE entry point for sh/ksh interactive subshells, so it
 # carries BOTH stages; ~/.profile is an env-stage file and must carry only
 # stage 1, because interactive setup belongs in the shell's rc file. The ENV
-# stanza names the shim in both.
+# stanza names the shim in both: the runtime stanza assigns the verified
+# _valise_shim variable, initialized to the single-quoted shim path.
 if [ -f "$_shim" ] &&
   grep -q '# BEGIN valise managed block' "$_shim" &&
   grep -q 'case \$- in \*i\*)' "$_shim" &&
-  grep -qF "ENV='$_shim'" "$_shim" &&
+  grep -qF "_valise_shim='$_shim'" "$_shim" &&
+  grep -q 'ENV=$_valise_shim; export ENV' "$_shim" &&
   [ "$(_mode "$_shim")" = 644 ]; then
   pass "apply deploys a two-stage ENV shim naming itself"
 else
@@ -426,7 +425,8 @@ fi
 # and the ENV stanza. A non-bash login file is covered by the e2e stage lanes.
 if grep -q '# BEGIN valise managed block' "$_home/.profile" &&
   grep -q 'case \$- in \*i\*)' "$_home/.profile" &&
-  grep -qF "ENV='$_shim'" "$_home/.profile"; then
+  grep -qF "_valise_shim='$_shim'" "$_home/.profile" &&
+  grep -q 'ENV=$_valise_shim; export ENV' "$_home/.profile"; then
   pass "~/.profile carries the interactive stage as the bash login file and wires ENV at the shim"
 else
   fail "~/.profile does not carry the interactive stage and the ENV stanza"
@@ -441,7 +441,8 @@ _use_home envshim-bash
 # The ENV stanza is unconditional: bash ignores ENV when invoked as bash and
 # READS it when invoked as `sh`, so gating on the plan class excluded a shell
 # that needs it.
-if grep -qF "ENV='$_home/.config/valise/env.sh'" "$_home/.profile" &&
+if grep -qF "_valise_shim='$_home/.config/valise/env.sh'" "$_home/.profile" &&
+  grep -q 'ENV=$_valise_shim; export ENV' "$_home/.profile" &&
   ! grep -q 'case "$_valise_plan" in' "$_home/.profile" &&
   [ -f "$_home/.config/valise/env.sh" ]; then
   pass "installing under bash wires ENV unconditionally for an sh login shell"
@@ -1062,6 +1063,267 @@ elif [ "$(id -u)" -ne 0 ]; then
   fi
 else
   skip "uninstall finishes and reports nonzero when the bridge removal fails (needs macOS chflags or non-root Linux)"
+fi
+
+# --- Hardening regressions: FIFO, activation rollback, relative active link,
+#     post-commit bridge cleanup, and failed outgoing backup ---
+if [ "$(uname -s)" = Darwin ]; then
+  _lc_mode=launchd
+  _lc_bridge_rel="Library/LaunchAgents/sh.valise.env.plist"
+else
+  _lc_mode=systemd
+  _lc_bridge_rel=".config/environment.d/10-valise.conf"
+fi
+
+# 1. A foreign FIFO at the bridge path must not block bridge_is_valise_owned.
+_use_home fifo-bridge
+_bridge_proj "$_tmp/bp-fifo" "$_lc_mode" fifo
+mkdir -p "$(dirname "$_home/$_lc_bridge_rel")"
+mkfifo "$_home/$_lc_bridge_rel"
+_v "$_tmp/bp-fifo" apply >"$_tmp/fifo.out" 2>&1 &
+_fifo_pid=$!
+_fifo_wait=0
+while kill -0 "$_fifo_pid" 2>/dev/null && [ "$_fifo_wait" -lt 10 ]; do
+  sleep 1
+  _fifo_wait=$((_fifo_wait + 1))
+done
+if kill -0 "$_fifo_pid" 2>/dev/null; then
+  kill -9 "$_fifo_pid" 2>/dev/null || :
+  wait "$_fifo_pid" 2>/dev/null || :
+  fail "bridge ownership check blocked on a foreign FIFO"
+else
+  wait "$_fifo_pid" || :
+  if [ -p "$_home/$_lc_bridge_rel" ] &&
+    grep -F 'not the valise GUI env bridge' "$_tmp/fifo.out" >/dev/null; then
+    pass "bridge ownership check refuses a foreign FIFO without blocking"
+  else
+    fail "bridge ownership check mishandled a foreign FIFO"
+    cat "$_tmp/fifo.out" >&2
+  fi
+fi
+
+# 2. Activation errors (unwritable config dir or symlinked previous record)
+#    must restore the outgoing bridge and leave no .valise-outgoing.* or
+#    valise-reconcile.* files behind.
+_use_home act-err-prev
+_bridge_proj "$_tmp/bp-ae-a" "$_lc_mode" aea
+printf 'export E2E_AE=a\n' >>"$_tmp/bp-ae-a/modules/hello.sh"
+_v "$_tmp/bp-ae-a" apply >"$_tmp/ae-a.out" 2>&1 || :
+_id_ae_a=$(_active_id)
+_bridge_proj "$_tmp/bp-ae-b" "$_lc_mode" aeb
+printf 'export E2E_AE=b\n' >>"$_tmp/bp-ae-b/modules/hello.sh"
+_v "$_tmp/bp-ae-b" apply --no-integration >"$_tmp/ae-b.out" 2>&1 || :
+_id_ae_b=$(_active_id)
+_v "$_proj" release use "$_id_ae_a" >/dev/null 2>&1 || :
+_ae_bridge="$_home/$_lc_bridge_rel"
+_ae_bridge_dir=$(dirname "$_ae_bridge")
+_ae_before=$(cksum <"$_ae_bridge" 2>/dev/null || :)
+printf 'fixture\n' >"$_tmp/prev-fixture"
+rm -f "$(_state_previous)"
+ln -s "$_tmp/prev-fixture" "$(_state_previous)"
+if _v "$_proj" release use "$_id_ae_b" >"$_tmp/ae-prev.out" 2>&1; then
+  ae_prev_rc=0
+else
+  ae_prev_rc=1
+fi
+if [ "$ae_prev_rc" -ne 0 ] && [ "$(_active_id)" = "$_id_ae_a" ] &&
+  [ -f "$_ae_bridge" ] && [ "$(cksum <"$_ae_bridge")" = "$_ae_before" ] &&
+  [ "$(cat "$_tmp/prev-fixture")" = "fixture" ] &&
+  [ "$(_find_count "$_ae_bridge_dir" '.valise-outgoing.*')" = 0 ]; then
+  pass "release use with a symlinked previous record preserves active release and outgoing bridge"
+else
+  fail "release use with a symlinked previous record damaged active release or stranded bridge"
+  cat "$_tmp/ae-prev.out" >&2
+  find "$_ae_bridge_dir" -name '.valise-outgoing.*' >&2 || :
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+  skip "release use with unwritable config dir preserves outgoing bridge (chmod 555 is ineffective for uid 0)"
+else
+  rm -f "$(_state_previous)"
+  chmod 555 "$_home/.config/valise"
+  if _v "$_proj" release use "$_id_ae_b" >"$_tmp/ae-ro.out" 2>&1; then
+    ae_ro_rc=0
+  else
+    ae_ro_rc=1
+  fi
+  chmod 755 "$_home/.config/valise"
+  if [ "$ae_ro_rc" -ne 0 ] && [ "$(_active_id)" = "$_id_ae_a" ] &&
+    [ -f "$_ae_bridge" ] && [ "$(cksum <"$_ae_bridge")" = "$_ae_before" ] &&
+    [ "$(_find_count "$_ae_bridge_dir" '.valise-outgoing.*')" = 0 ] &&
+    [ "$(_find_count "$_tmp" 'valise-reconcile.*')" = 0 ]; then
+    pass "release use with unwritable config dir restores outgoing bridge and cleans reconcile temp"
+  else
+    fail "release use with unwritable config dir stranded outgoing bridge or reconcile temp"
+    cat "$_tmp/ae-ro.out" >&2
+    find "$_ae_bridge_dir" -name '.valise-outgoing.*' >&2 || :
+    find "$_tmp" -name 'valise-reconcile.*' >&2 || :
+  fi
+fi
+
+# 3. An invalid ledger is rejected before a relative active link changes.
+#    Actual post-switch rollback is exercised by activation-transaction.test.sh.
+_use_home rel-active-rollback
+_bridge_proj "$_tmp/bp-rel-a" "$_lc_mode" rela
+printf 'export E2E_REL=a\n' >>"$_tmp/bp-rel-a/modules/hello.sh"
+_v "$_tmp/bp-rel-a" apply >"$_tmp/rel-a.out" 2>&1 || :
+_id_rel_a=$(_active_id)
+_bridge_proj "$_tmp/bp-rel-b" "$_lc_mode" relb
+printf 'export E2E_REL=b\n' >>"$_tmp/bp-rel-b/modules/hello.sh"
+_v "$_tmp/bp-rel-b" apply --no-integration >"$_tmp/rel-b.out" 2>&1 || :
+_id_rel_b=$(_active_id)
+_v "$_proj" release use "$_id_rel_a" >/dev/null 2>&1 || :
+_rel_target="../../.local/share/valise/releases/$_id_rel_a"
+ln -sfn "$_rel_target" "$_home/.config/valise/active"
+_rel_bridge="$_home/$_lc_bridge_rel"
+_rel_before=$(cksum <"$_rel_bridge" 2>/dev/null || :)
+_rel_stub="$_home/.local/bin/hello"
+_rel_ledger="$_home/.local/state/valise/commands.tsv"
+if _v "$_proj" release verify >/dev/null 2>&1 && [ -x "$_rel_stub" ]; then
+  # A linked ownership record must fail before switching, and its target
+  # must remain intact. The test inspects the link before repairing its fixture.
+  mv "$_rel_ledger" "$_tmp/saved-commands.tsv"
+  ln -s "$_tmp/saved-commands.tsv" "$_rel_ledger"
+  if _v "$_proj" release use "$_id_rel_b" >"$_tmp/rel-use.out" 2>&1; then
+    rel_rc=0
+  else
+    rel_rc=1
+  fi
+  _rel_link_kept=0
+  [ ! -L "$_rel_ledger" ] || _rel_link_kept=1
+  rm -f "$_rel_ledger"
+  mv "$_tmp/saved-commands.tsv" "$_rel_ledger"
+  if [ "$rel_rc" -ne 0 ] && [ "$_rel_link_kept" -eq 1 ] &&
+    [ "$(readlink "$_home/.config/valise/active")" = "$_rel_target" ] &&
+    [ -x "$_rel_stub" ] &&
+    [ -f "$_rel_bridge" ] && [ "$(cksum <"$_rel_bridge")" = "$_rel_before" ]; then
+    pass "a symlinked ledger is rejected without changing a relative active link, stubs or bridge"
+  else
+    fail "a symlinked ledger rejection changed stubs, the relative active link, or bridge"
+    cat "$_tmp/rel-use.out" >&2
+    ls -la "$_home/.config/valise/active" "$_rel_stub" "$_rel_bridge" >&2 2>/dev/null || :
+  fi
+else
+  fail "could not establish valid relative active symlink fixture"
+fi
+
+# 4. remove_gui_env_bridge phase-2 delete failure returns 2 (committed), so
+#    gui_env_bridge_publish succeeds without rolling back the active release.
+_p2_home="$_tmp/p2-home"
+mkdir -p "$_p2_home/.config/environment.d" "$_p2_home/Library/LaunchAgents" "$_p2_home/fakebin"
+printf '%s\n' '# written by valise (gui_env=systemd); do not edit' 'P2=1' \
+  >"$_p2_home/.config/environment.d/10-valise.conf"
+printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+  '<!-- written by valise (gui_env=launchd); do not edit -->' '<plist version="1.0"><dict/></plist>' \
+  >"$_p2_home/Library/LaunchAgents/sh.valise.env.plist"
+_p2_out=$(
+  HOME="$_p2_home" XDG_CONFIG_HOME="$_p2_home/.config" XDG_DATA_HOME="$_p2_home/.local/share" \
+  XDG_STATE_HOME="$_p2_home/.local/state" TMPDIR="$_tmp" \
+  /bin/sh -c '
+    set -eu
+    VALISE_CLI_DIR="'"$_repo"'/lib/cli"
+    for p in usage common store fish-hook integration commands lifecycle devtools project; do
+      . "$VALISE_CLI_DIR/$p.sh"
+    done
+    # Fail rm only on the launchd .valise-remove.* aside file (phase 2).
+    _real_rm=$(trusted_utility_path rm)
+    cat >"'"$_p2_home"'/fakebin/rm" <<EOF
+#!/bin/sh
+for a do
+  case "\$a" in
+  */LaunchAgents/.valise-remove.*) exit 1 ;;
+  esac
+done
+exec "$_real_rm" "\$@"
+EOF
+    chmod 755 "'"$_p2_home"'/fakebin/rm"
+    trusted_utility_path() {
+      if [ "$1" = rm ]; then printf "%s\n" "'"$_p2_home"'/fakebin/rm"; return 0; fi
+      command -v "$1"
+    }
+    _gui_action=remove
+    _p2_rc=0
+    gui_env_bridge_publish || _p2_rc=$?
+    printf "publish_rc=%s\n" "$_p2_rc"
+  ' 2>"$_tmp/p2.err" || :
+)
+if printf '%s\n' "$_p2_out" | grep -Fx 'publish_rc=0' >/dev/null &&
+  [ ! -e "$_p2_home/.config/environment.d/10-valise.conf" ] &&
+  [ ! -e "$_p2_home/Library/LaunchAgents/sh.valise.env.plist" ] &&
+  grep -F '.valise-remove.' "$_tmp/p2.err" >/dev/null; then
+  pass "remove_gui_env_bridge phase-2 delete failure does not roll back committed bridge removal"
+else
+  fail "remove_gui_env_bridge phase-2 delete failure triggered rollback or hid leftover aside"
+  printf '%s\n' "$_p2_out" >&2
+  cat "$_tmp/p2.err" >&2
+fi
+
+# 5. Failed activation snapshot allocation aborts before changing public state.
+_bk_out=$(
+  HOME="$_home" XDG_CONFIG_HOME="$_home/.config" XDG_DATA_HOME="$_home/.local/share" \
+  XDG_STATE_HOME="$_home/.local/state" TMPDIR="$_tmp" \
+  /bin/sh -c '
+    set -eu
+    VALISE_CLI_DIR="'"$_repo"'/lib/cli"
+    for p in usage common store fish-hook integration commands lifecycle devtools project; do
+      . "$VALISE_CLI_DIR/$p.sh"
+    done
+    # Fail only when allocating the private transaction snapshot.
+    trusted_mktemp_at() {
+      case "$3" in
+      */.transaction.*) return 1 ;;
+      esac
+      _tma_dir=$1; _tma_kind=$2; _tma_tpl=$3
+      _tma_mk=$(trusted_utility_path mktemp) || return 1
+      if [ "$_tma_kind" = dir ]; then "$_tma_mk" -d "$_tma_tpl"; else "$_tma_mk" "$_tma_tpl"; fi
+    }
+    release_activate "'"$_id_rel_b"'"
+  ' 2>"$_tmp/bk.err" && echo "ok" || echo "failed"
+)
+if [ "$_bk_out" = "failed" ] &&
+  [ "$(readlink "$_home/.config/valise/active")" = "$_rel_target" ] &&
+  [ -f "$_rel_bridge" ] && [ "$(cksum <"$_rel_bridge")" = "$_rel_before" ] &&
+  grep -F 'cannot create activation recovery directory' "$_tmp/bk.err" >/dev/null; then
+  pass "release_activate aborts before switching when recovery snapshot allocation fails"
+else
+  fail "release_activate continued after failed recovery snapshot allocation"
+  printf 'bk_out=%s\n' "$_bk_out" >&2
+  cat "$_tmp/bk.err" >&2
+fi
+
+# Operation-boundary signal, partial reconciliation, dangling/absent pointer,
+# unreadable outgoing manifest and failed restore coverage lives in the
+# deterministic activation-transaction.test.sh suite. A read-only ledger file
+# does not prevent atomic replacement, and observing a backup name does not
+# establish that rollback is running, so those are not fault-injection gates.
+
+# A symlinked previous-release record is rejected and preserved. The reader
+# must neither follow the link nor mutate it as a side effect of lookup.
+_use_home symlink-prev
+_bridge_proj "$_tmp/bp-sp-a" "$_lc_mode" spa
+_v "$_tmp/bp-sp-a" apply >"$_tmp/sp-a.out" 2>&1 || :
+_id_sp_a=$(_active_id)
+_bridge_proj "$_tmp/bp-sp-b" "$_lc_mode" spb
+_v "$_tmp/bp-sp-b" apply --no-integration >"$_tmp/sp-b.out" 2>&1 || :
+_id_sp_b=$(_active_id)
+_v "$_proj" release use "$_id_sp_a" >/dev/null 2>&1 || :
+printf 'fixture\n' >"$_tmp/sp-fixture"
+rm -f "$(_state_previous)"
+ln -s "$_tmp/sp-fixture" "$(_state_previous)"
+if _v "$_proj" release rollback >"$_tmp/sp-rb.out" 2>&1; then
+  sp_rc=0
+else
+  sp_rc=1
+fi
+if [ "$sp_rc" -ne 0 ] &&
+  [ -L "$(_state_previous)" ] && [ "$(cat "$_tmp/sp-fixture")" = fixture ] &&
+  [ "$(_active_id)" = "$_id_sp_a" ] &&
+  grep -F 'previous-release record must not be a symlink' "$_tmp/sp-rb.out" >/dev/null; then
+  pass "release rollback rejects and preserves a symlinked previous record"
+else
+  fail "release rollback did not handle a symlinked previous record"
+  cat "$_tmp/sp-rb.out" >&2
+  ls -la "$(_state_previous)" >&2 2>/dev/null || :
 fi
 
 printf '\n=== install lifecycle summary ===\n'

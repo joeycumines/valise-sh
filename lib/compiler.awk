@@ -18,6 +18,27 @@
 # declares. The closure is computed once from the full module set, so every
 # plan shares dependency order and validation.
 
+# Render an exact membership test for a space-delimited runtime ledger. The
+# arguments list and needle are already quoted shell expressions. Parameter
+# stripping avoids native zsh's different word-splitting rules; [ = ] avoids
+# Bash nocasematch changing identities. Keep this in the generator so plans
+# need no persistent helper function in the caller's shell.
+function emit_token_lookup(indent, list, needle, found) {
+    printf "%s%stoken_rest=%s\n", indent, prefix, list
+    printf "%s%s=0\n", indent, found
+    printf "%swhile [ -n \"$%stoken_rest\" ]; do\n", indent, prefix
+    printf "%s  case $%stoken_rest in\n", indent, prefix
+    printf "%s  *' '*)\n", indent
+    printf "%s    %stoken=${%stoken_rest%%%% *}\n", indent, prefix, prefix
+    printf "%s    %stoken_rest=${%stoken_rest#* }\n", indent, prefix, prefix
+    printf "%s    ;;\n", indent
+    printf "%s  *) %stoken=$%stoken_rest; %stoken_rest= ;;\n", indent, prefix, prefix, prefix
+    printf "%s  esac\n", indent
+    printf "%s  if [ \"$%stoken\" = %s ]; then %s=1; break; fi\n", indent, prefix, needle, found
+    printf "%sdone\n", indent
+    printf "%sunset %stoken_rest %stoken\n", indent, prefix, prefix
+}
+
 BEGIN {
     prefix = "_valise_plan_"
     prelude_dest = "runtime/capabilities.sh"
@@ -403,25 +424,20 @@ END {
     # this empty at each evaluation; the plan writes its own result back.
     printf "%sunavailable=\"${%scarried:-}\"\n", prefix, prefix
     printf "%smode=${VALISE_MODE:-strict}\n", prefix
-    printf "case \"$%smode\" in\n", prefix
-    printf "strict | permissive) ;;\n"
-    printf "*)\n"
+    printf "if [ \"$%smode\" != strict ] && [ \"$%smode\" != permissive ]; then\n", prefix, prefix
     printf "  printf '%%s\\n' \"valise: invalid mode: $%smode\" >&2\n", prefix
     printf "  unset %sstatus %sfailed %sfirst_status %sunavailable %smode\n", prefix, prefix, prefix, prefix, prefix
     printf "  return 1\n"
-    printf "  ;;\n"
-    printf "esac\n"
+    printf "fi\n"
 
     printf "%splatform=$(command uname -s 2>/dev/null || printf unknown)\n", prefix
-    printf "case \"$%splatform\" in\n", prefix
-    printf "Darwin) %splatform=darwin ;;\n", prefix
-    printf "Linux) %splatform=linux ;;\n", prefix
-    printf "FreeBSD) %splatform=freebsd ;;\n", prefix
-    printf "OpenBSD) %splatform=openbsd ;;\n", prefix
-    printf "NetBSD) %splatform=netbsd ;;\n", prefix
-    printf "*BSD) %splatform=bsd ;;\n", prefix
-    printf "*) %splatform=unknown ;;\n", prefix
-    printf "esac\n"
+    printf "if [ \"$%splatform\" = Darwin ]; then %splatform=darwin\n", prefix, prefix
+    printf "elif [ \"$%splatform\" = Linux ]; then %splatform=linux\n", prefix, prefix
+    printf "elif [ \"$%splatform\" = FreeBSD ]; then %splatform=freebsd\n", prefix, prefix
+    printf "elif [ \"$%splatform\" = OpenBSD ]; then %splatform=openbsd\n", prefix, prefix
+    printf "elif [ \"$%splatform\" = NetBSD ]; then %splatform=netbsd\n", prefix, prefix
+    printf "elif [ \"${%splatform#\"${%splatform%%???}\"}\" = BSD ]; then %splatform=bsd\n", prefix, prefix, prefix
+    printf "else %splatform=unknown; fi\n", prefix
 
     # The reload prelude clears ONLY exports valise itself installed in this
     # process. _valise_plan_owned is written below as each module loads, so an
@@ -443,35 +459,38 @@ END {
                 # make the next reload silently unset a caller's replacement
                 # instead of reporting the collision.
                 #
-                # The removal uses case PREFIX/SUFFIX matches over a space-padded
-                # copy, NOT `for tok in $ledger`: zsh does not word-split an
-                # unquoted expansion by default, so a for loop silently kept
-                # every token there. The pattern is held in a VARIABLE and
-                # quoted at the use site, because a quoted pattern written
-                # inline in ${var#...} does not match at all.
-                printf "  case \" ${_valise_plan_owned:-} \" in\n"
-                printf "  *\" %s:%s \"*)\n", mod_display[name], pe_values[pei]
-                printf "    unset -f %s 2>/dev/null || :\n", pe_values[pei]
-                printf "    _valise_owned_pat=' %s:%s '\n", mod_display[name], pe_values[pei]
-                printf "    _valise_owned_pad=\" ${_valise_plan_owned:-} \"\n"
-                printf "    case $_valise_owned_pad in\n"
-                printf "    \"$_valise_owned_pat\"*)\n"
-                printf "      _valise_plan_owned=${_valise_owned_pad#\"$_valise_owned_pat\"}\n"
+                # Walk the space-delimited ledger one token at a time using
+                # parameter stripping and `[ = ]` comparison:
+                #   * avoids unquoted `for tok in $ledger` (zsh does not
+                #     word-split by default)
+                #   * avoids `case` pattern matching over provider/export names
+                #     (Bash `shopt -s nocasematch` makes `case` case-insensitive,
+                #     conflating distinct providers like caseMod vs casemod).
+                printf "  _valise_owned_rem=${_valise_plan_owned:-}\n"
+                printf "  _valise_owned_new=\n"
+                printf "  _valise_owned_hit=0\n"
+                printf "  while [ -n \"$_valise_owned_rem\" ]; do\n"
+                printf "    case $_valise_owned_rem in\n"
+                printf "    *' '*)\n"
+                printf "      _valise_owned_tok=${_valise_owned_rem%%%% *}\n"
+                printf "      _valise_owned_rem=${_valise_owned_rem#* }\n"
                 printf "      ;;\n"
-                printf "    *\"$_valise_owned_pat\")\n"
-                printf "      _valise_plan_owned=${_valise_owned_pad%%\"$_valise_owned_pat\"}\n"
-                printf "      ;;\n"
-                printf "    *\"$_valise_owned_pat\"*)\n"
-                printf "      _valise_owned_left=${_valise_owned_pad%%%%\"$_valise_owned_pat\"*}\n"
-                printf "      _valise_owned_right=${_valise_owned_pad#*\"$_valise_owned_pat\"}\n"
-                printf "      _valise_plan_owned=\"$_valise_owned_left $_valise_owned_right\"\n"
+                printf "    *)\n"
+                printf "      _valise_owned_tok=$_valise_owned_rem\n"
+                printf "      _valise_owned_rem=\n"
                 printf "      ;;\n"
                 printf "    esac\n"
-                printf "    _valise_plan_owned=${_valise_plan_owned# }\n"
-                printf "    _valise_plan_owned=${_valise_plan_owned%% }\n"
-                printf "    unset _valise_owned_pat _valise_owned_pad _valise_owned_left _valise_owned_right\n"
-                printf "    ;;\n"
-                printf "  esac\n"
+                printf "    if [ \"$_valise_owned_tok\" = '%s:%s' ]; then\n", mod_display[name], pe_values[pei]
+                printf "      _valise_owned_hit=1\n"
+                printf "    elif [ -n \"$_valise_owned_tok\" ]; then\n"
+                printf "      _valise_owned_new=\"${_valise_owned_new:+$_valise_owned_new }$_valise_owned_tok\"\n"
+                printf "    fi\n"
+                printf "  done\n"
+                printf "  if [ \"$_valise_owned_hit\" -eq 1 ]; then\n"
+                printf "    unset -f %s 2>/dev/null || :\n", pe_values[pei]
+                printf "    _valise_plan_owned=$_valise_owned_new\n"
+                printf "  fi\n"
+                printf "  unset _valise_owned_rem _valise_owned_new _valise_owned_tok _valise_owned_hit\n"
             }
         }
         printf "fi\n"
@@ -487,18 +506,21 @@ END {
     }
 
     printf "if [ \"$%sstatus\" -eq 0 ]; then\n", prefix
-    printf "  for %smodule in", prefix
+    # Numeric dispatch labels cannot be conflated by nocasematch. Preserve the
+    # real identity in module for availability tracking and diagnostics.
+    printf "  for %smodule_index in", prefix
     for (i = 1; i <= plan_count; i++) {
-        printf " %s", plan_ordered[i]
+        printf " %d", i
     }
     printf "; do\n"
     printf "    %srequired=1\n", prefix
-    printf "    case \"$%smodule\" in\n", prefix
+    printf "    case \"$%smodule_index\" in\n", prefix
 
     for (oi = 1; oi <= plan_count; oi++) {
         name = plan_ordered[oi]
         display = mod_display[name]
-        printf "    %s)\n", name
+        printf "    %d)\n", oi
+        printf "      %smodule='%s'\n", prefix, name
         platform_any = 0
         n_platforms = split(mod_platforms[name], platform_values, " ")
         for (pi = 1; pi <= n_platforms; pi++) {
@@ -516,11 +538,18 @@ END {
         n_req = split(mod_req[name], reqs, " ")
         if (n_req > 0) {
             printf "      %sblocked_by=\n", prefix
-            printf "      case \" $%sunavailable \" in", prefix
+            printf "      for %sdependency in", prefix
             for (rqi = 1; rqi <= n_req; rqi++) {
-                printf " *\" %s \"*) %sblocked_by=%s ;;", reqs[rqi], prefix, mod_display[reqs[rqi]]
+                printf " %s", reqs[rqi]
             }
-            printf " esac\n"
+            printf "; do\n"
+            emit_token_lookup("        ", "\"$" prefix "unavailable\"", "\"$" prefix "dependency\"", prefix "dependency_missing")
+            printf "        if [ \"$%sdependency_missing\" -eq 1 ]; then\n", prefix
+            printf "          %sblocked_by=${%sdependency%%%%@*}\n", prefix, prefix
+            printf "          break\n"
+            printf "        fi\n"
+            printf "      done\n"
+            printf "      unset %sdependency %sdependency_missing\n", prefix, prefix
             printf "      if [ -n \"$%sblocked_by\" ]; then\n", prefix
             if (name in required) {
                 printf "        printf 'valise: module %%s skipped: required dependency unavailable: %%s\\n' '%s' \"$%sblocked_by\" >&2\n", display, prefix
@@ -556,7 +585,6 @@ END {
                 printf "%s  printf 'valise: module %%s failed with status %%s\\n' '%s' \"$%sstatus\" >&2\n", body_indent, display, prefix
                 printf "%sfi\n", body_indent
             } else {
-                printf "%s%swrapper_exports=\n", body_indent, prefix
                 printf "%s%scleanup_exports=\n", body_indent, prefix
                 printf "%sfor %sexport in", body_indent, prefix
                 for (ei = 1; ei <= export_count; ei++) {
@@ -564,17 +592,18 @@ END {
                 }
                 printf "; do\n"
                 printf "%s  %sconflict=0\n", body_indent, prefix
-                printf "%s  if command alias \"$%sexport\" >/dev/null 2>&1; then\n", body_indent, prefix
+                # Restrict lookup to shell definitions inside a subshell. An
+                # external command may be wrapped, but an existing function,
+                # alias or builtin is a conflict. /dev/null is not a directory;
+                # unlike an empty PATH, it cannot search the current directory.
+                # Bash needs the explicit alias query when expand_aliases is off;
+                # native zsh's command -v also reports aliases without executing
+                # them, although its command prefix bypasses builtins.
+                printf "%s  if (\n", body_indent
+                printf "%s    PATH=/dev/null\n", body_indent
+                printf "%s    \\command 'alias' \"$%sexport\" || \\command -v \"$%sexport\"\n", body_indent, prefix, prefix
+                printf "%s  ) >/dev/null 2>&1; then\n", body_indent
                 printf "%s    %sconflict=1\n", body_indent, prefix
-                printf "%s  fi\n", body_indent
-                printf "%s  if %slookup=$(command -v \"$%sexport\" 2>/dev/null); then\n", body_indent, prefix, prefix
-                printf "%s    case \"$%slookup\" in\n", body_indent, prefix
-                printf "%s    alias\\ *) %sconflict=1 ;;\n", body_indent, prefix
-                printf "%s    */*) %swrapper_exports=\"${%swrapper_exports:+$%swrapper_exports }$%sexport\" ;;\n", body_indent, prefix, prefix, prefix, prefix, prefix
-                printf "%s    *) %sconflict=1 ;;\n", body_indent, prefix
-                printf "%s    esac\n", body_indent
-                printf "%s  else\n", body_indent
-                printf "%s    %slookup=\n", body_indent, prefix
                 printf "%s  fi\n", body_indent
                 printf "%s  if [ \"$%sconflict\" -ne 0 ]; then\n", body_indent, prefix
                 printf "%s    printf 'valise: %%s: declared export already exists before load: %%s\\n' '%s' \"$%sexport\" >&2\n", body_indent, display, prefix
@@ -593,26 +622,34 @@ END {
                     printf " %s", module_exports[ei]
                 }
                 printf "; do\n"
-                printf "%s    if ! %slookup=$(command -v \"$%sexport\" 2>/dev/null); then\n", body_indent, prefix, prefix
+                # With external lookup disabled, a function is reported as its
+                # exact name. Alias descriptions are not function definitions.
+                # This also rejects executables added to PATH by the module,
+                # without keeping a second ledger of pre-existing executables.
+                printf "%s    if ! %slookup=$(PATH=/dev/null \\command -v \"$%sexport\" 2>/dev/null); then\n", body_indent, prefix, prefix
                 printf "%s      printf 'valise: %%s: declared export missing: %%s\\n' '%s' \"$%sexport\" >&2\n", body_indent, display, prefix
                 printf "%s      %sstatus=1\n", body_indent, prefix
-                printf "%s    else\n", body_indent
-                printf "%s      case \" $%swrapper_exports \" in\n", body_indent, prefix
-                printf "%s      *\" $%sexport \"*)\n", body_indent, prefix
-                printf "%s        case \"$%slookup\" in\n", body_indent, prefix
-                printf "%s        */*)\n", body_indent
-                printf "%s          printf 'valise: %%s: declared export was not provided by module: %%s\\n' '%s' \"$%sexport\" >&2\n", body_indent, display, prefix
-                printf "%s          %sstatus=1\n", body_indent, prefix
-                printf "%s          ;;\n", body_indent
-                printf "%s        esac\n", body_indent
-                printf "%s        ;;\n", body_indent
-                printf "%s      esac\n", body_indent
+                printf "%s    elif [ \"$%slookup\" != \"$%sexport\" ]; then\n", body_indent, prefix, prefix
+                printf "%s      printf 'valise: %%s: declared export was not provided by module: %%s\\n' '%s' \"$%sexport\" >&2\n", body_indent, display, prefix
+                printf "%s      %sstatus=1\n", body_indent, prefix
                 printf "%s    fi\n", body_indent
                 printf "%s  done\n", body_indent
                 printf "%sfi\n", body_indent
                 printf "%sif [ \"$%sstatus\" -ne 0 ]; then\n", body_indent, prefix
                 printf "%s  printf 'valise: module %%s failed with status %%s\\n' '%s' \"$%sstatus\" >&2\n", body_indent, display, prefix
-                printf "%s  for %sexport in $%scleanup_exports; do\n", body_indent, prefix, prefix
+                # Split explicitly so every created function is cleaned up in
+                # native zsh too, while pre-existing caller definitions survive.
+                printf "%s  while [ -n \"$%scleanup_exports\" ]; do\n", body_indent, prefix
+                printf "%s    case $%scleanup_exports in\n", body_indent, prefix
+                printf "%s    *' '*)\n", body_indent
+                printf "%s      %sexport=${%scleanup_exports%%%% *}\n", body_indent, prefix, prefix
+                printf "%s      %scleanup_exports=${%scleanup_exports#* }\n", body_indent, prefix, prefix
+                printf "%s      ;;\n", body_indent
+                printf "%s    *)\n", body_indent
+                printf "%s      %sexport=$%scleanup_exports\n", body_indent, prefix, prefix
+                printf "%s      %scleanup_exports=\n", body_indent, prefix
+                printf "%s      ;;\n", body_indent
+                printf "%s    esac\n", body_indent
                 printf "%s    unset -f \"$%sexport\" 2>/dev/null || :\n", body_indent, prefix
                 printf "%s  done\n", body_indent
                 printf "%sfi\n", body_indent
@@ -627,10 +664,11 @@ END {
                     printf " %s", module_exports[ei]
                 }
                 printf "; do\n"
-                printf "%s    case \" ${_valise_plan_owned:-} \" in\n", body_indent
-                printf "%s    *\" %s:$%sexport \"*) ;;\n", body_indent, mod_display[name], prefix
-                printf "%s    *) _valise_plan_owned=\"${_valise_plan_owned:+$_valise_plan_owned }%s:$%sexport\" ;;\n", body_indent, mod_display[name], prefix
-                printf "%s    esac\n", body_indent
+                emit_token_lookup(body_indent "    ", "\"${_valise_plan_owned:-}\"", "\"" mod_display[name] ":$" prefix "export\"", "_valise_owned_hit")
+                printf "%s    if [ \"$_valise_owned_hit\" -eq 0 ]; then\n", body_indent
+                printf "%s      _valise_plan_owned=\"${_valise_plan_owned:+$_valise_plan_owned }%s:$%sexport\"\n", body_indent, mod_display[name], prefix
+                printf "%s    fi\n", body_indent
+                printf "%s    unset _valise_owned_hit\n", body_indent
                 printf "%s  done\n", body_indent
                 printf "%s  unset %sexport\n", body_indent, prefix
                 printf "%sfi\n", body_indent
@@ -670,7 +708,7 @@ END {
     printf "  %sreturn=0\n", prefix
     printf "fi\n"
     printf "unset %sstatus %sfailed %sfirst_status %sunavailable %smode %splatform\n", prefix, prefix, prefix, prefix, prefix, prefix
-    printf "unset %smodule %srequired %sblocked_by %splatform_match %sexport %slookup %sconflict %swrapper_exports %scleanup_exports\n", prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix
+    printf "unset %smodule %smodule_index %srequired %sblocked_by %splatform_match %sexport %slookup %sconflict %scleanup_exports\n", prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix, prefix
     # _valise_plan_carried deliberately survives this plan: the interactive
     # plan sourced next in the same evaluation reads it. The managed block
     # resets it at the start of each evaluation.

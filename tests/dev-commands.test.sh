@@ -599,6 +599,111 @@ if [ "$(_v "$_proj" run --shell=bash --variant=no-secrets -- 'command -v secret_
 else
   fail "run --variant applies the variant's exclusions"
 fi
+# run owns no stdin: both quarantine modes must forward arbitrary bytes and
+# preserve argument boundaries, including an empty argument. File comparison
+# catches embedded NULs and trailing newlines that command substitution loses.
+printf 'first\000second\r\nback\\slash\n\n' >"$_tmp/run-stdin.in"
+printf 'arg=<a b>\narg=<x*y>\narg=<>\n' >"$_tmp/run-args.want"
+# A separate home keeps --keep-env from reading the release installed by the
+# env-export cases above (zsh reads .zshenv even for a noninteractive script).
+_stdin_home="$_tmp/stdin-home"
+mkdir -p "$_stdin_home"
+_stdin_run() ( _home=$_stdin_home; _v "$_proj" "$@"; )
+for _stdin_shell in sh bash zsh ksh fish; do
+  if ! command -v "$_stdin_shell" >/dev/null 2>&1; then
+    skip "run forwards stdin and arguments in $_stdin_shell (interpreter absent)"
+    continue
+  fi
+  _stdin_module=main
+  _stdin_script='printf "arg=<%s>\n" "$@" >&2; cat'
+  if [ "$_stdin_shell" = fish ]; then
+    _stdin_module=fish_bits
+    _stdin_script='printf "arg=<%s>\n" $argv >&2; cat'
+  fi
+  for _stdin_mode in quarantine keep-env; do
+    set --
+    [ "$_stdin_mode" != keep-env ] || set -- --keep-env
+    if _stdin_run run --shell="$_stdin_shell" --module="$_stdin_module" "$@" -- \
+      "$_stdin_script" 'a b' 'x*y' '' <"$_tmp/run-stdin.in" \
+      >"$_tmp/run-stdin.out" 2>"$_tmp/run-args.raw" &&
+      cmp -s "$_tmp/run-stdin.in" "$_tmp/run-stdin.out" &&
+      # Fish 3.x writes a tput terminfo diagnostic to stderr when TERM=dumb
+      # lacks the 'ce' capability; that line is the interpreter's init noise,
+      # not the script's output, so strip lines starting with 'tput: ' before
+      # comparing the argument echo. sed exits 0 even when every line is
+      # deleted; grep -v would exit 1 and wrongly fall back to the raw file.
+      sed '/^tput: /d' "$_tmp/run-args.raw" >"$_tmp/run-args.out" &&
+      cmp -s "$_tmp/run-args.want" "$_tmp/run-args.out"; then
+      pass "run forwards stdin byte for byte and preserves arguments ($_stdin_shell, $_stdin_mode)"
+    else
+      fail "run changed stdin or arguments ($_stdin_shell, $_stdin_mode)"
+      cat "$_tmp/run-args.raw" >&2
+    fi
+  done
+done
+
+# A native cd wrapper is valid only when Fish reports its real distributed
+# source. A caller config cannot make its own cd.fish trusted by rewriting
+# Fish's mutable data/function search variables. Quarantined run/test must
+# still work with that same poisoned caller HOME.
+if [ "$_have_fish" -eq 1 ]; then
+  mkdir -p "$_stdin_home/.config/fish" "$_stdin_home/fake/share/fish/functions"
+  printf '%s\n' 'function cd; printf "caller-cd-ran\\n"; return 1; end' \
+    >"$_stdin_home/fake/share/fish/functions/cd.fish"
+  cat >"$_stdin_home/.config/fish/config.fish" <<'EOF'
+set -g __fish_data_dir "$HOME/fake/share/fish"
+set -g fish_function_path "$__fish_data_dir/functions" $fish_function_path
+builtin source "$__fish_data_dir/functions/cd.fish"
+# Fish 4.x embeds cd and makes __fish_data_dir read-only, so the forged data
+# prefix above cannot install a caller cd there; define it directly so the
+# loader gate is exercised on every Fish major version.
+function cd; printf "caller-cd-ran\n"; return 1; end
+EOF
+  _fish_caller_rc=0
+  _stdin_run run --shell=fish --module=fish_bits --keep-env -- 'printf "poison-accepted\\n"' \
+    >"$_tmp/fish-caller.out" 2>"$_tmp/fish-caller.err" || _fish_caller_rc=$?
+  if [ "$_fish_caller_rc" -ne 0 ] && [ ! -s "$_tmp/fish-caller.out" ] &&
+    grep -F 'caller shadowed critical Fish builtin: cd' "$_tmp/fish-caller.err" >/dev/null; then
+    pass "run --keep-env rejects a caller cd function despite a forged Fish data prefix"
+  else
+    fail "run --keep-env accepted or executed a caller cd function"
+    cat "$_tmp/fish-caller.out" "$_tmp/fish-caller.err" >&2
+  fi
+  _fish_isolated_run_out=$(_stdin_run run --shell=fish --module=fish_bits -- 'fish_bits_ok' 2>"$_tmp/fish-isolated-run.err")
+  # Fish 3.x writes a tput terminfo diagnostic to stderr when TERM=dumb lacks
+  # the 'ce' capability; that line is interpreter init noise, not the run's
+  # output, so a poisoned-config failure must not be masked by it. sed exits 0
+  # even when every line is deleted; grep -v would exit 1 and wrongly fall
+  # back to the raw file.
+  sed '/^tput: /d' "$_tmp/fish-isolated-run.err" >"$_tmp/fish-isolated-run.clean"
+  _fish_isolated_test_rc=0
+  _stdin_run test --shell=fish fish_bits >"$_tmp/fish-isolated-test.out" 2>"$_tmp/fish-isolated-test.err" || _fish_isolated_test_rc=$?
+  sed '/^tput: /d' "$_tmp/fish-isolated-test.err" >"$_tmp/fish-isolated-test.clean"
+  if [ "$_fish_isolated_run_out" = fish-ok ] &&
+    [ ! -s "$_tmp/fish-isolated-run.clean" ] &&
+    [ "$_fish_isolated_test_rc" -eq 0 ] &&
+    grep -Fx 'ok fish_bits [fish] tests/fish_bits.fish' "$_tmp/fish-isolated-test.out" >/dev/null &&
+    [ ! -s "$_tmp/fish-isolated-test.clean" ]; then
+    pass "quarantined Fish run and test ignore a poisoned caller config"
+  else
+    fail "quarantined Fish run or test used a poisoned caller config"
+    cat "$_tmp/fish-isolated-run.err" "$_tmp/fish-isolated-test.out" "$_tmp/fish-isolated-test.err" >&2
+  fi
+fi
+
+# Tests, unlike run, deliberately read EOF: their stdin is otherwise the
+# metadata-row loop. Check the test call site still applies that restriction.
+cp "$_proj/tests/main.sh" "$_tmp/main-test-stdin.orig"
+printf '%s\n' 'if IFS= read -r _stdin; then echo "test read caller stdin"; exit 1; fi' >>"$_proj/tests/main.sh"
+if _v "$_proj" test --shell=sh main <"$_tmp/run-stdin.in" >"$_tmp/test-stdin.out" 2>&1 &&
+  grep -F 'ok main [sh]' "$_tmp/test-stdin.out" >/dev/null; then
+  pass "test runners receive EOF while run retains caller stdin"
+else
+  fail "test runners consumed caller stdin or the metadata row stream"
+  cat "$_tmp/test-stdin.out" >&2
+fi
+mv "$_tmp/main-test-stdin.orig" "$_proj/tests/main.sh"
+
 # --- interactive phase: test, run, and published commands ---
 # A phase=interactive module must still be exercised by the developer tools:
 # the plans carry no $- gate (the managed block does), so the harness sources
@@ -1403,7 +1508,7 @@ _refuse_case() {
   _rc_expect=$2
   if _cap_apply && ! _cap_export environment.d &&
     grep -F "$_rc_expect" "$_tmp/cap-export.err" >/dev/null &&
-    ! grep -q FORGED "$_tmp/cap-export.out"; then
+    [ ! -s "$_tmp/cap-export.out" ]; then
     pass "$_rc_name is refused"
   else
     fail "$_rc_name was not refused as an unrepresentable value"
@@ -1415,7 +1520,7 @@ X='a
 FORGED=1'
 export X
 EOF
-_refuse_case "a newline followed by an assignment-shaped tail" 'newline or control character'
+_refuse_case "a newline followed by an assignment-shaped tail" 'sets X to a value containing a newline'
 _cap_body <<'EOF'
 CAP_SOH=$(printf 'a\001b')
 export CAP_SOH
@@ -1437,19 +1542,202 @@ export CAP_NONCHAR
 EOF
 _refuse_case "U+FFFF, an XML noncharacter" 'CAP_NONCHAR'
 
-# Scenario E: representable values still export: valid multibyte UTF-8, TAB, DEL.
+_cap_body <<'EOF'
+CAP_INVALID_UTF8=$(printf '\200')
+export CAP_INVALID_UTF8
+EOF
+_refuse_case "an invalid UTF-8 value" 'not valid UTF-8'
+
+# Scenario E: representable values still export: valid multibyte UTF-8 exports
+# to both environment.d and launchd; TAB and DEL are preserved by launchd and
+# refused by name for environment.d (systemd alters TAB/DEL on round-trip);
+# Unicode noncharacters (e.g. U+FDD0, U+1FFFE, U+10FFFF) are refused by name
+# for environment.d.
+_cap_body <<'EOF'
+CAP_UTF=$(printf 'caf\303\251')
+export CAP_UTF
+EOF
+if _cap_apply && _cap_export environment.d && grep -Fx "CAP_UTF=$(printf 'caf\303\251')" "$_tmp/cap-export.out" >/dev/null; then
+  pass "valid multibyte UTF-8 values are exported to environment.d"
+else
+  fail "a valid UTF-8 value was refused or dropped by environment.d"
+  cat "$_tmp/cap-export.out" "$_tmp/cap-export.err" >&2 2>/dev/null || :
+fi
+
 _cap_body <<'EOF'
 CAP_UTF=$(printf 'caf\303\251')
 CAP_TAB=$(printf 'a\tb')
 CAP_DEL=$(printf 'a\177b')
 export CAP_UTF CAP_TAB CAP_DEL
 EOF
-if _cap_apply && _cap_export environment.d && grep -F 'CAP_UTF=' "$_tmp/cap-export.out" >/dev/null &&
-  grep -F 'CAP_DEL=' "$_tmp/cap-export.out" >/dev/null && grep -F 'CAP_TAB=' "$_tmp/cap-export.out" >/dev/null; then
-  pass "valid UTF-8, TAB, and DEL values are still exported"
+if _cap_apply && _cap_export launchd &&
+  grep -F "'CAP_UTF' '$(printf 'caf\303\251')'" "$_tmp/cap-export.out" >/dev/null &&
+  grep -F "'CAP_TAB' '$(printf 'a\tb')'" "$_tmp/cap-export.out" >/dev/null &&
+  grep -F "'CAP_DEL' '$(printf 'a\177b')'" "$_tmp/cap-export.out" >/dev/null; then
+  pass "valid UTF-8, TAB, and DEL values are preserved for launchd"
 else
-  fail "a representable value was refused or dropped"
+  fail "launchd refused or dropped UTF-8, TAB, or DEL"
   cat "$_tmp/cap-export.out" "$_tmp/cap-export.err" >&2 2>/dev/null || :
+fi
+
+_cap_body <<'EOF'
+CAP_TAB=$(printf 'a\tb')
+export CAP_TAB
+EOF
+_refuse_case "a TAB byte for environment.d" 'CAP_TAB'
+
+_cap_body <<'EOF'
+CAP_DEL=$(printf 'a\177b')
+export CAP_DEL
+EOF
+_refuse_case "a DEL byte for environment.d" 'CAP_DEL'
+
+_cap_body <<'EOF'
+CAP_NC_FDD0=$(printf 'a\357\267\220b')
+export CAP_NC_FDD0
+EOF
+_refuse_case "U+FDD0 noncharacter for environment.d" 'CAP_NC_FDD0'
+
+_cap_body <<'EOF'
+CAP_NC_ASTRAL=$(printf 'a\360\237\277\276b')
+export CAP_NC_ASTRAL
+EOF
+_refuse_case "U+1FFFE astral noncharacter for environment.d" 'CAP_NC_ASTRAL'
+
+_cap_body <<'EOF'
+CAP_NC_TOP=$(printf 'a\364\217\277\277b')
+export CAP_NC_TOP
+EOF
+_refuse_case "U+10FFFF astral noncharacter for environment.d" 'CAP_NC_TOP'
+
+# Scenario E2: caller PATH is preserved as input to env capture so PATH-dependent
+# exports (command -v probes and valise_editor_defaults) match an installed env
+# plan, while PATH itself stays excluded from bridge output.
+_custom_bin="$_tmp/caller-custom-bin"
+mkdir -p "$_custom_bin"
+printf '#!/bin/sh\nexit 0\n' >"$_custom_bin/probe-owned-tool"
+printf '#!/bin/sh\nexit 0\n' >"$_custom_bin/nvim"
+chmod 755 "$_custom_bin/probe-owned-tool" "$_custom_bin/nvim"
+_cap_body <<'EOF'
+CAP_TOOL=$(command -v probe-owned-tool 2>/dev/null || printf unavailable)
+export CAP_TOOL
+EOF
+if _cap_apply && env -i HOME="$_cap_home" PATH="$_custom_bin:/usr/bin:/bin" \
+  XDG_DATA_HOME="$_cap_home/.local/share" XDG_CONFIG_HOME="$_cap_home/.config" \
+  XDG_STATE_HOME="$_cap_home/.local/state" SHELL=/bin/sh TMPDIR="$_tmp" \
+  "$_valise" -C "$_cp" env export environment.d >"$_tmp/cap-path.out" 2>"$_tmp/cap-path.err" &&
+  grep -Fx "CAP_TOOL=$_custom_bin/probe-owned-tool" "$_tmp/cap-path.out" >/dev/null &&
+  ! grep -q '^PATH=' "$_tmp/cap-path.out"; then
+  pass "env export preserves caller PATH as input for command -v while excluding PATH from output"
+else
+  fail "env export lost caller PATH for command -v or leaked PATH into output"
+  cat "$_tmp/cap-path.out" "$_tmp/cap-path.err" >&2 2>/dev/null || :
+fi
+
+# Excluded inputs are still available to the plan, but cannot poison the
+# representation check or create a record through an assignment-shaped tail.
+# This installs once, then varies caller PATH and a root which does not locate
+# the store; each success must contain a real nonempty export.
+_cap_body <<'EOF'
+CAP_SAFE=ok
+export CAP_SAFE
+EOF
+if _cap_apply; then
+  for _excluded_case in newline soh esc invalid-utf8 xml-noncharacter; do
+    case "$_excluded_case" in
+    newline) _excluded_bytes=$(printf 'bad\nFORGED=1') ;;
+    soh) _excluded_bytes=$(printf 'bad\001FORGED=1') ;;
+    esc) _excluded_bytes=$(printf 'bad\033FORGED=1') ;;
+    invalid-utf8) _excluded_bytes=$(printf 'bad\200FORGED=1') ;;
+    xml-noncharacter) _excluded_bytes=$(printf 'bad\357\277\276FORGED=1') ;;
+    esac
+    if _cap_export environment.d "SHELL=/bin/sh" "PATH=$_excluded_bytes:/usr/bin:/bin" \
+      "XDG_CACHE_HOME=$_excluded_bytes" &&
+      grep -Fx 'CAP_SAFE=ok' "$_tmp/cap-export.out" >/dev/null &&
+      ! grep -E '^(PATH|XDG_CACHE_HOME|FORGED)=' "$_tmp/cap-export.out" >/dev/null &&
+      ! grep -F 'not bridged' "$_tmp/cap-export.err" >/dev/null; then
+      pass "unchanged excluded $_excluded_case bytes do not reject or inject published values"
+    else
+      fail "unchanged excluded $_excluded_case bytes rejected or injected a published value"
+      cat "$_tmp/cap-export.out" "$_tmp/cap-export.err" >&2
+    fi
+  done
+else
+  fail "could not install the excluded-input fixture"
+  cat "$_tmp/cap-apply.out" >&2
+fi
+
+# Changed excluded values are reported by name, even if their bytes could not
+# be encoded in any bridge. Shell/capture bookkeeping is silently excluded.
+_cap_body <<'EOF'
+CAP_SAFE=ok
+PATH=$(printf 'bad\nFORGED=1\001\200\357\277\276')
+XDG_CACHE_HOME=$PATH
+TMPDIR=$PATH
+HOME=$PATH
+EEC_HOME=$PATH
+export CAP_SAFE PATH XDG_CACHE_HOME TMPDIR HOME EEC_HOME
+EOF
+if _cap_apply && _cap_export environment.d &&
+  grep -Fx 'CAP_SAFE=ok' "$_tmp/cap-export.out" >/dev/null &&
+  ! grep -E '^(PATH|XDG_CACHE_HOME|TMPDIR|HOME|EEC_HOME|FORGED)=' "$_tmp/cap-export.out" >/dev/null &&
+  grep -F '3 exported variable(s) are not bridged' "$_tmp/cap-export.err" >/dev/null &&
+  grep -F 'PATH' "$_tmp/cap-export.err" >/dev/null &&
+  grep -F 'XDG_CACHE_HOME' "$_tmp/cap-export.err" >/dev/null &&
+  grep -F 'TMPDIR' "$_tmp/cap-export.err" >/dev/null; then
+  pass "changed excluded values retain diagnostics without validating or decoding them as records"
+else
+  fail "changed excluded values were lost, injected, or validated as published data"
+  cat "$_tmp/cap-export.out" "$_tmp/cap-export.err" >&2 2>/dev/null || :
+fi
+
+# Explicitly empty HOME, PATH and XDG roots reach the plan unchanged.
+_cap_body <<'EOF'
+if [ "${PATH+x}" = x ] && [ -z "$PATH" ]; then CAP_PATH_STATE=empty; else CAP_PATH_STATE=nonempty; fi
+if [ "${XDG_CACHE_HOME+x}" = x ]; then
+  if [ -z "$XDG_CACHE_HOME" ]; then CAP_CACHE_STATE=empty; else CAP_CACHE_STATE=nonempty; fi
+else CAP_CACHE_STATE=unset
+fi
+if [ -z "$HOME" ]; then CAP_HOME_STATE=empty; else CAP_HOME_STATE=nonempty; fi
+export CAP_PATH_STATE CAP_CACHE_STATE CAP_HOME_STATE
+EOF
+if _cap_apply && _cap_export environment.d SHELL=/bin/sh PATH= XDG_CACHE_HOME= HOME= &&
+  grep -Fx 'CAP_PATH_STATE=empty' "$_tmp/cap-export.out" >/dev/null &&
+  grep -Fx 'CAP_CACHE_STATE=empty' "$_tmp/cap-export.out" >/dev/null &&
+  grep -Fx 'CAP_HOME_STATE=empty' "$_tmp/cap-export.out" >/dev/null &&
+  _cap_export environment.d SHELL=/bin/sh &&
+  grep -Fx 'CAP_PATH_STATE=nonempty' "$_tmp/cap-export.out" >/dev/null &&
+  grep -Fx 'CAP_CACHE_STATE=unset' "$_tmp/cap-export.out" >/dev/null &&
+  grep -Fx 'CAP_HOME_STATE=nonempty' "$_tmp/cap-export.out" >/dev/null; then
+  pass "env capture preserves empty HOME/PATH and distinguishes empty and unset XDG roots"
+else
+  fail "env capture changed empty HOME/PATH or an XDG root set/unset distinction"
+  cat "$_tmp/cap-export.out" "$_tmp/cap-export.err" >&2 2>/dev/null || :
+fi
+
+_ed_proj="$_tmp/cap-editor-proj"
+mkdir -p "$_ed_proj/module.d" "$_ed_proj/modules"
+: >"$_ed_proj/valise.conf"
+printf 'variant_name\tdescription\texcluded_modules\ndefault\tAll\t\n' >"$_ed_proj/variants.tsv"
+printf 'name=cap_ed\nversion=\nside_effect=read-only\nrequires=valise_editor\noptional=\nshells=posix\nplatforms=any\nexports=\nload=modules/cap_ed.sh\n' >"$_ed_proj/module.d/cap_ed.meta"
+printf 'valise_editor_defaults\n' >"$_ed_proj/modules/cap_ed.sh"
+printf '# bundle\tshell\troots\ndefault\tsh\tcap_ed\ndefault\tbash\tcap_ed\n' >"$_ed_proj/bundles.tsv"
+_ed_home="$_tmp/cap-ed-home"
+mkdir -p "$_ed_home"
+if env -i HOME="$_ed_home" PATH="$_custom_bin:/usr/bin:/bin" \
+  XDG_DATA_HOME="$_ed_home/.local/share" XDG_CONFIG_HOME="$_ed_home/.config" \
+  XDG_STATE_HOME="$_ed_home/.local/state" SHELL=/bin/sh TMPDIR="$_tmp" \
+  "$_valise" -C "$_ed_proj" apply --no-integration >/dev/null 2>&1 &&
+  env -i HOME="$_ed_home" PATH="$_custom_bin:/usr/bin:/bin" \
+  XDG_DATA_HOME="$_ed_home/.local/share" XDG_CONFIG_HOME="$_ed_home/.config" \
+  XDG_STATE_HOME="$_ed_home/.local/state" SHELL=/bin/sh TMPDIR="$_tmp" \
+  "$_valise" -C "$_ed_proj" env export environment.d >"$_tmp/cap-ed.out" 2>"$_tmp/cap-ed.err" &&
+  grep -Fx 'EDITOR=nvim' "$_tmp/cap-ed.out" >/dev/null &&
+  grep -Fx 'VISUAL=nvim' "$_tmp/cap-ed.out" >/dev/null; then
+  pass "env export matches installed env plan for valise_editor_defaults with nvim on caller PATH"
+else
+  fail "env export diverged from installed env plan for valise_editor_defaults"
+  cat "$_tmp/cap-ed.out" "$_tmp/cap-ed.err" >&2 2>/dev/null || :
 fi
 
 # Scenario F: an empty value cannot reach environment.d; it is refused by name,
@@ -1479,6 +1767,281 @@ if _cap_apply && env -i HOME="$_cap_home" PATH="$_tmp/fakebin" XDG_DATA_HOME="$_
 else
   fail "env export needed a dash that the sh login does not use"
   cat "$_tmp/cap-sh.err" >&2 2>/dev/null || :
+fi
+
+# Faults at delegated utility boundaries exercise real allocation and cleanup,
+# without racing wall-clock sleeps. The interpreter-selection subprocess execs
+# a PID recorder, so its PPID identifies the capture worker precisely. All
+# signals target that private worker and, in the allocation-tree cases, its
+# allocation descendants. They never target this test or its process group.
+mkdir -p "$_tmp/capture-fault/release/plans" "$_tmp/capture-fault/scratch"
+printf 'CAP_SIGNAL=ok\nexport CAP_SIGNAL\n' >"$_tmp/capture-fault/release/plans/sh.sh"
+awk '
+  /^trusted_utility_path\(\) \{/ { copying = 1; sub(/trusted_utility_path/, "capture_trusted_utility_path") }
+  copying { print }
+  copying && /^}/ { exit }
+' "$_repo/lib/cli/common.sh" >"$_tmp/capture-fault/resolver.sh"
+cat >"$_tmp/capture-fault/record-pid" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$PPID" >"$CAPTURE_PID"
+printf '/bin/sh\n'
+EOF
+cat >"$_tmp/capture-fault/mktemp" <<'EOF'
+#!/bin/sh
+set -eu
+_allocated=$("$CAPTURE_REAL_MKTEMP" "$@") || exit "$?"
+printf '%s\n' "$_allocated" >"$CAPTURE_ALLOCATED"
+printf 'allocated\n' >>"$CAPTURE_MARKER"
+case $CAPTURE_FAULT in
+allocation-tree-*)
+  # Collect the complete allocation ancestry before sending anything. The
+  # kernel can deliver a terminal signal to these processes together; killing
+  # only the worker misses a utility that committed but lost its exit status.
+  _worker=$(cat "$CAPTURE_PID")
+  _ancestor=$$
+  _ancestors=$$
+  _depth=0
+  while [ "$_ancestor" != "$_worker" ] && [ "$_depth" -lt 12 ]; do
+    _parent=$(ps -o ppid= -p "$_ancestor") || exit 72
+    set -- $_parent
+    [ "$#" -eq 1 ] && [ "$1" -gt 1 ] || exit 72
+    _ancestor=$1
+    _ancestors="$_ancestors $_ancestor"
+    _depth=$((_depth + 1))
+  done
+  [ "$_ancestor" = "$_worker" ] || exit 72
+  printf 'allocation-tree-signalled\n' >>"$CAPTURE_MARKER"
+  for _ancestor in $_ancestors; do kill -"$CAPTURE_SIGNAL" "$_ancestor" || exit 72; done
+  ;;
+esac
+printf '%s\n' "$_allocated"
+case $CAPTURE_FAULT in allocation-*) kill -"$CAPTURE_SIGNAL" "$(cat "$CAPTURE_PID")" ;; esac
+EOF
+cat >"$_tmp/capture-fault/od" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'scanning\n' >>"$CAPTURE_MARKER"
+case $CAPTURE_FAULT in
+scan-term) kill -TERM "$(cat "$CAPTURE_PID")" ;;
+od-error) exit 71 ;;
+esac
+exec "$CAPTURE_REAL_OD" "$@"
+EOF
+cat >"$_tmp/capture-fault/rm" <<'EOF'
+#!/bin/sh
+set -eu
+_capture_cleanup=0
+for _arg do
+  case $_arg in "$CAPTURE_SCRATCH"/valise-env-export.*) _capture_cleanup=1 ;; esac
+done
+if [ "$_capture_cleanup" -eq 1 ]; then
+  printf 'cleanup-started\n' >>"$CAPTURE_MARKER"
+  case $CAPTURE_FAULT in
+    allocation-*|scan-term|cleanup-term) kill -"$CAPTURE_SIGNAL" "$(cat "$CAPTURE_PID")" ;;
+    cleanup-child-*)
+      kill -"$CAPTURE_SIGNAL" "$(cat "$CAPTURE_PID")"
+      kill -"$CAPTURE_SIGNAL" "$$"
+      ;;
+  esac
+fi
+"$CAPTURE_REAL_RM" "$@" || exit "$?"
+[ "$_capture_cleanup" -eq 0 ] || printf 'cleanup-finished\n' >>"$CAPTURE_MARKER"
+EOF
+chmod 0755 "$_tmp/capture-fault/record-pid" "$_tmp/capture-fault/mktemp" \
+  "$_tmp/capture-fault/od" "$_tmp/capture-fault/rm"
+cat >"$_tmp/capture-fault/driver.sh" <<'EOF'
+set -eu
+VALISE_CLI_DIR=$1/lib/cli
+for part in usage common store fish-hook integration commands lifecycle devtools project; do
+  . "$VALISE_CLI_DIR/$part.sh"
+done
+. "$2/resolver.sh"
+trusted_utility_path() {
+  case $1 in
+  mktemp|od|rm) printf '%s/%s\n' "$CAPTURE_FAULT_ROOT" "$1" ;;
+  *) capture_trusted_utility_path "$1" ;;
+  esac
+}
+capture_interpreter() { exec /bin/sh "$CAPTURE_FAULT_ROOT/record-pid"; }
+env_export_capture sh "$2/release"
+EOF
+_capture_real_mktemp=$(command -v mktemp)
+_capture_real_od=$(command -v od)
+_capture_real_rm=$(command -v rm)
+for _capture_fault in healthy allocation-term allocation-int allocation-tree-term allocation-tree-int scan-term od-error cleanup-term cleanup-child-term cleanup-child-int; do
+  _capture_signal=TERM
+  _capture_expected=143
+  case $_capture_fault in
+  healthy) _capture_expected=0 ;;
+  allocation-int|allocation-tree-int|cleanup-child-int) _capture_signal=INT; _capture_expected=130 ;;
+  od-error) _capture_expected=1 ;;
+  esac
+  : >"$_tmp/capture-fault/marker"
+  _capture_scratch="$_tmp/capture-fault/scratch/$_capture_fault"
+  mkdir -p "$_capture_scratch"
+  _capture_rc=0
+  env -i HOME="$_home" PATH=/usr/bin:/bin TMPDIR="$_capture_scratch" \
+    CAPTURE_FAULT="$_capture_fault" CAPTURE_SIGNAL="$_capture_signal" \
+    CAPTURE_FAULT_ROOT="$_tmp/capture-fault" CAPTURE_SCRATCH="$_capture_scratch" \
+    CAPTURE_PID="$_tmp/capture-fault/pid" CAPTURE_ALLOCATED="$_tmp/capture-fault/allocated" \
+    CAPTURE_MARKER="$_tmp/capture-fault/marker" CAPTURE_REAL_MKTEMP="$_capture_real_mktemp" \
+    CAPTURE_REAL_OD="$_capture_real_od" CAPTURE_REAL_RM="$_capture_real_rm" \
+    /bin/sh "$_tmp/capture-fault/driver.sh" "$_repo" "$_tmp/capture-fault" \
+    >"$_tmp/capture-fault/out" 2>"$_tmp/capture-fault/err" || _capture_rc=$?
+  _capture_allocated=$(cat "$_tmp/capture-fault/allocated")
+  _capture_left=$(find "$_capture_scratch" ! -path "$_capture_scratch" -print) || _capture_left=ERROR
+  _capture_output_ok=0
+  case $_capture_fault in
+  healthy|cleanup-*)
+    grep -Fx 'CAP_SIGNAL=ok' "$_tmp/capture-fault/out" >/dev/null && _capture_output_ok=1 ;;
+  *) [ -s "$_tmp/capture-fault/out" ] || _capture_output_ok=1 ;;
+  esac
+  if [ "$_capture_rc" -eq "$_capture_expected" ] && [ "$_capture_output_ok" -eq 1 ] &&
+    grep -Fx allocated "$_tmp/capture-fault/marker" >/dev/null &&
+    grep -Fx cleanup-started "$_tmp/capture-fault/marker" >/dev/null &&
+    grep -Fx cleanup-finished "$_tmp/capture-fault/marker" >/dev/null &&
+    [ ! -e "$_capture_allocated" ] && [ ! -L "$_capture_allocated" ] && [ -z "$_capture_left" ]; then
+    pass "env capture owns scratch through allocation, failure and cleanup ($_capture_fault)"
+  else
+    fail "env capture lost scratch, status or output at $_capture_fault (status=$_capture_rc)"
+    cat "$_tmp/capture-fault/out" "$_tmp/capture-fault/err" "$_tmp/capture-fault/marker" >&2
+    printf 'allocated=%s leftovers=%s\n' "$_capture_allocated" "$_capture_left" >&2
+  fi
+done
+
+# Exercise the complete noncharacter set and valid boundary neighbors through
+# the real capture and format helpers. Generate UTF-8 from code points here,
+# independently of the emitter's byte-pattern table. Octal text keeps the test
+# vector file itself free of newlines/control bytes inside records.
+LC_ALL=C awk '
+  function byte(n) { return sprintf("\\0%03o", n) }
+  function utf8(n) {
+    if (n < 128) return byte(n)
+    if (n < 2048) return byte(192 + int(n / 64)) byte(128 + n % 64)
+    if (n < 65536) return byte(224 + int(n / 4096)) byte(128 + int(n / 64) % 64) byte(128 + n % 64)
+    return byte(240 + int(n / 262144)) byte(128 + int(n / 4096) % 64) byte(128 + int(n / 64) % 64) byte(128 + n % 64)
+  }
+  function vector(kind, n) { printf "%s\tU+%X\t%s\n", kind, n, utf8(n) }
+  BEGIN {
+    for (n = 64976; n <= 65007; n++) vector("noncharacter", n)
+    for (plane = 0; plane <= 16; plane++) {
+      vector(plane == 0 ? "xml-noncharacter" : "noncharacter", plane * 65536 + 65534)
+      vector(plane == 0 ? "xml-noncharacter" : "noncharacter", plane * 65536 + 65535)
+      vector("valid", plane * 65536 + 65533)
+      if (plane) vector("valid", plane * 65536)
+    }
+    vector("valid", 64975); vector("valid", 65008)
+    vector("valid", 55295); vector("valid", 57344)
+    vector("valid", 128); vector("valid", 2047); vector("valid", 2048)
+    vector("valid", 4095); vector("valid", 4096); vector("valid", 53248)
+    vector("valid", 1114108)
+    for (n = 1; n < 32; n++) if (n != 9) vector("control", n)
+    print "invalid\tcontinuation\t" byte(128)
+    print "invalid\toverlong\t" byte(192) byte(175)
+    print "invalid\ttruncated\t" byte(194)
+    print "invalid\tsurrogate\t" byte(237) byte(160) byte(128)
+    print "invalid\tabove-max\t" byte(244) byte(144) byte(128) byte(128)
+    print "invalid\tforbidden-byte\t" byte(255)
+    print "invalid\tf5-leader\t" byte(245) byte(128) byte(128) byte(128)
+    print "invalid\tfive-byte\t" byte(248) byte(136) byte(128) byte(128) byte(128)
+    print "invalid\tsix-byte\t" byte(252) byte(132) byte(128) byte(128) byte(128) byte(128)
+    print "invalid\tthree-byte-overlong\t" byte(224) byte(159) byte(191)
+    print "invalid\tfour-byte-overlong\t" byte(240) byte(143) byte(191) byte(191)
+    print "invalid\ttruncated-four-byte\t" byte(240) byte(144) byte(128)
+    print "invalid\tbad-continuation\t" byte(194) byte(127)
+  }
+' >"$_tmp/capture-vectors.tsv"
+mkdir -p "$_tmp/character-release/plans"
+cat >"$_tmp/character-check.sh" <<'EOF'
+set -eu
+VALISE_CLI_DIR=$1/lib/cli
+for part in usage common store fish-hook integration commands lifecycle devtools project; do
+  . "$VALISE_CLI_DIR/$part.sh"
+done
+_char_root=$2
+_char_failed=0
+_char_noncharacters=0
+_char_valid=0
+_char_controls=0
+_char_invalid=0
+while IFS="$(printf '\t')" read -r _char_kind _char_label _char_octets; do
+  case $_char_label in
+  truncated*) _char_value=$(printf 'before%b' "$_char_octets") ;;
+  *) _char_value=$(printf 'before%bafter' "$_char_octets") ;;
+  esac
+  _char_record="CAP_PROBE=$_char_value"
+  printf "CAP_PROBE='%s'\nexport CAP_PROBE\n" "$_char_value" >"$_char_root/character-release/plans/sh.sh"
+  _char_rc=0
+  env_export_capture sh "$_char_root/character-release" >"$_char_root/character-capture.out" \
+    2>"$_char_root/character-capture.err" || _char_rc=$?
+  case $_char_kind in
+  control|invalid|xml-noncharacter)
+    if [ "$_char_rc" -eq 0 ] || [ -s "$_char_root/character-capture.out" ] ||
+      [ ! -s "$_char_root/character-capture.err" ]; then
+      printf 'capture failed to refuse %s (%s)\n' "$_char_label" "$_char_kind" >&2
+      _char_failed=1
+    fi
+    if [ "$_char_kind" = control ]; then
+      _char_controls=$((_char_controls + 1))
+      grep -F 'sets CAP_PROBE to a value containing' "$_char_root/character-capture.err" >/dev/null || _char_failed=1
+      continue
+    elif [ "$_char_kind" = invalid ]; then
+      _char_invalid=$((_char_invalid + 1))
+      grep -F 'CAP_PROBE is set to a value that is not valid UTF-8' "$_char_root/character-capture.err" >/dev/null || _char_failed=1
+      continue
+    fi
+    ;;
+  *)
+    printf '%s\n' "$_char_record" >"$_char_root/character-capture.want"
+    if [ "$_char_rc" -ne 0 ] || ! cmp -s "$_char_root/character-capture.want" "$_char_root/character-capture.out"; then
+      printf 'capture altered valid UTF-8 %s\n' "$_char_label" >&2
+      cat "$_char_root/character-capture.err" >&2
+      _char_failed=1
+    fi
+    ;;
+  esac
+  _char_rc=0
+  env_export_emit environment.d "$_char_record" >"$_char_root/character-env.out" \
+    2>"$_char_root/character-env.err" || _char_rc=$?
+  case $_char_kind in
+  *noncharacter)
+    _char_noncharacters=$((_char_noncharacters + 1))
+    if [ "$_char_rc" -eq 0 ] || [ -s "$_char_root/character-env.out" ] ||
+      ! grep -F 'CAP_PROBE contains a Unicode noncharacter' "$_char_root/character-env.err" >/dev/null; then
+      printf 'environment.d failed to refuse %s\n' "$_char_label" >&2
+      _char_failed=1
+    fi
+    ;;
+  valid)
+    _char_valid=$((_char_valid + 1))
+    if [ "$_char_rc" -ne 0 ] || ! grep -Fx "$_char_record" "$_char_root/character-env.out" >/dev/null; then
+      printf 'environment.d refused or altered neighbor %s\n' "$_char_label" >&2
+      _char_failed=1
+    fi
+    ;;
+  esac
+  # XML permits the other 64 noncharacters; launchd preserves their bytes.
+  if [ "$_char_kind" != xml-noncharacter ]; then
+    if ! env_export_emit launchd "$_char_record" >"$_char_root/character-launchd.out" ||
+      ! grep -F "$_char_value" "$_char_root/character-launchd.out" >/dev/null; then
+      printf 'launchd refused or altered valid XML %s\n' "$_char_label" >&2
+      _char_failed=1
+    fi
+  fi
+done <"$_char_root/capture-vectors.tsv"
+[ "$_char_noncharacters" -eq 66 ] && [ "$_char_valid" -eq 44 ] &&
+  [ "$_char_controls" -eq 30 ] && [ "$_char_invalid" -eq 13 ] || _char_failed=1
+printf 'characters: %s noncharacters, %s valid neighbors, %s controls, %s invalid UTF-8 sequences\n' \
+  "$_char_noncharacters" "$_char_valid" "$_char_controls" "$_char_invalid"
+exit "$_char_failed"
+EOF
+if env -i HOME="$_home" PATH=/usr/bin:/bin TMPDIR="$_tmp" \
+  /bin/sh "$_tmp/character-check.sh" "$_repo" "$_tmp" >"$_tmp/characters.out" 2>&1 &&
+  grep -Fx 'characters: 66 noncharacters, 44 valid neighbors, 30 controls, 13 invalid UTF-8 sequences' "$_tmp/characters.out" >/dev/null; then
+  pass "capture and GUI formats distinguish all Unicode noncharacters, valid neighbors, C0 controls and invalid UTF-8"
+else
+  fail "capture or GUI format character validation disagreed with the complete boundary matrix"
+  cat "$_tmp/characters.out" >&2
 fi
 
 printf '\n=== developer commands summary ===\n'

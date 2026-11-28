@@ -203,6 +203,7 @@ trusted_utility_path() {
     mktemp) _trusted_candidates='/usr/bin/mktemp /bin/mktemp /opt/homebrew/bin/mktemp /usr/local/bin/mktemp' ;;
     sh) _trusted_candidates='/bin/sh /usr/bin/sh' ;;
     iconv) _trusted_candidates='/usr/bin/iconv /bin/iconv' ;;
+    od) _trusted_candidates='/usr/bin/od /bin/od' ;;
     readlink) _trusted_candidates='/usr/bin/readlink /bin/readlink' ;;
     rmdir) _trusted_candidates='/bin/rmdir /usr/bin/rmdir' ;;
     find) _trusted_candidates='/usr/bin/find /bin/find' ;;
@@ -243,9 +244,41 @@ xdg_child() {
   unset _xdg_child_root
 }
 
+# readlink_target <path>
+# Print the literal symlink target byte-exact, on both GNU and BSD readlink
+# (which otherwise differ in the separator newline they append), while
+# preserving newlines that belong to the target itself. -n suppresses the
+# separator, and the 'x' sentinel survives command substitution's own
+# trailing-newline stripping, so removing exactly the sentinel leaves the
+# target untouched.
 readlink_target() {
   _readlink_path=$(trusted_utility_path readlink) || return 1
-  "$_readlink_path" "$1"
+  _readlink_out=$("$_readlink_path" -n "$1" && printf x) || return 1
+  # The sentinel protects the target's trailing newlines from command
+  # substitution's stripping, so removing exactly the sentinel restores the
+  # target byte-exact; printf '%s' then emits it with no added separator.
+  _readlink_out=${_readlink_out%x}
+  printf '%s' "$_readlink_out"
+  unset _readlink_path _readlink_out
+}
+
+# readlink_target_assign <internal-var> <path>
+# Assign the literal symlink target to <var> byte-exact, including trailing
+# newlines that belong to the target. readlink_target's stdout is byte-exact,
+# but a caller capturing it with $(...) would still lose trailing newlines to
+# command substitution's stripping, so the capture appends an 'x' sentinel
+# after the target and removes exactly that sentinel.
+readlink_target_assign() {
+  case ${1:-} in
+    ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*|_rta_*) return 1 ;;
+  esac
+  _rta_name=$1
+  _rta_value=$(readlink_target "$2" && printf x) || { unset _rta_name _rta_value; return 1; }
+  _rta_value=${_rta_value%x}
+  # Only the validated variable name becomes shell syntax; the target is
+  # expanded from a literal variable reference, never eval'd.
+  eval "$_rta_name=\$_rta_value"
+  unset _rta_name _rta_value
 }
 
 # active_release_dir
@@ -254,7 +287,7 @@ readlink_target() {
 # never changes the release identity.
 active_release_dir() {
   [ -L "$VALISE_ACTIVE_LINK" ] || return 1
-  _ard_target=$(readlink_target "$VALISE_ACTIVE_LINK" 2>/dev/null) || return 1
+  readlink_target_assign _ard_target "$VALISE_ACTIVE_LINK" 2>/dev/null || return 1
   [ -n "$_ard_target" ] || return 1
   case "$_ard_target" in
     /*) : ;;
@@ -332,27 +365,25 @@ file_mtime() {
 file_sha256() {
   _sha_path=$(trusted_utility_path sha256sum 2>/dev/null || :)
   if [ -n "$_sha_path" ]; then
-    _sha_output=$("$_sha_path" "$1") || return 1
+    _sha_output=$("$_sha_path" <"$1") || return 1
   else
     _sha_path=$(trusted_utility_path shasum 2>/dev/null || :)
     if [ -n "$_sha_path" ]; then
-      _sha_output=$("$_sha_path" -a 256 "$1") || return 1
+      _sha_output=$("$_sha_path" -a 256 <"$1") || return 1
     else
       _sha_path=$(trusted_utility_path sha256 2>/dev/null || :)
       [ -n "$_sha_path" ] || return 1
-      _sha_output=$("$_sha_path" "$1") || return 1
+      _sha_output=$("$_sha_path" <"$1") || return 1
     fi
   fi
-  # Supported utilities: sha256sum/shasum print "digest  filename";
-  # BSD sha256 prints "SHA256 (filename) = digest" or just the digest.
-  # The BSD format strip must be gated behind the SHA256 ( prefix: a
-  # blanket *=* match corrupts sha256sum/shasum output whenever the
-  # absolute file path contains "= " (equals followed by space).
-  case "$_sha_output" in
-    "SHA256 ("*) _sha_output=${_sha_output##* = } ;;
-  esac
+  # Hash stdin so the utility never renders or escapes the input pathname.
+  # GNU sha256sum prefixes an escaped filename record with a backslash; that
+  # is not part of the digest. On stdin these tools print "digest  -" or just
+  # the digest, independent of filename spaces, backslashes, or newlines.
   _sha_output=${_sha_output%% *}
   _sha_output=${_sha_output%%$(printf '\t')*}
+  [ "${#_sha_output}" -eq 64 ] || return 1
+  case $_sha_output in *[!0-9a-fA-F]*) return 1 ;; esac
   printf '%s\n' "$_sha_output"
 }
 

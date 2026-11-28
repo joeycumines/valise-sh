@@ -6,6 +6,11 @@
 # error handling. Never sources POSIX bodies — only .fish files.
 #
 # Requires: lib/fish/metadata.fish to be sourced first.
+#
+# Fish `exit` inside a sourced file only stops that source. An unrecoverable
+# integrity failure must stop this interpreter, including interactive callers,
+# so fatal paths use a literal exec of the required POSIX runtime. A mutable
+# helper or command variable cannot stand in for this termination boundary.
 
 set -g _sp_fish_loaded_modules
 set -g _sp_fish_module_roots
@@ -37,6 +42,46 @@ for _sp_fish_legacy_entrypoint in sp_fish_loader_load_ordered sp_fish_loader_dis
     builtin functions -q "$_sp_fish_legacy_entrypoint"; and builtin functions -e "$_sp_fish_legacy_entrypoint"
 end
 
+# A relocated Fish installation keeps its distributed functions beside its
+# executable prefix. Derive that prefix from the running interpreter itself,
+# never from mutable __fish_data_dir or fish_function_path. Require an absolute
+# executable path and resolve symlinks before comparing the source directory.
+# Platforms unable to identify the executable still use the fixed roots below.
+function _sp_fish_loader_is_runtime_function_source --argument-names source function_name
+    builtin test -f "$source"; or return 1
+    builtin set -l executable (builtin status fish-path)
+    builtin test (builtin count $executable) -eq 1; or return 1
+    builtin string match -q '/*' -- "$executable"; or return 1
+    builtin set executable (builtin path resolve -- "$executable" 2>/dev/null)
+    builtin test (builtin count $executable) -eq 1; or return 1
+    builtin test -x "$executable"; or return 1
+    builtin set -l binary_directory (builtin path dirname -- "$executable")
+    builtin test (builtin path basename -- "$binary_directory") = bin; or return 1
+    builtin set -l prefix (builtin path dirname -- "$binary_directory")
+    builtin set -l source_path (builtin path resolve -- "$source" 2>/dev/null)
+    builtin test (builtin count $source_path) -eq 1; or return 1
+    builtin set -l functions_directory (builtin path resolve -- "$prefix/share/fish/functions" 2>/dev/null)
+    if builtin test "$function_name" = cd
+        builtin test (builtin count $functions_directory) -eq 1; or return 1
+        builtin test "$source_path" = "$functions_directory/cd.fish"
+        return $status
+    end
+    if builtin test (builtin count $functions_directory) -eq 1
+        if builtin test (builtin path dirname -- "$source_path") = "$functions_directory"
+            return 0
+        end
+    end
+    builtin set -l completions_directory (builtin path resolve -- "$prefix/share/fish/completions" 2>/dev/null)
+    if builtin test (builtin count $completions_directory) -eq 1
+        if builtin test (builtin path dirname -- "$source_path") = "$completions_directory"
+            return 0
+        end
+    end
+    builtin set -l config_path (builtin path resolve -- "$prefix/share/fish/config.fish" 2>/dev/null)
+    builtin test (builtin count $config_path) -eq 1; or return 1
+    builtin test "$source_path" = "$config_path"
+end
+
 function _sp_fish_loader_is_trusted_system_function_source --argument-names source function_name
     # Fish packages may load default functions from disk instead of embedding
     # them in the binary. Also trust only Valise's temporary generated helpers
@@ -51,6 +96,9 @@ function _sp_fish_loader_is_trusted_system_function_source --argument-names sour
     if builtin contains -- "$source_directory" /usr/share/fish/functions /usr/local/share/fish/functions /opt/local/share/fish/functions /opt/homebrew/share/fish/functions; or builtin contains -- "$source" /usr/share/fish/config.fish /usr/local/share/fish/config.fish /opt/local/share/fish/config.fish /opt/homebrew/share/fish/config.fish
         builtin test -f "$source"
         return $status
+    end
+    if _sp_fish_loader_is_runtime_function_source "$source"
+        return 0
     end
     if builtin string match -q '__valise_fish_*' -- "$function_name"; and builtin string match -q '*/fish/conf.d/valise.fish' -- "$source"
         builtin test -f "$source"
@@ -75,15 +123,15 @@ function _sp_fish_loader_rollback_activation --description 'Remove exports and s
             set owned_source $_sp_fish_loader_owned_sources[$owned_source_index]
         end
         if test -n "$owned_source"; and builtin functions -q "$owned_export"; and builtin test (builtin functions --details "$owned_export") = "$owned_source"
-            builtin functions -e "$owned_export"; or builtin exit 125
+            builtin functions -e "$owned_export"; or exec /bin/sh -c 'exit 125'
         end
         builtin set owned_source_index (builtin math $owned_source_index + 1)
     end
-    builtin set -g _sp_fish_loader_owned_exports; or builtin exit 125
-    builtin set -g _sp_fish_loader_owned_sources; or builtin exit 125
-    builtin set -g _sp_fish_loaded_modules; or builtin exit 125
-    builtin set -g _sp_fish_module_roots; or builtin exit 125
-    builtin set -g _sp_fish_metadata_provider; or builtin exit 125
+    builtin set -g _sp_fish_loader_owned_exports; or exec /bin/sh -c 'exit 125'
+    builtin set -g _sp_fish_loader_owned_sources; or exec /bin/sh -c 'exit 125'
+    builtin set -g _sp_fish_loaded_modules; or exec /bin/sh -c 'exit 125'
+    builtin set -g _sp_fish_module_roots; or exec /bin/sh -c 'exit 125'
+    builtin set -g _sp_fish_metadata_provider; or exec /bin/sh -c 'exit 125'
 end
 
 function sp_fish_loader_source_body --description 'Source a Fish body in an isolated function scope'
@@ -887,6 +935,11 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
                     /opt/homebrew/share/fish/functions/cd.fish
                 continue
             end
+            if builtin test "$path_builtin" = cd; and builtin test (builtin path basename -- "$path_builtin_source") = cd.fish
+                if _sp_fish_loader_is_runtime_function_source "$path_builtin_source" cd
+                    continue
+                end
+            end
             builtin printf 'loader: caller shadowed critical Fish builtin: %s\n' "$path_builtin" >&2
             return 1
         end
@@ -907,7 +960,7 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         builtin printf 'loader: cannot verify metadata function source\n' >&2
         return 1
     end
-    set -l critical_loader_functions sp_fish_loader_error _sp_fish_loader_rollback_activation sp_fish_loader_source_body _sp_fish_loader_function_definition_matches _sp_fish_loader_function_definition_matches_text _sp_fish_loader_function_copy_matches _sp_fish_loader_function_copy_matches_definition _sp_fish_loader_function_provenance_matches _sp_fish_loader_is_trusted_system_function_source _sp_fish_loader_capture_scope _sp_fish_loader_verify_universal_persistence _sp_fish_loader_restore_scope sp_fish_loader_path_is_physical sp_fish_loader_platform_name sp_fish_loader_normalize_path sp_fish_loader_add_root sp_fish_loader_files_equal sp_fish_loader_validate_provider_conflicts sp_fish_loader_find_meta sp_fish_loader_provider_for_meta _sp_fish_loader_load_ordered_impl _sp_fish_loader_dispatch _sp_fish_loader_init
+    set -l critical_loader_functions sp_fish_loader_error _sp_fish_loader_rollback_activation sp_fish_loader_source_body _sp_fish_loader_function_definition_matches _sp_fish_loader_function_definition_matches_text _sp_fish_loader_function_copy_matches _sp_fish_loader_function_copy_matches_definition _sp_fish_loader_function_provenance_matches _sp_fish_loader_is_runtime_function_source _sp_fish_loader_is_trusted_system_function_source _sp_fish_loader_capture_scope _sp_fish_loader_verify_universal_persistence _sp_fish_loader_restore_scope sp_fish_loader_path_is_physical sp_fish_loader_platform_name sp_fish_loader_normalize_path sp_fish_loader_add_root sp_fish_loader_files_equal sp_fish_loader_validate_provider_conflicts sp_fish_loader_find_meta sp_fish_loader_provider_for_meta _sp_fish_loader_load_ordered_impl _sp_fish_loader_dispatch _sp_fish_loader_init
     for critical_name in $critical_loader_functions
         set -l critical_source (builtin functions --details "$critical_name")
         if not builtin test "$critical_source" = "$_sp_fish_loader_expected_source"
@@ -1501,8 +1554,9 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         # rollback. Names created by a successful body join the ownership
         # ledger so a later release switch removes them too.
         set -l function_names_before (builtin functions --all --names)
-        set -l reserved_function_names contains test string source path functions set printf echo builtin math count cd pwd eval sp_fish_loader_error _sp_fish_loader_rollback_activation sp_fish_loader_source_body _sp_fish_loader_function_definition_matches _sp_fish_loader_function_definition_matches_text _sp_fish_loader_function_copy_matches _sp_fish_loader_function_copy_matches_definition _sp_fish_loader_function_provenance_matches _sp_fish_loader_is_trusted_system_function_source _sp_fish_loader_capture_scope _sp_fish_loader_verify_universal_persistence _sp_fish_loader_restore_scope sp_fish_loader_path_is_physical sp_fish_loader_platform_name sp_fish_loader_normalize_path sp_fish_loader_add_root sp_fish_loader_files_equal sp_fish_loader_validate_provider_conflicts sp_fish_loader_find_meta sp_fish_loader_provider_for_meta _sp_fish_loader_load_ordered_impl _sp_fish_loader_dispatch _sp_fish_loader_init sp_fish_metadata_error sp_fish_metadata_validate_identifier sp_fish_metadata_validate_identifier_list sp_fish_metadata_validate_shell_list sp_fish_metadata_validate_platform_list sp_fish_metadata_validate_relative_path sp_fish_metadata_validate_side_effect sp_fish_metadata_validate_source_side_effect sp_fish_metadata_read
+        set -l reserved_function_names contains test string source path functions set printf echo builtin math count cd pwd eval sp_fish_loader_error _sp_fish_loader_rollback_activation sp_fish_loader_source_body _sp_fish_loader_function_definition_matches _sp_fish_loader_function_definition_matches_text _sp_fish_loader_function_copy_matches _sp_fish_loader_function_copy_matches_definition _sp_fish_loader_function_provenance_matches _sp_fish_loader_is_runtime_function_source _sp_fish_loader_is_trusted_system_function_source _sp_fish_loader_capture_scope _sp_fish_loader_verify_universal_persistence _sp_fish_loader_restore_scope sp_fish_loader_path_is_physical sp_fish_loader_platform_name sp_fish_loader_normalize_path sp_fish_loader_add_root sp_fish_loader_files_equal sp_fish_loader_validate_provider_conflicts sp_fish_loader_find_meta sp_fish_loader_provider_for_meta _sp_fish_loader_load_ordered_impl _sp_fish_loader_dispatch _sp_fish_loader_init sp_fish_metadata_error sp_fish_metadata_validate_identifier sp_fish_metadata_validate_identifier_list sp_fish_metadata_validate_shell_list sp_fish_metadata_validate_platform_list sp_fish_metadata_validate_relative_path sp_fish_metadata_validate_side_effect sp_fish_metadata_validate_source_side_effect sp_fish_metadata_read
         set -l reserved_function_before
+        set -l reserved_function_native_before
         # Snapshot caller-owned functions with Fish's source-backed copy
         # primitive. A temporary source file followed by `source` changes the
         # function's ownership/provenance; `functions --copy` retains it. The
@@ -1563,7 +1617,7 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
             if builtin functions -q "$caller_function_snapshot"; and builtin test $caller_function_copy_failed -eq 0; and builtin test $caller_function_source_authenticated -eq 1; and builtin test $caller_function_copy_matches -eq 1
                 # The source and complete definition were authenticated.
             else
-                builtin functions -e "$caller_function_snapshot" 2>/dev/null; or builtin exit 125
+                builtin functions -e "$caller_function_snapshot" 2>/dev/null; or exec /bin/sh -c 'exit 125'
                 builtin printf 'loader: unable to source-authenticate caller Fish function: %s\n' "$caller_function_name" >&2
                 return 125
             end
@@ -1585,7 +1639,18 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         end
 
         for reserved_name in $reserved_function_names
-            set -a reserved_function_before (builtin functions --details "$reserved_name")
+            set -l reserved_source (builtin functions --details "$reserved_name")
+            set -a reserved_function_before "$reserved_source"
+            set -l reserved_source_directory (builtin path dirname -- "$reserved_source")
+            set -l reserved_native 0
+            if builtin string match -q 'embedded:*' -- "$reserved_source"; or builtin test "$reserved_source" = builtin; or builtin contains -- "$reserved_source_directory" /usr/share/fish/functions /usr/local/share/fish/functions /opt/local/share/fish/functions /opt/homebrew/share/fish/functions
+                set reserved_native 1
+            else if _sp_fish_loader_is_runtime_function_source "$reserved_source"
+                set reserved_native 1
+            end
+            # Classify before the body runs: a module may redefine the helper,
+            # so rollback must consume the protected local snapshot directly.
+            set -a reserved_function_native_before $reserved_native
         end
 
         # Introspecting a name materializes Fish 3's autoloadable-but-undefined
@@ -1663,11 +1728,11 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         else if builtin set -q HOME; and test -n "$HOME"
             set persistence_config_home "$HOME/.config"
         else
-            builtin exit 125
+            exec /bin/sh -c 'exit 125'
         end
         set -l persistence_durable_file "$persistence_config_home/fish/fish_variables"
         if not sp_fish_loader_path_is_physical "$persistence_durable_file"
-            builtin exit 125
+            exec /bin/sh -c 'exit 125'
         end
         # Capture an absolute, writable, searchable temp parent before any
         # untrusted metadata or module body runs. Verifiers receive this value
@@ -1678,7 +1743,7 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         end
         set persistence_tmp_parent (builtin path resolve -- "$persistence_tmp_parent" 2>/dev/null)
         if test (builtin count $persistence_tmp_parent) -ne 1; or not test -d "$persistence_tmp_parent"; or not test -w "$persistence_tmp_parent"; or not test -x "$persistence_tmp_parent"
-            builtin exit 125
+            exec /bin/sh -c 'exit 125'
         end
 
         set -l protected_scope_names _sp_fish_loader_bootstrap_mode _sp_fish_loader_bootstrap_seeds _sp_fish_loader_bootstrap_status SHELL_PROJECT_ROOT VALISE_FISH_READY _sp_fish_loader_expected_source _sp_fish_metadata_expected_source _sp_fish_loaded_modules _sp_fish_module_roots _sp_fish_metadata_provider _sp_fish_loader_owned_exports _sp_fish_loader_owned_sources _sp_fish_legacy_owned_exports _sp_fish_legacy_owned_sources _sp_fish_metadata_owned_exports _sp_fish_metadata_owned_sources _sp_fish_entrypoint_owned_exports _sp_fish_entrypoint_owned_sources TMPDIR HOME
@@ -1695,10 +1760,10 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         for scope_snapshot_prefix in _sp_fish_loader_scope_before_ __sp_fish_loader_scope_before_ _sp_fish_loader_scope_after_ __sp_fish_loader_scope_after_
             for scope_snapshot_name in (builtin set --names | builtin string match -- "$scope_snapshot_prefix*")
                 if builtin set -q -g "$scope_snapshot_name"
-                builtin set -e -g "$scope_snapshot_name"; or builtin exit 125
+                builtin set -e -g "$scope_snapshot_name"; or exec /bin/sh -c 'exit 125'
             end
             if builtin set -q -U "$scope_snapshot_name"
-                builtin set -e -U "$scope_snapshot_name"; or builtin exit 125
+                builtin set -e -U "$scope_snapshot_name"; or exec /bin/sh -c 'exit 125'
             end
             end
         end
@@ -1723,7 +1788,7 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         set -l scope_before_flat_values
         set -l scope_before_value_cursor 1
         for protected_scope_name in $protected_scope_names
-            _sp_fish_loader_capture_scope "$protected_scope_name" "$scope_before_prefix"; or builtin exit 125
+            _sp_fish_loader_capture_scope "$protected_scope_name" "$scope_before_prefix"; or exec /bin/sh -c 'exit 125'
             set -l captured_global_present_var "$scope_before_prefix"_"$protected_scope_name"_global_present
             set -l captured_global_exported_var "$scope_before_prefix"_"$protected_scope_name"_global_exported
             set -l captured_global_values_var "$scope_before_prefix"_"$protected_scope_name"_global_values
@@ -1946,7 +2011,7 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         # snapshots above, then make any body mutation transactional.
         set -l scope_index 1
         for protected_scope_name in $protected_scope_names
-            _sp_fish_loader_capture_scope "$protected_scope_name" "$scope_after_prefix"; or builtin exit 125
+            _sp_fish_loader_capture_scope "$protected_scope_name" "$scope_after_prefix"; or exec /bin/sh -c 'exit 125'
             set -l after_global_present_var "$scope_after_prefix"_"$protected_scope_name"_global_present
             set -l after_global_exported_var "$scope_after_prefix"_"$protected_scope_name"_global_exported
             set -l after_global_values_var "$scope_after_prefix"_"$protected_scope_name"_global_values
@@ -1998,20 +2063,15 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         # Classify all protected-state and function mutations before rollback.
         # A combined handshake mutation plus `cd` mutation must never enter a
         # return path that leaves a replacement critical function installed.
-        # Fish 4 embeds `cd`; Fish 3 loads it from the installation function
-        # path. Both are Fish-provided definitions the loader cannot restore
-        # with provenance after a body replaces them, so both fail closed.
+        # Fish can embed `cd` or load it from its installation function path.
+        # Neither definition can be restored with provenance after a body
+        # replaces it, so both fail closed, including relocated installations.
         set -l preflight_embedded_mutation ''
         set -l preflight_embedded_index 1
         for preflight_reserved_name in $reserved_function_names
             set -l preflight_before_source "$reserved_function_before[$preflight_embedded_index]"
             set -l preflight_after_source (builtin functions --details "$preflight_reserved_name")
-            set -l preflight_before_dir (builtin path dirname -- "$preflight_before_source")
-            set -l preflight_fish_provided 0
-            if builtin string match -q 'embedded:*' -- "$preflight_before_source"; or builtin test "$preflight_before_source" = builtin; or builtin contains -- "$preflight_before_dir" /usr/share/fish/functions /usr/local/share/fish/functions /opt/local/share/fish/functions /opt/homebrew/share/fish/functions
-                set preflight_fish_provided 1
-            end
-            if builtin test $preflight_fish_provided -eq 1; and not builtin test "$preflight_after_source" = "$preflight_before_source"
+            if builtin test "$reserved_function_native_before[$preflight_embedded_index]" -eq 1; and not builtin test "$preflight_after_source" = "$preflight_before_source"
                 set preflight_embedded_mutation "$preflight_reserved_name"
                 break
             end
@@ -2019,17 +2079,17 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         end
         if test $caller_snapshot_compromised -ne 0
             builtin printf '%s\n' 'loader: caller-function snapshot was tampered with' >&2
-            builtin exit 125
+            exec /bin/sh -c 'exit 125'
         end
         if test -n "$caller_embedded_mutation"; or test -n "$preflight_embedded_mutation"
             set -l preflight_name "$caller_embedded_mutation"
             test -n "$preflight_name"; or set preflight_name "$preflight_embedded_mutation"
             builtin printf 'loader: embedded Fish function was mutated: %s\n' "$preflight_name" >&2
-            builtin exit 125
+            exec /bin/sh -c 'exit 125'
         end
         if test (builtin count $caller_function_mutations) -ne 0
             builtin printf 'loader: exact caller-function restoration is unavailable\n' >&2
-            builtin exit 125
+            exec /bin/sh -c 'exit 125'
         end
         # Even when the in-process snapshot is unchanged, the body may have
         # edited fish_variables directly. Verify every protected universal
@@ -2052,7 +2112,7 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         if builtin test $loader_state_changed -ne 0
             for created_function in $new_function_names
                 if builtin functions -q "$created_function"
-                    builtin functions -e "$created_function"; or builtin exit 125
+                    builtin functions -e "$created_function"; or exec /bin/sh -c 'exit 125'
                 end
             end
             # Restore the trusted source files rather than eval'ing captured
@@ -2062,18 +2122,18 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
             # defines functions named contains/test/etc.
             for reserved_name in $reserved_function_names
                 if builtin functions -q "$reserved_name"
-                    builtin functions -e "$reserved_name"; or builtin exit 125
+                    builtin functions -e "$reserved_name"; or exec /bin/sh -c 'exit 125'
                 end
             end
             # Body-controlled bootstrap globals must be absent while the
             # trusted definitions are re-sourced; otherwise the loader's
             # source-time bootstrap dispatch would recursively run a second
             # load with attacker-selected seeds.
-            if builtin set -q _sp_fish_loader_bootstrap_mode; builtin set -e _sp_fish_loader_bootstrap_mode; or builtin exit 125; end
-            if builtin set -q _sp_fish_loader_bootstrap_seeds; builtin set -e _sp_fish_loader_bootstrap_seeds; or builtin exit 125; end
-            if builtin set -q _sp_fish_loader_bootstrap_status; builtin set -e _sp_fish_loader_bootstrap_status; or builtin exit 125; end
-            builtin source "$loader_source_file" 2>/dev/null; or builtin exit 125
-            builtin source "$metadata_source_file" 2>/dev/null; or builtin exit 125
+            if builtin set -q _sp_fish_loader_bootstrap_mode; builtin set -e _sp_fish_loader_bootstrap_mode; or exec /bin/sh -c 'exit 125'; end
+            if builtin set -q _sp_fish_loader_bootstrap_seeds; builtin set -e _sp_fish_loader_bootstrap_seeds; or exec /bin/sh -c 'exit 125'; end
+            if builtin set -q _sp_fish_loader_bootstrap_status; builtin set -e _sp_fish_loader_bootstrap_status; or exec /bin/sh -c 'exit 125'; end
+            builtin source "$loader_source_file" 2>/dev/null; or exec /bin/sh -c 'exit 125'
+            builtin source "$metadata_source_file" 2>/dev/null; or exec /bin/sh -c 'exit 125'
             set -l caller_function_snapshot_index 1
             for caller_function_name in $caller_function_snapshot_names
                 set -l caller_function_snapshot "$caller_function_snapshot_copies[$caller_function_snapshot_index]"
@@ -2084,34 +2144,34 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
                 set -l caller_function_definition $caller_function_snapshot_definition_lines[$caller_function_definition_offset..$caller_function_definition_end]
                 if not _sp_fish_loader_function_definition_matches_text "$caller_function_name" $caller_function_definition
                     if builtin functions -q "$caller_function_name"
-                        builtin functions -e "$caller_function_name"; or builtin exit 125
+                        builtin functions -e "$caller_function_name"; or exec /bin/sh -c 'exit 125'
                     end
                     if not builtin functions -q "$caller_function_snapshot"; or not builtin functions --copy "$caller_function_snapshot" "$caller_function_name"; or not builtin test (builtin functions --details "$caller_function_name") = "$loader_source_file"; or not _sp_fish_loader_function_provenance_matches "$caller_function_name" $caller_function_definition
                         builtin printf 'loader: caller-function source-backed restoration failed: %s\n' "$caller_function_name" >&2
-                        builtin exit 125
+                        exec /bin/sh -c 'exit 125'
                     end
                 end
                 set caller_function_snapshot_index (builtin math $caller_function_snapshot_index + 1)
             end
             for caller_function_snapshot in $caller_function_snapshot_copies
-                builtin functions -e "$caller_function_snapshot" 2>/dev/null; or builtin exit 125
+                builtin functions -e "$caller_function_snapshot" 2>/dev/null; or exec /bin/sh -c 'exit 125'
             end
             set -l scope_index 1
             for protected_scope_name in $protected_scope_names
                 _sp_fish_loader_restore_scope "$protected_scope_name" "$scope_index" "$persistence_durable_file" "$persistence_tmp_parent"
                 if test $status -ne 0
                     builtin printf 'loader: protected-state restoration failed: %s\n' "$protected_scope_name" >&2
-                    builtin exit 125
+                    exec /bin/sh -c 'exit 125'
                 end
                 set scope_index (builtin math $scope_index + 1)
             end
             for scope_snapshot_prefix in _sp_fish_loader_scope_before_ __sp_fish_loader_scope_before_ _sp_fish_loader_scope_after_ __sp_fish_loader_scope_after_
                 for scope_snapshot_name in (builtin set --names | builtin string match -- "$scope_snapshot_prefix*")
                     if builtin set -q -g "$scope_snapshot_name"
-                        builtin set -e -g "$scope_snapshot_name"; or builtin exit 125
+                        builtin set -e -g "$scope_snapshot_name"; or exec /bin/sh -c 'exit 125'
                     end
                     if builtin set -q -U "$scope_snapshot_name"
-                        builtin set -e -U "$scope_snapshot_name"; or builtin exit 125
+                        builtin set -e -U "$scope_snapshot_name"; or exec /bin/sh -c 'exit 125'
                     end
                 end
             end
@@ -2123,7 +2183,7 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
             # Publish only the trusted operation result after restoring the
             # caller state. The bootstrap wrapper consumes and erases this
             # handshake value; it is not part of the restored module state.
-            builtin set -g _sp_fish_loader_bootstrap_status 1; or builtin exit 125
+            builtin set -g _sp_fish_loader_bootstrap_status 1; or exec /bin/sh -c 'exit 125'
             return 1
         end
         builtin set -l loader_integrity_failure ''
@@ -2138,25 +2198,25 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         end
         if builtin test -n "$loader_integrity_failure"
             builtin printf 'loader: module redefined loader function or builtin: %s\n' "$loader_integrity_failure" >&2
-            builtin exit 125
+            exec /bin/sh -c 'exit 125'
         end
         for scope_snapshot_prefix in _sp_fish_loader_scope_before_ __sp_fish_loader_scope_before_ _sp_fish_loader_scope_after_ __sp_fish_loader_scope_after_
             for scope_snapshot_name in (builtin set --names | builtin string match -- "$scope_snapshot_prefix*")
                 if builtin set -q -g "$scope_snapshot_name"
-                builtin set -e -g "$scope_snapshot_name"; or builtin exit 125
+                builtin set -e -g "$scope_snapshot_name"; or exec /bin/sh -c 'exit 125'
             end
             if builtin set -q -U "$scope_snapshot_name"
-                builtin set -e -U "$scope_snapshot_name"; or builtin exit 125
+                builtin set -e -U "$scope_snapshot_name"; or exec /bin/sh -c 'exit 125'
             end
             end
         end
         for caller_function_snapshot in $caller_function_snapshot_copies
-            builtin functions -e "$caller_function_snapshot" 2>/dev/null; or builtin exit 125
+            builtin functions -e "$caller_function_snapshot" 2>/dev/null; or exec /bin/sh -c 'exit 125'
         end
         if test $src_status -ne 0
             for created_function in $new_function_names
                 if builtin functions -q "$created_function"
-                    builtin functions -e "$created_function"; or builtin exit 125
+                    builtin functions -e "$created_function"; or exec /bin/sh -c 'exit 125'
                 end
             end
             set -a runtime_failed_modules $mod
@@ -2184,7 +2244,7 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
         if test -n "$missing_export"
             for created_function in $new_function_names
                 if builtin functions -q "$created_function"
-                    builtin functions -e "$created_function"; or builtin exit 125
+                    builtin functions -e "$created_function"; or exec /bin/sh -c 'exit 125'
                 end
             end
             set -a runtime_failed_modules $mod
@@ -2219,6 +2279,9 @@ function _sp_fish_loader_load_ordered_impl --description 'Load modules from seed
                 switch "$owned_source"
                     case '/usr/share/fish/*' '/usr/local/share/fish/*' '/opt/local/share/fish/*' '/opt/homebrew/share/fish/*' 'embedded:completions/*' 'embedded:functions/*' 'autoloaded:*'
                         continue
+                end
+                if _sp_fish_loader_is_runtime_function_source "$owned_source"
+                    continue
                 end
                 set -a _sp_fish_loader_owned_exports $owned_function
                 set -a _sp_fish_loader_owned_sources $owned_source
@@ -2261,15 +2324,15 @@ function _sp_fish_loader_init --description 'Initialize the Fish loader with sta
             set owned_source $_sp_fish_loader_owned_sources[$owned_source_index]
         end
         if test -n "$owned_source"; and builtin functions -q "$owned_export"; and builtin test (builtin functions --details "$owned_export") = "$owned_source"
-            builtin functions -e "$owned_export"; or builtin exit 125
+            builtin functions -e "$owned_export"; or exec /bin/sh -c 'exit 125'
         end
         builtin set owned_source_index (builtin math $owned_source_index + 1)
     end
-    builtin set -g _sp_fish_loader_owned_exports; or builtin exit 125
-    builtin set -g _sp_fish_loader_owned_sources; or builtin exit 125
-    builtin set -g _sp_fish_loaded_modules; or builtin exit 125
-    builtin set -g _sp_fish_module_roots; or builtin exit 125
-    builtin set -g _sp_fish_metadata_provider; or builtin exit 125
+    builtin set -g _sp_fish_loader_owned_exports; or exec /bin/sh -c 'exit 125'
+    builtin set -g _sp_fish_loader_owned_sources; or exec /bin/sh -c 'exit 125'
+    builtin set -g _sp_fish_loaded_modules; or exec /bin/sh -c 'exit 125'
+    builtin set -g _sp_fish_module_roots; or exec /bin/sh -c 'exit 125'
+    builtin set -g _sp_fish_metadata_provider; or exec /bin/sh -c 'exit 125'
 
     # Provider order is project-native, engine-native, engine-generic, then
     # project-generic. Duplicate names are validated byte-for-byte below.
@@ -2351,6 +2414,11 @@ if set -q _sp_fish_loader_bootstrap_mode
                     /opt/local/share/fish/functions/cd.fish \
                     /opt/homebrew/share/fish/functions/cd.fish
                 continue
+            end
+            if builtin test "$_sp_fish_bootstrap_path_builtin" = cd; and builtin test (builtin path basename -- "$_sp_fish_bootstrap_path_source") = cd.fish
+                if _sp_fish_loader_is_runtime_function_source "$_sp_fish_bootstrap_path_source" cd
+                    continue
+                end
             end
             builtin printf 'loader: caller shadowed critical Fish builtin: %s\n' "$_sp_fish_bootstrap_path_builtin" >&2
             builtin set _sp_fish_bootstrap_status 1

@@ -12,6 +12,9 @@
 # POSIX plans). The adapter sources the release's native Fish metadata and
 # loader, consumes the loader's bootstrap status marker, and publishes
 # VALISE_FISH_READY=1 only after a successful activation.
+# Fatal integrity failures exec a literal /bin/sh exit: Fish `exit` by itself
+# would only stop this sourced file and leave the caller running with damaged
+# state. Ordinary activation failures continue to return their status.
 
 # Readiness and the bootstrap handshake are engine-private state. A forged
 # or stale value must not survive this activation, even one that fails
@@ -37,16 +40,16 @@ set -l _valise_fish_profile_owned_index 1
 for _valise_fish_profile_owned in $_sp_fish_loader_owned_exports
     set -l _valise_fish_profile_owned_source "$_sp_fish_loader_owned_sources[$_valise_fish_profile_owned_index]"
     if builtin test -n "$_valise_fish_profile_owned_source"; and builtin functions -q -- "$_valise_fish_profile_owned"; and builtin test (builtin functions --details -- "$_valise_fish_profile_owned") = "$_valise_fish_profile_owned_source"
-        builtin functions -e -- "$_valise_fish_profile_owned"; or builtin exit 125
+        builtin functions -e -- "$_valise_fish_profile_owned"; or exec /bin/sh -c 'exit 125'
     end
     set _valise_fish_profile_owned_index (builtin math $_valise_fish_profile_owned_index + 1)
 end
 for _valise_fish_profile_stale in _sp_fish_loader_owned_exports _sp_fish_loader_owned_sources _sp_fish_loaded_modules _sp_fish_module_roots _sp_fish_metadata_provider
     if builtin set -q -g "$_valise_fish_profile_stale"; and not builtin set -e -g "$_valise_fish_profile_stale"
-        builtin exit 125
+        exec /bin/sh -c 'exit 125'
     end
     if builtin set -q -U "$_valise_fish_profile_stale"; and not builtin set -e -U "$_valise_fish_profile_stale"
-        builtin exit 125
+        exec /bin/sh -c 'exit 125'
     end
 end
 
